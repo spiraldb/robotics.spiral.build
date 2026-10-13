@@ -308,18 +308,20 @@ skips those the column holds, asks about the rest (a statement eight at a
 time; the progress service twenty across runs, its containers each taking in
 eight uploads while the GPU scores; the object tracking service eight, two
 H100 containers' worth; and retries 408s, 429s, 5xx, and timeouts with a pause),
-and holds the answers in memory; then it ingests them into a staging table,
-adds the column the first time, merges it in by `episode_id`, and drops the
-staging table. A rejected video (422) is that episode's failed answer; a
-refused token, a service on another revision or a model it can't run (409),
-a model it doesn't know (404), or an error ends the run
-once what it answered is written. Once every column is filled it checks that
+and holds the answers in memory until they reach 4 MiB, since Spiral refuses
+to change more than 16 MiB of a hosted table in one statement. Each full set,
+and the rest at the end, is written while the asking goes on: ingested into a
+staging table, the column added the first time, merged in by `episode_id`,
+and the staging table dropped. A rejected video (422) is that episode's
+failed answer; a refused token, a service on another revision or a model it
+can't run (409), a model it doesn't know (404), or an error ends the run once
+what it answered is written. Once every column is filled it checks that
 each view's statement plans (`LIMIT 0`) and stores it in the Studio SQLite
 table `curated_views`, replacing the statement its name had, so a reader sees
 the old view or the new one. Spiral keeps no hosted views, so Studio does:
 Data reads a view by running its statement, and no other client reads it by
 name. A project bundle carries none, since it carries no answers. A
-restarted backend loses the answers of the column in flight; publishing
+restarted backend loses the answers held since the last write; publishing
 again resumes past every episode already written. While a run fills a view,
 Data lists it as "In progress", says which node and how many of its episodes
 are answered, and opens it once the run is done. Unpublish forgets the view;

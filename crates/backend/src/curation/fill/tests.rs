@@ -140,6 +140,34 @@ async fn object_tracking_is_admitted_only_with_its_own_service() {
     assert!(fills.admit(request()).is_ok());
 }
 
+#[test]
+fn answers_go_to_the_writer_each_time_they_fill_one_write_and_the_rest_at_the_end() {
+    let (writer, mut sets) = mpsc::unbounded_channel();
+    let mut held = HeldAnswers::new(writer);
+    // One episode's scores of 1 MiB: four fill a write.
+    let scores = || {
+        EpisodeAnswer::listing(Arc::new(arrow_array::Float32Array::from(vec![
+            0.5;
+            256 * 1024
+        ])))
+    };
+    for ordinal in 0..5u32 {
+        held.hold(
+            EpisodeId::try_from(format!("{ordinal:032x}")).unwrap(),
+            scores(),
+        );
+    }
+    assert!(sets.try_recv().is_ok(), "four answers fill the first write");
+    assert!(sets.try_recv().is_err(), "the fifth waits for more");
+    assert_eq!(held.answered(), 5);
+    held.finish();
+    assert!(sets.try_recv().is_ok(), "the rest is written at the end");
+    assert!(matches!(
+        sets.try_recv(),
+        Err(mpsc::error::TryRecvError::Disconnected)
+    ));
+}
+
 /// Poll run `id` until it settles.
 async fn settled(fills: &FillRuns, id: &str) -> FillStatus {
     for _ in 0..1_200 {

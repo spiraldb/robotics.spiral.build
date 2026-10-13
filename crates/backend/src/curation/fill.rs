@@ -5,13 +5,14 @@
 //! A run works through its columns in the order the browser compiled them,
 //! so every column is filled before a later one reads it to find the
 //! episodes that reach its node. For each, it asks about the episodes the
-//! column does not hold yet, a few at a time, holds the answers in memory,
-//! and writes them in one go; a failed answer is written too, so it is never
-//! asked again. Once every column is written it creates or replaces its
-//! views. Stop starts nothing more; what is in flight lands and is written.
-//! An error does the same, then ends the run. A run lives in memory: a
-//! restarted backend loses the answers of the column in flight, and
-//! publishing again resumes past every episode already written.
+//! column does not hold yet, a few at a time, and holds the answers in
+//! memory until they fill one write, which is written while it asks on; a
+//! failed answer is written too, so it is never asked again. Once every
+//! column is written it creates or replaces its views. Stop starts nothing
+//! more; what is in flight lands and is written. An error does the same,
+//! then ends the run. A run lives in memory: a restarted backend loses the
+//! answers held since the last write, and publishing again resumes past
+//! every episode already written.
 use super::object_tracking::ObjectTrackingService;
 use super::progress_service::ProgressService;
 use super::video_service::{VideoAnswer, VideoQuestion};
@@ -20,17 +21,19 @@ use crate::held_runs::{ABANDONED_AFTER, HeldRuns, HeldWork};
 use crate::sync::MutexRecovery;
 use futures_util::StreamExt as _;
 use spiral_robotics_common::curation::{
-    AnswerSource, AnswerTable, ColumnFill, EpisodeFailure, FillEpisodes, FillRequest, FillState,
-    FillStatus, FillStep, ViewName,
+    AnswerColumn, AnswerSource, AnswerTable, ColumnFill, EpisodeFailure, FillEpisodes, FillRequest,
+    FillState, FillStatus, FillStep, ViewName,
 };
 use spiral_robotics_common::datasets::{CameraVideo, EpisodeId, EpisodeSelection};
 use spiral_robotics_common::relations::EpisodeQueryRequest;
 use spiral_robotics_common::sql::{ReadOnlyQuery, ReadOnlyQueryMode};
-use spiral_robotics_storage::answers::{ColumnAnswers, EpisodeAnswer, StatementAnswers};
+use spiral_robotics_storage::answers::{
+    ColumnAnswers, DatasetAnswers, EpisodeAnswer, StatementAnswers,
+};
 use spiral_robotics_storage::{ProviderKeys, StorageManager};
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, mpsc};
 use tokio::time::Instant;
 
 /// How many episodes a statement column asks Spiral about at once.
@@ -197,6 +200,51 @@ struct Answered {
     failure: Option<String>,
 }
 
+/// The answers a column's asking holds until they fill one write, each full
+/// set handed to the writer, and how many it has answered.
+struct HeldAnswers {
+    held: ColumnAnswers,
+    answered: usize,
+    writer: mpsc::UnboundedSender<ColumnAnswers>,
+}
+
+impl HeldAnswers {
+    fn new(writer: mpsc::UnboundedSender<ColumnAnswers>) -> Self {
+        Self {
+            held: ColumnAnswers::default(),
+            answered: 0,
+            writer,
+        }
+    }
+
+    /// Hold `episode`'s answer, and hand what is held to the writer once it
+    /// fills one write.
+    fn hold(&mut self, episode: EpisodeId, answer: EpisodeAnswer) {
+        self.held.hold(episode, answer);
+        self.answered += 1;
+        if self.held.is_full() {
+            self.hand_over();
+        }
+    }
+
+    /// How many episodes it has answered, written or not.
+    fn answered(&self) -> usize {
+        self.answered
+    }
+
+    /// Hand the rest to the writer, and let go of it, so it stops once that
+    /// is written.
+    fn finish(mut self) {
+        self.hand_over();
+    }
+
+    fn hand_over(&mut self) {
+        let set = std::mem::take(&mut self.held);
+        // The writer takes sets until every sender is gone, so it is there.
+        let _ = self.writer.send(set);
+    }
+}
+
 impl FillWork {
     /// How many of a column's episodes `source` is asked about at once.
     fn in_flight(source: &AnswerSource) -> usize {
@@ -351,7 +399,9 @@ impl FillRun {
     }
 
     /// Answer every episode `column` is filled for that it does not hold yet,
-    /// and write what was answered, even when the run stops or fails part way.
+    /// and write what was answered, even when the run stops or fails part
+    /// way. Each write waits for every Spiral read of the project to end, so
+    /// it runs beside the asking, which keeps the reads in flight moving.
     async fn fill_column(&self, column: &ColumnFill, work: &FillWork) -> Result<(), String> {
         let node = column.node();
         self.report(FillStep::new(node, 0, None));
@@ -373,19 +423,43 @@ impl FillRun {
             .collect::<Vec<_>>();
         let total = needed.len();
         self.report(FillStep::new(node, 0, Some(total)));
-        let mut held = ColumnAnswers::default();
-        let failed = match column.source() {
-            AnswerSource::DatasetStatement { statement } => self
-                .answer_at_once(node, statement, needed, work, &mut held)
-                .await
-                .err(),
-            source => {
-                self.answer_each(node, source, needed, work, &mut held)
+        let (writer, sets) = mpsc::unbounded_channel();
+        let asking = async {
+            let mut held = HeldAnswers::new(writer);
+            let failed = match column.source() {
+                AnswerSource::DatasetStatement { statement } => self
+                    .answer_at_once(node, statement, needed, work, &mut held)
                     .await
-            }
+                    .err(),
+                source => {
+                    self.answer_each(node, source, needed, work, &mut held)
+                        .await
+                }
+            };
+            held.finish();
+            failed
         };
-        answers.write(column.column(), held).await?;
-        failed.map_or(Ok(()), Err)
+        let (failed, unwritten) =
+            tokio::join!(asking, self.write_each(&answers, column.column(), sets));
+        unwritten.or(failed).map_or(Ok(()), Err)
+    }
+
+    /// Write each set of answers handed over, in order, until the asking
+    /// lets go; the first write that failed, which halts the run.
+    async fn write_each(
+        &self,
+        answers: &DatasetAnswers<'_>,
+        column: &AnswerColumn,
+        mut sets: mpsc::UnboundedReceiver<ColumnAnswers>,
+    ) -> Option<String> {
+        let mut failed = None::<String>;
+        while let Some(set) = sets.recv().await {
+            if let Err(reason) = answers.write(column, set).await {
+                self.progress.recover_lock().halted = true;
+                failed.get_or_insert(reason);
+            }
+        }
+        failed
     }
 
     /// Answer `needed` with one read of `statement` over the whole dataset.
@@ -397,7 +471,7 @@ impl FillRun {
         statement: &str,
         needed: Vec<EpisodeId>,
         work: &FillWork,
-        held: &mut ColumnAnswers,
+        held: &mut HeldAnswers,
     ) -> Result<(), String> {
         if needed.is_empty() {
             return Ok(());
@@ -409,7 +483,7 @@ impl FillRun {
             let answer = answered.answer(&episode);
             held.hold(episode, answer);
         }
-        self.report(FillStep::new(node, held.len(), Some(total)));
+        self.report(FillStep::new(node, held.answered(), Some(total)));
         Ok(())
     }
 
@@ -421,7 +495,7 @@ impl FillRun {
         source: &AnswerSource,
         needed: Vec<EpisodeId>,
         work: &FillWork,
-        held: &mut ColumnAnswers,
+        held: &mut HeldAnswers,
     ) -> Option<String> {
         let total = needed.len();
         let mut failed = None::<String>;
@@ -443,7 +517,7 @@ impl FillRun {
                     }
                     held.hold(episode, answer);
                     progress.state =
-                        FillState::Running(FillStep::new(node, held.len(), Some(total)));
+                        FillState::Running(FillStep::new(node, held.answered(), Some(total)));
                 }
                 Err(reason) => {
                     self.progress.recover_lock().halted = true;

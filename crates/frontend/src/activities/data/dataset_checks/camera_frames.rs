@@ -3,10 +3,10 @@
 //! longest gap, and the frames logged late and caught up on — a long gap
 //! followed by a short one, which drops no frame. Each episode's cell keeps,
 //! for every camera, its frames, span and longest gap, and its own usual
-//! interval, which its late frames are judged against; the camera's usual
-//! interval, which missing frames are counted at, is read over every cell.
-use super::check_columns::{CheckCells, CheckColumn, CheckKind, PartsStatement};
-use super::recording_rate::Median;
+//! interval, which its late frames are judged against. The report judges
+//! them in Spiral: the camera's usual interval — the median of its episodes'
+//! own — the frames missing at it, and the episodes that miss the most.
+use super::check_columns::{CheckColumn, CheckKind, CheckTable, PartsStatement};
 use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, StreamName, Verdict};
 use super::stream_reads::CheckedStreams;
 use dioxus::prelude::*;
@@ -18,44 +18,52 @@ pub(super) struct CameraFrames {
     cameras: Vec<CameraGaps>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+/// One camera's frames over every episode, as the judgment answers them.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 struct CameraGaps {
+    #[serde(rename = "part")]
     topic: String,
-    /// The camera's usual frame interval: the median of its episodes' own.
-    period_ns: f64,
-    episodes: Vec<EpisodeFrames>,
-}
-
-/// One camera's frames in one episode.
-#[derive(Clone, Debug, PartialEq)]
-struct EpisodeFrames {
-    episode: EpisodeId,
-    timing: FrameTiming,
-}
-
-/// How one camera logged its frames in one episode.
-#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
-struct FrameTiming {
-    frames: u64,
-    span_ns: u64,
-    /// The longest gap between two frames; none when the camera logged
-    /// one frame.
-    worst_gap_ns: Option<u64>,
-    /// Seconds into the episode where the longest gap ends.
-    worst_at: Option<f64>,
-    /// Frames logged late and caught up on, at the episode's own interval.
-    late: u64,
-    /// The episode's own usual frame interval: the median gap between its
-    /// frames; none when the camera logged one frame.
+    /// The camera's usual frame interval: the median of its episodes' own,
+    /// each episode weighing alike, however many frames it logged; none
+    /// until an episode logs two frames.
     period_ns: Option<f64>,
+    #[serde(flatten)]
+    counts: FrameCounts,
+    /// Frames logged late and caught up on, at each episode's own interval.
+    late: u64,
+    /// The episode with the camera's longest gap; none when every episode
+    /// logged one frame.
+    longest: Option<LongestGap>,
+    /// Episodes missing more than the flagged share of their frames; none
+    /// when no episode does.
+    flagged: Option<Vec<MissingFrames>>,
 }
 
-/// One camera's frames in one episode, as its cell keeps them.
-#[derive(Deserialize)]
-pub(super) struct FramesPart {
-    part: String,
-    #[serde(flatten)]
-    timing: FrameTiming,
+/// Whole frames missing, and frames expected, at a camera's usual interval.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize)]
+struct FrameCounts {
+    missing: f64,
+    expected: f64,
+}
+
+/// The longest gap between two of a camera's frames, and the episode and
+/// the seconds into it where the gap ends.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+struct LongestGap {
+    #[serde(rename = "episode_id")]
+    episode: EpisodeId,
+    gap_ns: u64,
+    at: Option<f64>,
+}
+
+/// An episode missing more than the flagged share of a camera's frames, and
+/// the seconds into it where its longest gap ends.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+struct MissingFrames {
+    #[serde(rename = "episode_id")]
+    episode: EpisodeId,
+    share: f64,
+    at: Option<f64>,
 }
 
 impl CameraFrames {
@@ -86,16 +94,67 @@ impl CameraFrames {
         CheckColumn::of(CheckKind::Frames, parts)
     }
 
-    /// Every camera's frames in each episode its `cells` measured.
-    pub(super) fn read(streams: CheckedStreams<'_>, cells: &CheckCells<FramesPart>) -> Self {
-        Self {
-            cameras: streams
-                .topics()
-                .iter()
-                .filter(|topic| topic.is_video())
-                .map(|camera| CameraGaps::read(camera.name(), cells))
-                .collect(),
-        }
+    /// Every camera's frames over its episodes, judged in Spiral over the
+    /// column among `columns` that `table` holds.
+    pub(super) async fn judge(
+        table: &CheckTable,
+        columns: &[CheckColumn],
+        streams: CheckedStreams<'_>,
+    ) -> Result<Self, String> {
+        let judged = match table.parts(columns, CheckKind::Frames) {
+            Some(parts) => table.rows(Self::judgment(&parts)).await?,
+            None => Vec::new(),
+        };
+        Ok(Self::of(streams, judged))
+    }
+
+    /// The judgment over `parts`, every episode's frames: per camera, its
+    /// usual interval, the frames missing and expected at it over every
+    /// episode — an episode expects a frame per interval of its span, and
+    /// one more — its late frames, the episode with its longest gap, and the
+    /// episodes missing more than the flagged share of their frames.
+    fn judgment(parts: &str) -> String {
+        format!(
+            "WITH f AS (SELECT episode_id, part, CAST(frames AS DOUBLE) AS frames, CAST(span_ns AS DOUBLE) AS span_ns, \
+               worst_gap_ns, worst_at, late, period_ns FROM {parts} p), \
+             t AS (SELECT part, spql.agg.approx_quantile(period_ns, 0.5) AS period_ns FROM f GROUP BY part), \
+             e AS (SELECT f.episode_id AS episode_id, f.part AS part, f.frames AS frames, f.worst_gap_ns AS worst_gap_ns, f.worst_at AS worst_at, f.late AS late, \
+               CASE WHEN t.period_ns > 0 THEN f.span_ns / t.period_ns + 1 ELSE f.frames END AS expected FROM f JOIN t ON t.part = f.part), \
+             m AS (SELECT episode_id, part, worst_gap_ns, worst_at, late, expected, greatest(round(expected - frames), 0) AS missing FROM e), \
+             s AS (SELECT part, sum(missing) AS missing, sum(expected) AS expected, sum(late) AS late FROM m GROUP BY part), \
+             g AS (SELECT part, episode_id, worst_gap_ns, worst_at, ROW_NUMBER() OVER (PARTITION BY part ORDER BY worst_gap_ns DESC) AS gap_rank \
+               FROM m WHERE worst_gap_ns IS NOT NULL), \
+             w AS (SELECT part, STRUCT_PACK(episode_id := episode_id, gap_ns := worst_gap_ns, at := worst_at) AS longest FROM g WHERE gap_rank = 1), \
+             d AS (SELECT part, spql.list.collect(STRUCT_PACK(episode_id := episode_id, share := missing / expected, at := worst_at)) AS flagged \
+               FROM m WHERE missing / expected > {missing} GROUP BY part) \
+             SELECT t.part AS part, t.period_ns AS period_ns, s.missing AS missing, s.expected AS expected, s.late AS late, \
+               w.longest AS longest, d.flagged AS flagged \
+             FROM t JOIN s ON s.part = t.part LEFT JOIN w ON w.part = t.part LEFT JOIN d ON d.part = t.part",
+            missing = Self::MISSING,
+        )
+    }
+
+    /// Every camera `streams` declares, as `judged` says it logged its
+    /// frames; a camera the judgment does not name has no frames measured.
+    fn of(streams: CheckedStreams<'_>, judged: Vec<CameraGaps>) -> Self {
+        let cameras = streams
+            .topics()
+            .iter()
+            .filter(|topic| topic.is_video())
+            .map(|camera| {
+                let mut gaps = judged
+                    .iter()
+                    .find(|gaps| gaps.topic == camera.name())
+                    .cloned()
+                    .unwrap_or_else(|| CameraGaps::unmeasured(camera.name()));
+                // Most missing first.
+                if let Some(flagged) = &mut gaps.flagged {
+                    flagged.sort_by(|left, right| right.share.total_cmp(&left.share));
+                }
+                gaps
+            })
+            .collect();
+        Self { cameras }
     }
 
     /// The usual frame interval of `camera`, once measured.
@@ -103,7 +162,7 @@ impl CameraFrames {
         self.cameras
             .iter()
             .find(|gaps| gaps.topic == camera)
-            .map(|gaps| gaps.period_ns)
+            .and_then(|gaps| gaps.period_ns)
             .filter(|period| *period > 0.0)
     }
 
@@ -133,44 +192,33 @@ impl CameraFrames {
     }
 
     pub(super) fn row(&self) -> CheckRow {
-        let (missing, expected) = self
+        let counts = self
             .cameras
             .iter()
-            .flat_map(|camera| {
-                camera
-                    .episodes
-                    .iter()
-                    .map(|episode| episode.timing.counts(camera.period_ns))
-            })
-            .fold((0.0, 0.0), |(missing, expected), (m, e)| {
-                (missing + m, expected + e)
-            });
+            .map(|camera| camera.counts)
+            .fold(FrameCounts::default(), FrameCounts::with);
         let worst = self
             .cameras
             .iter()
-            .flat_map(|camera| camera.episodes.iter())
-            .filter_map(|episode| episode.timing.worst_gap_ns)
+            .filter_map(|camera| camera.longest.as_ref())
+            .map(|longest| longest.gap_ns)
             .max()
             .unwrap_or_default();
         let flagged = self
             .cameras
             .iter()
             .flat_map(CameraGaps::flagged)
-            .map(|(episode, _)| &episode.episode)
+            .map(|episode| &episode.episode)
             .collect::<std::collections::BTreeSet<_>>()
             .len();
-        let share = if expected > 0.0 {
-            missing / expected
-        } else {
-            0.0
-        };
         let longest = format!("{:.0} ms", worst as f64 / 1e6);
         let finding = if self.cameras.is_empty() {
             Finding::why("No camera recorded")
-        } else if missing == 0.0 {
+        } else if counts.missing == 0.0 {
             Finding::of_count(0, "frame", "missing,").and(longest, "longest gap")
         } else {
-            Finding::of(Percent::of(share), "of frames missing,").and(longest, "longest gap")
+            Finding::of(Percent::of(counts.share()), "of frames missing,")
+                .and(longest, "longest gap")
         };
         let verdict = match (self.cameras.is_empty(), flagged) {
             (true, _) => Verdict::Unavailable,
@@ -181,15 +229,8 @@ impl CameraFrames {
         let flagged_evidence = self
             .cameras
             .iter()
-            .flat_map(|camera| {
-                camera.flagged().into_iter().map(|(episode, share)| {
-                    Evidence::at(
-                        episode.episode.clone(),
-                        episode.timing.worst_at,
-                        Percent::of(share),
-                    )
-                })
-            })
+            .flat_map(CameraGaps::flagged)
+            .map(MissingFrames::evidence)
             .collect::<Vec<_>>();
         CheckRow::new("Camera frames", verdict, finding).flagging(flagged_evidence).with_details(rsx! {
             table { class: "data-ledger data-checks-table", "aria-label": "Camera frames",
@@ -202,15 +243,11 @@ impl CameraFrames {
                     for camera in cameras {
                         tr { key: "{camera.topic}",
                             td { StreamName { topic: camera.topic.clone(), camera: true } }
-                            td { class: "is-number", "{camera.period_ns / 1e6:.1} ms" }
-                            td { class: "is-number", "{Percent::of(camera.missing_share())}" }
-                            td { class: "is-number", "{camera.late()}" }
-                            td { EvidenceChips { evidence: camera.longest().into_iter().collect::<Vec<_>>() } }
-                            td {
-                                EvidenceChips {
-                                    evidence: camera.flagged().into_iter().map(|(episode, share)| Evidence::at(episode.episode.clone(), episode.timing.worst_at, Percent::of(share))).collect::<Vec<_>>(),
-                                }
-                            }
+                            td { class: "is-number", "{camera.period_ns.unwrap_or_default() / 1e6:.1} ms" }
+                            td { class: "is-number", "{Percent::of(camera.counts.share())}" }
+                            td { class: "is-number", "{camera.late}" }
+                            td { EvidenceChips { evidence: camera.longest.iter().map(LongestGap::evidence).collect::<Vec<_>>() } }
+                            td { EvidenceChips { evidence: camera.flagged().map(MissingFrames::evidence).collect::<Vec<_>>() } }
                         }
                     }
                 }
@@ -223,94 +260,57 @@ impl CameraFrames {
 }
 
 impl CameraGaps {
-    /// `camera`'s frames in each episode `cells` measured it, at the median
-    /// of those episodes' own usual intervals: every episode weighs alike,
-    /// however many frames it logged.
-    fn read(camera: &str, cells: &CheckCells<FramesPart>) -> Self {
-        let episodes = cells
-            .parts()
-            .filter(|(_, part)| part.part == camera)
-            .map(|(episode, part)| EpisodeFrames {
-                episode: episode.clone(),
-                timing: part.timing,
-            })
-            .collect::<Vec<_>>();
+    /// `camera`, which no episode's cell measured.
+    fn unmeasured(camera: &str) -> Self {
         Self {
             topic: camera.to_owned(),
-            period_ns: Median::of(
-                episodes
-                    .iter()
-                    .filter_map(|episode| episode.timing.period_ns),
-            )
-            .unwrap_or_default(),
-            episodes,
+            period_ns: None,
+            counts: FrameCounts::default(),
+            late: 0,
+            longest: None,
+            flagged: None,
         }
     }
-    fn missing_share(&self) -> f64 {
-        let (missing, expected) = self
-            .episodes
-            .iter()
-            .map(|episode| episode.timing.counts(self.period_ns))
-            .fold((0.0, 0.0), |(missing, expected), (m, e)| {
-                (missing + m, expected + e)
-            });
-        if expected > 0.0 {
-            missing / expected
+    /// Episodes missing more than the flagged share of their frames, most
+    /// missing first.
+    fn flagged(&self) -> impl Iterator<Item = &MissingFrames> {
+        self.flagged.iter().flatten()
+    }
+}
+
+impl FrameCounts {
+    /// These counts and `other`'s together.
+    fn with(self, other: Self) -> Self {
+        Self {
+            missing: self.missing + other.missing,
+            expected: self.expected + other.expected,
+        }
+    }
+    /// The share of the frames expected that are missing.
+    fn share(self) -> f64 {
+        if self.expected > 0.0 {
+            self.missing / self.expected
         } else {
             0.0
         }
     }
-    fn late(&self) -> u64 {
-        self.episodes
-            .iter()
-            .map(|episode| episode.timing.late)
-            .sum()
-    }
-    /// The episode with the camera's longest gap, opened where it ends.
-    fn longest(&self) -> Option<Evidence> {
-        let (episode, worst_gap_ns) = self
-            .episodes
-            .iter()
-            .filter_map(|episode| Some((episode, episode.timing.worst_gap_ns?)))
-            .max_by_key(|(_, worst_gap_ns)| *worst_gap_ns)?;
-        Some(Evidence::at(
-            episode.episode.clone(),
-            episode.timing.worst_at,
-            format!("{:.0} ms", worst_gap_ns as f64 / 1e6),
-        ))
-    }
-    /// Episodes missing more than the flagged share of their frames, most
-    /// missing first.
-    fn flagged(&self) -> Vec<(&EpisodeFrames, f64)> {
-        let mut flagged = self
-            .episodes
-            .iter()
-            .map(|episode| {
-                let (missing, expected) = episode.timing.counts(self.period_ns);
-                (
-                    episode,
-                    if expected > 0.0 {
-                        missing / expected
-                    } else {
-                        0.0
-                    },
-                )
-            })
-            .filter(|(_, share)| *share > CameraFrames::MISSING)
-            .collect::<Vec<_>>();
-        flagged.sort_by(|left, right| right.1.total_cmp(&left.1));
-        flagged
+}
+
+impl LongestGap {
+    /// The episode, opened where the gap ends.
+    fn evidence(&self) -> Evidence {
+        Evidence::at(
+            self.episode.clone(),
+            self.at,
+            format!("{:.0} ms", self.gap_ns as f64 / 1e6),
+        )
     }
 }
 
-impl FrameTiming {
-    /// Whole frames missing, and frames expected, at interval `period_ns`.
-    fn counts(&self, period_ns: f64) -> (f64, f64) {
-        if period_ns <= 0.0 {
-            return (0.0, self.frames as f64);
-        }
-        let expected = self.span_ns as f64 / period_ns + 1.0;
-        ((expected - self.frames as f64).round().max(0.0), expected)
+impl MissingFrames {
+    /// The episode, opened where its longest gap ends.
+    fn evidence(&self) -> Evidence {
+        Evidence::at(self.episode.clone(), self.at, Percent::of(self.share))
     }
 }
 
@@ -341,40 +341,42 @@ mod tests {
         EpisodeId::try_from(format!("{ordinal:032x}")).unwrap()
     }
 
-    fn timing(frames: u64, span_ns: u64, period_ns: f64) -> FrameTiming {
-        FrameTiming {
-            frames,
-            span_ns,
-            worst_gap_ns: Some(133_900_000),
-            worst_at: Some(12.5),
-            late: 3,
-            period_ns: Some(period_ns),
-        }
+    #[test]
+    fn the_judgment_counts_missing_frames_at_each_cameras_median_interval_in_spiral() {
+        let sql = CameraFrames::judgment("(parts)");
+        assert!(sql.contains("FROM (parts) p"), "{sql}");
+        assert!(
+            sql.contains(
+                "spql.agg.approx_quantile(period_ns, 0.5) AS period_ns FROM f GROUP BY part"
+            ),
+            "{sql}"
+        );
+        // A camera without an interval expects the frames it logged.
+        assert!(
+            sql.contains("CASE WHEN t.period_ns > 0 THEN f.span_ns / t.period_ns + 1 ELSE f.frames END AS expected"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("greatest(round(expected - frames), 0) AS missing"),
+            "{sql}"
+        );
+        // An episode that logged one frame has no gap to be the longest.
+        assert!(
+            sql.contains("FROM m WHERE worst_gap_ns IS NOT NULL"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("WHERE missing / expected > 0.01 GROUP BY part"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("LEFT JOIN w ON w.part = t.part LEFT JOIN d ON d.part = t.part"),
+            "{sql}"
+        );
     }
 
     #[test]
-    fn frames_count_against_the_span_at_the_usual_interval() {
-        let episode = EpisodeFrames {
-            episode: episode(1),
-            timing: timing(2_980, 99_966_000_000, 33_390_000.0),
-        };
-        let (missing, expected) = episode.timing.counts(33_390_000.0);
-        assert!((expected - 2_994.9).abs() < 0.1);
-        assert_eq!(missing, 15.0);
-        let camera = CameraGaps {
-            topic: "/top-camera".into(),
-            period_ns: 33_390_000.0,
-            episodes: vec![episode],
-        };
-        assert_eq!(Percent::of(camera.missing_share()), "0.5%");
-        assert!(camera.flagged().is_empty());
-        assert_eq!(camera.late(), 3);
-        assert_eq!(Percent::of(0.0), "0%");
-        assert_eq!(Percent::of(0.018), "1.8%");
-    }
-
-    #[test]
-    fn each_camera_is_a_part_and_its_interval_the_median_of_its_episodes() {
+    fn each_camera_is_a_part_and_reads_as_its_judgment_answers() {
         let dataset = DatasetSelection::new(vec!["dataset_folding".into()]).unwrap();
         let video = || vec!["foxglove.CompressedVideo".to_owned()];
         let topics = [
@@ -401,21 +403,43 @@ mod tests {
                 .is_none()
         );
 
-        let part = |frames, period_ns| FramesPart {
-            part: "/top-camera".into(),
-            timing: timing(frames, 9_900_000_000, period_ns),
-        };
-        let cells = CheckCells::fixture(vec![
-            (episode(1), vec![part(301, 33.0e6)]),
-            (episode(2), vec![part(300, 34.0e6)]),
-            (episode(3), vec![part(250, 40.0e6)]),
-        ]);
-        let frames = CameraFrames::read(streams, &cells);
+        let judged: Vec<CameraGaps> = serde_json::from_value(serde_json::json!([{
+            "part": "/top-camera", "period_ns": 33.39e6, "missing": 15.0, "expected": 2_994.9, "late": 3,
+            "longest": {"episode_id": episode(2).to_string(), "gap_ns": 133_900_000, "at": 12.5},
+            "flagged": [
+                {"episode_id": episode(1).to_string(), "share": 0.012, "at": 3.0},
+                {"episode_id": episode(3).to_string(), "share": 0.018, "at": null}
+            ]
+        }]))
+        .unwrap();
+        let frames = CameraFrames::of(streams, judged);
         assert_eq!(frames.cameras.len(), 2);
-        assert_eq!(frames.period_ns("/top-camera"), Some(34.0e6));
-        assert_eq!(frames.cameras[0].episodes.len(), 3);
-        // A camera no cell measured has no interval.
+        assert_eq!(frames.period_ns("/top-camera"), Some(33.39e6));
+        let top = &frames.cameras[0];
+        assert_eq!(Percent::of(top.counts.share()), "0.5%");
+        assert_eq!(top.longest.as_ref().unwrap().evidence().measure(), "134 ms");
+        // Most missing first.
+        assert_eq!(
+            top.flagged()
+                .map(|episode| episode.share)
+                .collect::<Vec<_>>(),
+            [0.018, 0.012]
+        );
+        // A camera no cell measured has no interval and nothing flagged.
         assert_eq!(frames.period_ns("/wrist-camera"), None);
-        assert!(frames.cameras[1].episodes.is_empty());
+        assert_eq!(frames.cameras[1].flagged().count(), 0);
+        // A camera whose every episode logged one frame has no longest gap,
+        // and one no episode misses frames of, no flagged list.
+        let quiet: Vec<CameraGaps> = serde_json::from_value(serde_json::json!([{
+            "part": "/top-camera", "period_ns": null, "missing": 0.0, "expected": 3.0, "late": 0,
+            "longest": null, "flagged": null
+        }]))
+        .unwrap();
+        let quiet = CameraFrames::of(streams, quiet);
+        assert_eq!(quiet.period_ns("/top-camera"), None);
+        assert!(quiet.cameras[0].longest.is_none());
+        assert_eq!(quiet.cameras[0].flagged().count(), 0);
+        assert_eq!(Percent::of(0.0), "0%");
+        assert_eq!(Percent::of(0.018), "1.8%");
     }
 }

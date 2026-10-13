@@ -32,7 +32,7 @@ use crate::activities::episode::{Episode, EpisodeListing, EpisodeRows, SourceLab
 use crate::client::CommandError;
 use crate::components::scoped_task::ScopedTask;
 use camera_frames::CameraFrames;
-use check_columns::{CheckColumn, CheckKind, CheckRows};
+use check_columns::{CheckColumn, CheckTable};
 use clock_offset::ClockOffset;
 use dioxus::dioxus_core::{ScopeId, current_scope_id};
 use dioxus::prelude::*;
@@ -89,41 +89,52 @@ struct ArmChecks {
 }
 
 impl CheckedDataset {
-    /// The findings `rows` hold in `columns`, the columns `inputs` name,
-    /// which a run has filled.
-    fn read(
+    /// The findings `table` holds in `columns`, the columns `inputs` name,
+    /// which a run has filled, each check judged in Spiral.
+    async fn judge(
         inputs: &CheckInputs,
         roles: &DatasetJointRoles,
         columns: &[CheckColumn],
-        rows: &CheckRows,
+        table: &CheckTable,
     ) -> Result<Self, String> {
+        use futures_util::future::{try_join, try_join3};
         let streams = inputs.streams();
-        let (rates, timings) =
-            RecordingRate::read(streams, &rows.cells(columns, CheckKind::Rates)?);
-        let frames = CameraFrames::read(streams, &rows.cells(columns, CheckKind::Frames)?);
-        let clock = ClockOffset::read(
-            streams,
-            &timings,
-            &frames,
-            &rows.cells(columns, CheckKind::Clock)?,
-        );
+        let (rates, frames) = try_join(
+            RecordingRate::judge(table, columns, streams),
+            CameraFrames::judge(table, columns, streams),
+        )
+        .await?;
+        let clock = ClockOffset::judge(table, columns, streams, &frames).await?;
         let arms = roles.arms();
         let joints = if arms.is_empty() {
             JointChecks::Unidentified
         } else {
             let robot = inputs.robot.as_ref();
+            let ((lag, limits, spikes), (pauses, stuck, grippers)) = try_join(
+                try_join3(
+                    StateActionLag::judge(table, columns, arms),
+                    JointLimits::judge(table, columns, arms, robot),
+                    JointSpikes::judge(table, columns, arms),
+                ),
+                try_join3(
+                    Pauses::judge(table, columns, arms),
+                    StuckJoints::judge(table, columns, arms),
+                    GripperCloses::judge(table, columns, arms),
+                ),
+            )
+            .await?;
             JointChecks::Checked(Box::new(ArmChecks {
                 roles: roles.clone(),
-                lag: StateActionLag::read(arms, &rows.cells(columns, CheckKind::Lag)?),
-                limits: JointLimits::read(arms, robot, &rows.cells(columns, CheckKind::Limits)?)?,
-                spikes: JointSpikes::read(arms, &rows.cells(columns, CheckKind::Spikes)?),
-                pauses: Pauses::read(arms, &rows.cells(columns, CheckKind::Pauses)?),
-                stuck: StuckJoints::read(arms, &rows.cells(columns, CheckKind::Stuck)?),
-                grippers: GripperCloses::read(arms, &rows.cells(columns, CheckKind::Grippers)?),
+                lag,
+                limits,
+                spikes,
+                pauses,
+                stuck,
+                grippers,
             }))
         };
         Ok(Self {
-            episodes: rows.episodes() as u64,
+            episodes: table.episodes(),
             rates,
             frames,
             clock,
@@ -239,7 +250,7 @@ enum CheckReading {
     /// ones appended since.
     Read {
         report: Rc<CheckedDataset>,
-        unchecked: usize,
+        unchecked: u64,
     },
 }
 
@@ -380,13 +391,13 @@ impl CheckRun {
             return Ok(CheckReading::NotRun);
         };
         let columns = inputs.columns()?;
-        let rows = CheckRows::read(&self.client, &self.dataset, &columns).await?;
-        if !columns.iter().all(|column| rows.holds(column)) {
+        let table = CheckTable::read(&self.client, &self.dataset, &columns).await?;
+        if !columns.iter().all(|column| table.holds(column)) {
             return Ok(CheckReading::NotRun);
         }
         Ok(CheckReading::Read {
-            report: Rc::new(CheckedDataset::read(inputs, roles, &columns, &rows)?),
-            unchecked: rows.unchecked(&columns),
+            report: Rc::new(CheckedDataset::judge(inputs, roles, &columns, &table).await?),
+            unchecked: table.unchecked(),
         })
     }
 

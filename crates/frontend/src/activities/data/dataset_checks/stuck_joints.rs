@@ -1,16 +1,17 @@
 //! Stuck joints: samples where every measured joint of an arm holds exactly
 //! still while one of its commands moves more than 0.01 rad — an arm that
 //! did not follow, or a position stream that stopped updating. Each
-//! episode's cell keeps every commanded arm's stuck samples; whether its
-//! commands and positions were logged together is judged when the report
-//! is read.
-use super::check_columns::{CheckCells, CheckColumn, CheckKind, PartsStatement};
+//! episode's cell keeps every commanded arm's stuck samples; the report
+//! judges them in Spiral, over the episodes whose commands and positions
+//! were logged together.
+use super::check_columns::{CheckColumn, CheckKind, CheckTable, PartsStatement};
 use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, Plural, Verdict};
 use super::state_action_lag::Pairing;
 use super::stream_reads::{CheckedStreams, Greatest, PairedColumns};
 use dioxus::prelude::*;
 use serde::Deserialize;
 use spiral_robotics_common::datasets::{ArmRoles, EpisodeId};
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct StuckJoints {
@@ -20,30 +21,27 @@ pub(super) struct StuckJoints {
 #[derive(Clone, Debug, PartialEq)]
 struct ArmStuck {
     arm: String,
-    episodes: Vec<EpisodeStuck>,
-    unpaired: Vec<EpisodeId>,
+    /// The most stuck samples in any one episode.
+    most: u64,
+    /// The episodes stuck longer than the flagged time.
+    flagged: Vec<EpisodeStuck>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 struct EpisodeStuck {
+    #[serde(rename = "episode_id")]
     episode: EpisodeId,
-    samples: u64,
     stuck_s: f64,
     /// Seconds into the episode of its first stuck sample.
     first_at: Option<f64>,
 }
 
-/// One commanded arm in one episode, as its cell keeps it: how many
-/// commands met a position logged at the same instant and how many it
-/// logged, then its stuck samples, their seconds, and when the first was.
-#[derive(Deserialize)]
-pub(super) struct StuckPart {
+/// One commanded arm as the judgment answers it.
+#[derive(Default, Deserialize)]
+struct JudgedArm {
     part: String,
-    paired: u64,
-    commands: u64,
-    samples: u64,
-    stuck_s: f64,
-    first_at: Option<f64>,
+    most: Option<u64>,
+    flagged: Option<Vec<EpisodeStuck>>,
 }
 
 impl StuckJoints {
@@ -71,14 +69,48 @@ impl StuckJoints {
         CheckColumn::of(CheckKind::Stuck, parts)
     }
 
-    /// Each commanded arm's stuck samples in every episode its `cells`
-    /// measured.
-    pub(super) fn read(arms: &[ArmRoles], cells: &CheckCells<StuckPart>) -> Self {
+    /// Each commanded arm's most stuck samples in an episode, and the
+    /// episodes stuck too long, judged in Spiral over the column among
+    /// `columns` that `table` holds.
+    pub(super) async fn judge(
+        table: &CheckTable,
+        columns: &[CheckColumn],
+        arms: &[ArmRoles],
+    ) -> Result<Self, String> {
+        let judged = match table.parts(columns, CheckKind::Stuck) {
+            Some(parts) => table.rows(Self::judgment(&parts)).await?,
+            None => Vec::new(),
+        };
+        Ok(Self::of(arms, judged))
+    }
+
+    /// The judgment over `parts`, every episode's stuck samples: per arm,
+    /// over its episodes whose commands and positions were logged together,
+    /// the most stuck samples in one, and those stuck longer than the
+    /// flagged time.
+    fn judgment(parts: &str) -> String {
+        format!(
+            "WITH logged AS (SELECT part, episode_id, samples, stuck_s, first_at FROM {parts} p WHERE {together}), \
+             arm AS (SELECT part, max(samples) AS most FROM logged GROUP BY part), \
+             flagged AS (SELECT part, spql.list.collect(STRUCT_PACK(episode_id := episode_id, stuck_s := stuck_s, first_at := first_at)) AS flagged \
+               FROM logged WHERE stuck_s > {flagged} GROUP BY part) \
+             SELECT arm.part AS part, arm.most AS most, flagged.flagged AS flagged FROM arm LEFT JOIN flagged ON flagged.part = arm.part",
+            together = Pairing::together(),
+            flagged = Self::FLAGGED,
+        )
+    }
+
+    /// Every commanded arm among `arms`, as `judged` says it stuck.
+    fn of(arms: &[ArmRoles], judged: Vec<JudgedArm>) -> Self {
+        let mut judged = judged
+            .into_iter()
+            .map(|arm| (arm.part.clone(), arm))
+            .collect::<HashMap<_, _>>();
         Self {
             arms: arms
                 .iter()
                 .filter(|arm| arm.action().is_some())
-                .map(|arm| ArmStuck::read(arm.name(), cells))
+                .map(|arm| ArmStuck::of(arm.name(), judged.remove(arm.name())))
                 .collect(),
         }
     }
@@ -130,8 +162,7 @@ impl StuckJoints {
         let most = self
             .arms
             .iter()
-            .flat_map(|arm| arm.episodes.iter())
-            .map(|episode| episode.samples)
+            .map(|arm| arm.most)
             .max()
             .unwrap_or_default();
         let flagged = self.arms.iter().flat_map(ArmStuck::flagged).count();
@@ -170,42 +201,24 @@ impl StuckJoints {
 }
 
 impl ArmStuck {
-    /// The arm's stuck samples in each episode `cells` measured it in whose
-    /// commands and positions were logged together; the others are
-    /// unpaired.
-    fn read(arm: &str, cells: &CheckCells<StuckPart>) -> Self {
-        let mut read = Self {
+    /// `arm` as `judged` answers it; an arm it does not answer had no
+    /// episode measured.
+    fn of(arm: &str, judged: Option<JudgedArm>) -> Self {
+        let judged = judged.unwrap_or_default();
+        let mut flagged = judged.flagged.unwrap_or_default();
+        flagged.sort_by(|left, right| left.episode.cmp(&right.episode));
+        Self {
             arm: arm.to_owned(),
-            episodes: Vec::new(),
-            unpaired: Vec::new(),
-        };
-        for (episode, part) in cells.parts().filter(|(_, part)| part.part == arm) {
-            if Pairing::together(part.paired, part.commands) {
-                read.episodes.push(EpisodeStuck {
-                    episode: episode.clone(),
-                    samples: part.samples,
-                    stuck_s: part.stuck_s,
-                    first_at: part.first_at,
-                });
-            } else {
-                read.unpaired.push(episode.clone());
-            }
+            most: judged.most.unwrap_or_default(),
+            flagged,
         }
-        read
     }
     fn most(&self) -> String {
-        let most = self
-            .episodes
-            .iter()
-            .map(|episode| episode.samples)
-            .max()
-            .unwrap_or_default();
-        Plural::of(most as usize, "sample")
+        Plural::of(self.most as usize, "sample")
     }
     fn flagged(&self) -> Vec<Evidence> {
-        self.episodes
+        self.flagged
             .iter()
-            .filter(|episode| episode.stuck_s > StuckJoints::FLAGGED)
             .map(|episode| {
                 Evidence::at(
                     episode.episode.clone(),
@@ -227,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn a_commanded_arms_stuck_time_is_read_where_it_was_logged_together() {
+    fn a_commanded_arms_stuck_time_is_judged_where_it_was_logged_together() {
         let dataset = TwoArmDataset::new();
         let column = StuckJoints::column(dataset.streams(), dataset.arms())
             .unwrap()
@@ -243,25 +256,23 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let part = |paired, stuck_s| StuckPart {
-            part: "left".into(),
-            paired,
-            commands: 1000,
-            samples: 30,
-            stuck_s,
-            first_at: Some(2.5),
-        };
-        let cells = CheckCells::fixture(vec![
-            (episode(1), vec![part(1000, 1.0)]),
-            (episode(2), vec![part(1000, 0.1)]),
-            (episode(3), vec![part(10, 2.0)]),
-            (episode(4), Vec::new()),
-        ]);
-        let stuck = StuckJoints::read(dataset.arms(), &cells);
+        let sql = StuckJoints::judgment("(parts)");
+        assert!(sql.contains(
+            "FROM (parts) p WHERE CAST(paired AS DOUBLE) >= 0.9 * CAST(commands AS DOUBLE)"
+        ));
+        assert!(sql.contains("FROM logged WHERE stuck_s > 0.5 GROUP BY part"));
+        let judged: Vec<JudgedArm> = serde_json::from_value(serde_json::json!([{
+            "part": "left", "most": 30,
+            "flagged": [{"episode_id": episode(1).to_string(), "stuck_s": 1.0, "first_at": 2.5}],
+        }]))
+        .unwrap();
+        let stuck = StuckJoints::of(dataset.arms(), judged);
+        // Only the left arm records its commands.
         assert_eq!(stuck.arms.len(), 1);
-        assert_eq!(stuck.arms[0].episodes.len(), 2);
-        assert_eq!(stuck.arms[0].unpaired, [episode(3)]);
-        assert_eq!(stuck.arms[0].flagged().len(), 1);
         assert_eq!(stuck.arms[0].most(), "30 samples");
+        assert_eq!(stuck.arms[0].flagged()[0].measure(), "1.0 s");
+        let quiet = StuckJoints::of(dataset.arms(), Vec::new());
+        assert_eq!(quiet.arms[0].most(), "0 samples");
+        assert!(quiet.arms[0].flagged().is_empty());
     }
 }

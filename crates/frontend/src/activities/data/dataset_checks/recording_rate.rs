@@ -1,76 +1,53 @@
 //! Recording rate: how often every stream logs a message, and the episodes
 //! that log a stream at another rate than the dataset's other episodes do.
 //! Each episode's cell keeps, for every stream it logs more than once, how
-//! many messages it logged and when the first and the last were; the
-//! typical rate a departure is judged against is read over every cell. The
-//! same timings are how the clock check tells which streams share a clock.
-use super::check_columns::{CheckCells, CheckColumn, CheckKind, PartsStatement};
+//! many messages it logged and when the first and the last were. The report
+//! judges them in Spiral: each episode's rate, the stream's typical rate —
+//! the median over its episodes — and the episodes that stray from it.
+use super::check_columns::{CheckColumn, CheckKind, CheckTable, PartsStatement};
 use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, StreamName, Verdict};
 use super::stream_reads::CheckedStreams;
 use dioxus::prelude::*;
 use serde::Deserialize;
 use spiral_robotics_common::datasets::{DatasetTopic, EpisodeId};
-use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct RecordingRate {
     streams: Vec<StreamRate>,
 }
 
-/// One stream's rate in each episode that logs it more than once.
+/// One stream's typical rate, and the episodes that log it at another.
 #[derive(Clone, Debug, PartialEq)]
 struct StreamRate {
     topic: String,
     camera: bool,
-    /// Messages per second in each episode; empty for a stream logged once
-    /// per episode.
-    rates: Vec<EpisodeRate>,
+    /// Messages per second in its usual episode; none for a stream logged
+    /// once per episode.
+    typical: Option<f64>,
+    departures: Vec<EpisodeRate>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 struct EpisodeRate {
+    #[serde(rename = "episode_id")]
     episode: EpisodeId,
     hz: f64,
 }
 
-/// How many messages one stream logged in one episode, and when the first
-/// and the last were logged.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-pub(super) struct StreamTiming {
-    messages: u64,
-    first_ns: u64,
-    last_ns: u64,
-}
-
-impl StreamTiming {
-    pub(super) fn messages(&self) -> u64 {
-        self.messages
-    }
-    fn hz(&self) -> Option<f64> {
-        let span = self.last_ns.checked_sub(self.first_ns)? as f64 / 1e9;
-        (span > 0.0).then(|| (self.messages - 1) as f64 / span)
-    }
-}
-
-/// Every repeated stream's timing in each episode, by topic: what a rate is
-/// measured from, and what tells two streams logged on one clock.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(super) struct StreamTimings {
-    streams: BTreeMap<String, BTreeMap<EpisodeId, StreamTiming>>,
-}
-
-impl StreamTimings {
-    pub(super) fn of(&self, topic: &str) -> Option<&BTreeMap<EpisodeId, StreamTiming>> {
-        self.streams.get(topic)
-    }
-}
-
-/// One stream's timing in one episode, as its cell keeps it.
+/// One stream as the judgment answers it: its typical rate and the episodes
+/// that depart from it. A stream no episode departs from answers one empty
+/// departure, which reads as none.
 #[derive(Deserialize)]
-pub(super) struct TimingPart {
+struct JudgedStream {
     part: String,
-    #[serde(flatten)]
-    timing: StreamTiming,
+    typical: Option<f64>,
+    departures: Option<Vec<JudgedDeparture>>,
+}
+
+#[derive(Deserialize)]
+struct JudgedDeparture {
+    episode_id: Option<EpisodeId>,
+    hz: Option<f64>,
 }
 
 impl RecordingRate {
@@ -100,40 +77,63 @@ impl RecordingRate {
         CheckColumn::of(CheckKind::Rates, parts)
     }
 
-    /// Every stream's rate in each episode its `cells` time, and the
-    /// timings themselves, by topic.
-    pub(super) fn read(
+    /// Every stream's typical rate and the episodes that depart from it,
+    /// judged in Spiral over the column among `columns` that `table` holds.
+    pub(super) async fn judge(
+        table: &CheckTable,
+        columns: &[CheckColumn],
         streams: CheckedStreams<'_>,
-        cells: &CheckCells<TimingPart>,
-    ) -> (Self, StreamTimings) {
-        let mut timings = StreamTimings::default();
-        for (episode, part) in cells.parts() {
-            timings
-                .streams
-                .entry(part.part.clone())
-                .or_default()
-                .insert(episode.clone(), part.timing);
-        }
+    ) -> Result<Self, String> {
+        let judged = match table.parts(columns, CheckKind::Rates) {
+            Some(parts) => table.rows(Self::judgment(&parts)).await?,
+            None => Vec::new(),
+        };
+        Ok(Self::of(streams, judged))
+    }
+
+    /// The judgment over `parts`, every episode's timings: per stream, the
+    /// median of the episodes' rates and the episodes whose rate strays from
+    /// it by more than the departure share.
+    fn judgment(parts: &str) -> String {
+        format!(
+            "WITH r AS (SELECT episode_id, part, (CAST(messages AS DOUBLE) - 1) / ((CAST(last_ns AS DOUBLE) - CAST(first_ns AS DOUBLE)) / 1e9) AS hz \
+               FROM {parts} p WHERE last_ns > first_ns), \
+             t AS (SELECT part, spql.agg.approx_quantile(hz, 0.5) AS typical FROM r GROUP BY part), \
+             d AS (SELECT r.part AS part, r.episode_id AS episode_id, r.hz AS hz FROM r JOIN t ON t.part = r.part \
+               WHERE abs(r.hz / t.typical - 1) > {departure}) \
+             SELECT t.part AS part, t.typical AS typical, spql.list.collect(STRUCT_PACK(episode_id := d.episode_id, hz := d.hz)) AS departures \
+             FROM t LEFT JOIN d ON d.part = t.part GROUP BY t.part, t.typical",
+            departure = Self::DEPARTURE,
+        )
+    }
+
+    /// Every stream `streams` declares, as `judged` says it logs; a stream
+    /// the judgment does not name is logged once per episode.
+    fn of(streams: CheckedStreams<'_>, judged: Vec<JudgedStream>) -> Self {
         let rates = streams
             .topics()
             .iter()
-            .map(|topic| StreamRate {
-                topic: topic.name().to_owned(),
-                camera: topic.is_video(),
-                rates: timings
-                    .of(topic.name())
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|(episode, timing)| {
-                        Some(EpisodeRate {
-                            episode: episode.clone(),
-                            hz: timing.hz()?,
+            .map(|topic| {
+                let judged = judged.iter().find(|stream| stream.part == topic.name());
+                StreamRate {
+                    topic: topic.name().to_owned(),
+                    camera: topic.is_video(),
+                    typical: judged.and_then(|stream| stream.typical),
+                    departures: judged
+                        .and_then(|stream| stream.departures.as_ref())
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|departure| {
+                            Some(EpisodeRate {
+                                episode: departure.episode_id.clone()?,
+                                hz: departure.hz?,
+                            })
                         })
-                    })
-                    .collect(),
+                        .collect(),
+                }
             })
             .collect();
-        (Self { streams: rates }, timings)
+        Self { streams: rates }
     }
 
     /// Whether `topic` logs more than one message per episode, so it has a
@@ -148,13 +148,13 @@ impl RecordingRate {
         let departing = self
             .streams
             .iter()
-            .flat_map(StreamRate::departures)
+            .flat_map(|stream| &stream.departures)
             .map(|rate| &rate.episode)
             .collect::<std::collections::BTreeSet<_>>();
         let streams = self
             .streams
             .iter()
-            .filter(|stream| !stream.departures().is_empty())
+            .filter(|stream| !stream.departures.is_empty())
             .count();
         let (verdict, finding) = match departing.len() {
             0 => (
@@ -169,12 +169,11 @@ impl RecordingRate {
         };
         // The streams that depart lead the ledger, then cameras, then the rest.
         let mut rows = self.streams.clone();
-        rows.sort_by_key(|stream| (stream.departures().is_empty(), !stream.camera));
+        rows.sort_by_key(|stream| (stream.departures.is_empty(), !stream.camera));
         let flagged = self
             .streams
             .iter()
-            .flat_map(StreamRate::departures)
-            .map(|rate| Evidence::whole(rate.episode.clone(), format!("{:.1} Hz", rate.hz)))
+            .flat_map(StreamRate::evidence)
             .collect::<Vec<_>>();
         CheckRow::new("Recording rate", verdict, finding).flagging(flagged).with_details(rsx! {
             table { class: "data-ledger data-checks-table", "aria-label": "Stream rates",
@@ -184,11 +183,7 @@ impl RecordingRate {
                         tr { key: "{stream.topic}",
                             td { StreamName { topic: stream.topic.clone(), camera: stream.camera } }
                             td { class: "is-number", "{stream.rate_label()}" }
-                            td {
-                                EvidenceChips {
-                                    evidence: stream.departures().into_iter().map(|rate| Evidence::whole(rate.episode.clone(), format!("{:.1} Hz", rate.hz))).collect::<Vec<_>>(),
-                                }
-                            }
+                            td { EvidenceChips { evidence: stream.evidence() } }
                         }
                     }
                 }
@@ -198,100 +193,53 @@ impl RecordingRate {
 }
 
 impl StreamRate {
-    /// The median of the episodes' rates.
-    fn typical(&self) -> Option<f64> {
-        Median::of(self.rates.iter().map(|rate| rate.hz))
-    }
-    fn departures(&self) -> Vec<&EpisodeRate> {
-        let Some(typical) = self.typical() else {
-            return Vec::new();
-        };
-        self.rates
+    /// The episodes at another rate, each as the finding names it.
+    fn evidence(&self) -> Vec<Evidence> {
+        self.departures
             .iter()
-            .filter(|rate| (rate.hz / typical - 1.0).abs() > RecordingRate::DEPARTURE)
+            .map(|rate| Evidence::whole(rate.episode.clone(), format!("{:.1} Hz", rate.hz)))
             .collect()
     }
     fn rate_label(&self) -> String {
-        match self.typical() {
+        match self.typical {
             Some(hz) => format!("{hz:.1} Hz"),
             None => "once per episode".into(),
         }
     }
 }
 
-/// The middle of some measurements.
-pub(super) struct Median;
-
-impl Median {
-    pub(super) fn of(values: impl IntoIterator<Item = f64>) -> Option<f64> {
-        let mut values = values
-            .into_iter()
-            .filter(|value| value.is_finite())
-            .collect::<Vec<_>>();
-        if values.is_empty() {
-            return None;
-        }
-        values.sort_by(f64::total_cmp);
-        let middle = values.len() / 2;
-        Some(if values.len() % 2 == 0 {
-            (values[middle - 1] + values[middle]) / 2.0
-        } else {
-            values[middle]
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spiral_robotics_common::datasets::DatasetSelection;
 
     fn episode(ordinal: u32) -> EpisodeId {
         EpisodeId::try_from(format!("{ordinal:032x}")).unwrap()
     }
 
     #[test]
-    fn an_episode_is_flagged_when_it_logs_a_stream_far_from_the_typical_rate() {
-        let stream = StreamRate {
-            topic: "/left-arm-state".into(),
-            camera: false,
-            rates: [29.8, 29.7, 29.9, 281.9, 29.8]
-                .into_iter()
-                .zip(1..)
-                .map(|(hz, ordinal)| EpisodeRate {
-                    episode: episode(ordinal),
-                    hz,
-                })
-                .collect(),
-        };
-        assert_eq!(stream.typical(), Some(29.8));
-        assert_eq!(stream.rate_label(), "29.8 Hz");
-        assert_eq!(
-            stream
-                .departures()
-                .iter()
-                .map(|rate| rate.episode.clone())
-                .collect::<Vec<_>>(),
-            [episode(4)]
+    fn the_judgment_finds_each_streams_typical_rate_and_its_departures_in_spiral() {
+        let sql = RecordingRate::judgment("(parts)");
+        assert!(
+            sql.contains("FROM (parts) p WHERE last_ns > first_ns"),
+            "{sql}"
         );
-        let once = StreamRate {
-            topic: "/instruction".into(),
-            camera: false,
-            rates: Vec::new(),
-        };
-        assert_eq!(once.rate_label(), "once per episode");
-        assert!(once.departures().is_empty());
-        let timing = StreamTiming {
-            messages: 301,
-            first_ns: 1_000_000_000,
-            last_ns: 11_000_000_000,
-        };
-        assert_eq!(timing.hz(), Some(30.0));
-        assert_eq!(Median::of([3.0, 1.0, 2.0, 10.0]), Some(2.5));
+        assert!(
+            sql.contains("spql.agg.approx_quantile(hz, 0.5) AS typical"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("WHERE abs(r.hz / t.typical - 1) > 0.1"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("FROM t LEFT JOIN d ON d.part = t.part GROUP BY t.part, t.typical"),
+            "{sql}"
+        );
     }
 
     #[test]
-    fn rates_are_read_from_each_episodes_cell_and_once_per_episode_streams_listed() {
-        use spiral_robotics_common::datasets::{DatasetSelection, DatasetTopic};
+    fn every_declared_stream_is_listed_as_judged_and_once_per_episode_streams_too() {
         let dataset = DatasetSelection::new(vec!["dataset_folding".into()]).unwrap();
         let topics = [
             DatasetTopic::new("/joints".into(), vec![]).with_coverage(2, Some(600)),
@@ -300,23 +248,25 @@ mod tests {
         let streams = CheckedStreams::new(&dataset, &topics);
         let column = RecordingRate::column(streams).unwrap().unwrap();
         assert_eq!(column.kind(), CheckKind::Rates);
-        let timing = |messages, last_ns| TimingPart {
-            part: "/joints".into(),
-            timing: StreamTiming {
-                messages,
-                first_ns: 0,
-                last_ns,
-            },
-        };
-        let cells = CheckCells::fixture(vec![
-            (episode(1), vec![timing(301, 10_000_000_000)]),
-            (episode(2), Vec::new()),
-        ]);
-        let (rates, timings) = RecordingRate::read(streams, &cells);
-        assert_eq!(rates.streams.len(), 2);
-        assert_eq!(rates.streams[0].rates.len(), 1);
-        assert_eq!(rates.streams[0].rate_label(), "30.0 Hz");
+        let judged: Vec<JudgedStream> = serde_json::from_value(serde_json::json!([{
+            "part": "/joints", "typical": 29.8,
+            "departures": [{"episode_id": episode(4).to_string(), "hz": 281.9}]
+        }]))
+        .unwrap();
+        let rates = RecordingRate::of(streams, judged);
+        assert_eq!(rates.streams[0].rate_label(), "29.8 Hz");
+        assert_eq!(rates.streams[0].departures.len(), 1);
         assert_eq!(rates.streams[1].rate_label(), "once per episode");
-        assert_eq!(timings.of("/joints").map(BTreeMap::len), Some(1));
+        // A stream no episode departs from answers one empty departure.
+        let quiet: Vec<JudgedStream> = serde_json::from_value(serde_json::json!([{
+            "part": "/joints", "typical": 29.8,
+            "departures": [{"episode_id": null, "hz": null}]
+        }]))
+        .unwrap();
+        assert!(
+            RecordingRate::of(streams, quiet).streams[0]
+                .departures
+                .is_empty()
+        );
     }
 }

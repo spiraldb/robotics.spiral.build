@@ -1,14 +1,15 @@
 //! Spikes: a measured joint that moves faster than 3 rad/s into one sample
 //! and just as fast back out of it — one bad reading rather than motion.
-//! Each episode's cell keeps every arm's spikes, none included; the
-//! episodes with one are picked when the report is read.
-use super::check_columns::{CheckCells, CheckColumn, CheckKind, PartsStatement};
+//! Each episode's cell keeps every arm's spikes, none included; the report
+//! picks the episodes with one in Spiral.
+use super::check_columns::{CheckColumn, CheckKind, CheckTable, PartsStatement};
 use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, Plural, Verdict};
 use super::stream_reads::{CheckedStreams, CheckedValueColumns as _};
 use dioxus::prelude::*;
 use serde::Deserialize;
 use spiral_robotics_common::datasets::ValueColumns;
 use spiral_robotics_common::datasets::{ArmRoles, EpisodeId};
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct JointSpikes {
@@ -18,25 +19,24 @@ pub(super) struct JointSpikes {
 #[derive(Clone, Debug, PartialEq)]
 struct ArmSpikes {
     arm: String,
-    /// The episodes with a spike.
+    /// The episodes with a spike, in episode order.
     episodes: Vec<EpisodeSpikes>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 struct EpisodeSpikes {
+    #[serde(rename = "episode_id")]
     episode: EpisodeId,
     spikes: u64,
     /// Seconds into the episode of its first spike.
     first_at: Option<f64>,
 }
 
-/// One arm's spikes in one episode, as its cell keeps them: how many, and
-/// seconds into the episode of the first.
+/// One arm with a spike, as the judgment answers it.
 #[derive(Deserialize)]
-pub(super) struct SpikesPart {
+struct JudgedArm {
     part: String,
-    spikes: u64,
-    first_at: Option<f64>,
+    episodes: Vec<EpisodeSpikes>,
 }
 
 impl JointSpikes {
@@ -55,12 +55,46 @@ impl JointSpikes {
         CheckColumn::of(CheckKind::Spikes, parts)
     }
 
-    /// Each arm's episodes with a spike, among those its `cells` measured.
-    pub(super) fn read(arms: &[ArmRoles], cells: &CheckCells<SpikesPart>) -> Self {
+    /// Each arm's episodes with a spike, judged in Spiral over the column
+    /// among `columns` that `table` holds.
+    pub(super) async fn judge(
+        table: &CheckTable,
+        columns: &[CheckColumn],
+        arms: &[ArmRoles],
+    ) -> Result<Self, String> {
+        let judged = match table.parts(columns, CheckKind::Spikes) {
+            Some(parts) => table.rows(Self::judgment(&parts)).await?,
+            None => Vec::new(),
+        };
+        Ok(Self::of(arms, judged))
+    }
+
+    /// The judgment over `parts`, every episode's spikes: per arm with a
+    /// spike, the episodes it spiked in.
+    fn judgment(parts: &str) -> String {
+        format!(
+            "SELECT part, spql.list.collect(STRUCT_PACK(episode_id := episode_id, spikes := spikes, first_at := first_at)) AS episodes \
+             FROM {parts} p WHERE spikes > 0 GROUP BY part"
+        )
+    }
+
+    /// Every arm among `arms`, with the episodes `judged` says it spiked in.
+    fn of(arms: &[ArmRoles], judged: Vec<JudgedArm>) -> Self {
+        let mut judged = judged
+            .into_iter()
+            .map(|arm| (arm.part, arm.episodes))
+            .collect::<HashMap<_, _>>();
         Self {
             arms: arms
                 .iter()
-                .map(|arm| ArmSpikes::read(arm.name(), cells))
+                .map(|arm| {
+                    let mut episodes = judged.remove(arm.name()).unwrap_or_default();
+                    episodes.sort_by(|left, right| left.episode.cmp(&right.episode));
+                    ArmSpikes {
+                        arm: arm.name().to_owned(),
+                        episodes,
+                    }
+                })
                 .collect(),
         }
     }
@@ -167,24 +201,6 @@ impl JointSpikes {
     }
 }
 
-impl ArmSpikes {
-    /// The episodes `cells` count a spike of the arm in.
-    fn read(arm: &str, cells: &CheckCells<SpikesPart>) -> Self {
-        Self {
-            arm: arm.to_owned(),
-            episodes: cells
-                .parts()
-                .filter(|(_, part)| part.part == arm && part.spikes > 0)
-                .map(|(episode, part)| EpisodeSpikes {
-                    episode: episode.clone(),
-                    spikes: part.spikes,
-                    first_at: part.first_at,
-                })
-                .collect(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::stream_reads::TwoArmDataset;
@@ -195,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn every_arm_keeps_its_spikes_and_only_episodes_with_one_are_read() {
+    fn every_arm_keeps_its_spikes_and_only_episodes_with_one_are_judged() {
         let dataset = TwoArmDataset::new();
         let column = JointSpikes::column(dataset.streams(), dataset.arms())
             .unwrap()
@@ -209,26 +225,35 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let part = |arm: &str, spikes| SpikesPart {
-            part: arm.into(),
-            spikes,
-            first_at: (spikes > 0).then_some(4.2),
-        };
-        let cells = CheckCells::fixture(vec![
-            (episode(1), vec![part("left", 0), part("right", 2)]),
-            (episode(2), vec![part("left", 1), part("right", 0)]),
-            (episode(3), Vec::new()),
-        ]);
-        let spikes = JointSpikes::read(dataset.arms(), &cells);
-        assert_eq!(
-            spikes.arms[0].episodes,
-            [EpisodeSpikes {
-                episode: episode(2),
-                spikes: 1,
-                first_at: Some(4.2)
-            }]
+        assert!(
+            JointSpikes::judgment("(parts)")
+                .ends_with("FROM (parts) p WHERE spikes > 0 GROUP BY part")
         );
-        assert_eq!(spikes.arms[1].episodes.len(), 1);
-        assert_eq!(spikes.arms[1].episodes[0].episode, episode(1));
+        let judged: Vec<JudgedArm> = serde_json::from_value(serde_json::json!([{
+            "part": "right",
+            "episodes": [
+                {"episode_id": episode(2).to_string(), "spikes": 1, "first_at": 4.2},
+                {"episode_id": episode(1).to_string(), "spikes": 2, "first_at": null},
+            ],
+        }]))
+        .unwrap();
+        let spikes = JointSpikes::of(dataset.arms(), judged);
+        // An arm the judgment does not answer spiked in no episode.
+        assert!(spikes.arms[0].episodes.is_empty());
+        assert_eq!(
+            spikes.arms[1].episodes,
+            [
+                EpisodeSpikes {
+                    episode: episode(1),
+                    spikes: 2,
+                    first_at: None
+                },
+                EpisodeSpikes {
+                    episode: episode(2),
+                    spikes: 1,
+                    first_at: Some(4.2)
+                }
+            ]
+        );
     }
 }

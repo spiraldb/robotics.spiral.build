@@ -127,23 +127,26 @@ pub(in crate::activities) fn DatasetOverview(
     on_open: EventHandler<CheckedEpisode>,
 ) -> Element {
     // The totals belong to this dataset alone: choosing another one
-    // re-queries instead of keeping the first answer under a new name.
-    let facts = use_resource(use_reactive((&listing,), |(listing,)| async move {
-        DatasetFacts::read(&listing).await
+    // re-queries, and each answer carries the dataset it was read for, since
+    // the previous dataset's stays readable until the new one arrives.
+    let read = use_resource(use_reactive((&listing,), |(listing,)| async move {
+        let answer = DatasetFacts::read(&listing).await;
+        (listing.dataset().clone(), answer)
     }));
     let dataset = listing.dataset().clone();
-    // Once read, the totals are the dataset's last answer; until they are
-    // read the last answer stands in for them.
+    // Once read, the totals are their dataset's last answer; until this
+    // dataset's are read, its own last answer stands in for them.
     let memory = DatasetOverviewMemory::current();
-    let remembered = dataset.clone();
     use_effect(move || {
-        if let Some(Ok(answer)) = &*facts.read() {
-            memory.remember(&remembered, answer);
+        if let Some((read_for, Ok(answer))) = &*read.read() {
+            memory.remember(read_for, answer);
         }
     });
-    let facts = facts
+    let facts = read
         .read()
-        .clone()
+        .as_ref()
+        .filter(|(read_for, _)| *read_for == dataset)
+        .map(|(_, answer)| answer.clone())
         .or_else(|| memory.facts(&dataset).map(Ok));
     let name = dataset.display_name();
     let sql_name = dataset.sql_name();

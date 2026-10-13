@@ -4,12 +4,13 @@
 //! offset between them is measured per episode, over the whole episode and
 //! over its first five seconds, which tells a constant offset from a drift.
 //! Each episode's cell keeps, for every stream logged more than once, its
-//! offset in that episode when it logs one message per frame; which streams
-//! are logged at the same instants, read alike and are shown once, and the
-//! offset over every episode, are read from every cell.
+//! offset in that episode when it logs one message per frame. The report
+//! judges them in Spiral: which streams are logged at the same instants —
+//! every episode reads alike in them — and are shown once, and the offset
+//! over every episode.
 use super::camera_frames::CameraFrames;
-use super::check_columns::{CheckCells, CheckColumn, CheckKind, PartsStatement};
-use super::recording_rate::{Median, RecordingRate, StreamTimings};
+use super::check_columns::{CheckColumn, CheckKind, CheckTable, PartsStatement};
+use super::recording_rate::RecordingRate;
 use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, StreamName, Verdict};
 use super::stream_reads::CheckedStreams;
 use crate::activities::episode::StreamCatalog;
@@ -25,38 +26,44 @@ pub(super) struct ClockOffset {
     pairings: Vec<ClockPairing>,
 }
 
-/// The streams logged at one set of instants, paired with the camera.
-#[derive(Clone, Debug, PartialEq)]
+/// The streams logged at one set of instants, paired with the camera, as
+/// the judgment answers them.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 struct ClockPairing {
     streams: Vec<String>,
-    /// Frame time minus message time over every episode: the median of the
-    /// episodes' medians, each episode weighing alike, and the lowest and
-    /// the highest of any pair.
+    #[serde(flatten)]
+    offset: PooledOffset,
+    /// How many episodes log as many of these streams' messages as camera
+    /// frames.
+    episodes: u64,
+    /// Whether the camera and these streams disagree by more than a frame,
+    /// episodes disagree with each other by more than one, or an episode
+    /// opens more than half a frame away from where it runs.
+    flagged: bool,
+    /// The episodes whose frames sit over a frame interval from their
+    /// messages, or drift over half of one in their first five seconds, when
+    /// the pairing is flagged; none when no episode does.
+    apart: Option<Vec<EpisodeOffset>>,
+    /// The three episodes whose offset is furthest from the others'.
+    furthest: Vec<EpisodeOffset>,
+}
+
+/// Frame time minus message time over every episode: the median of the
+/// episodes' medians, each episode weighing alike, and the lowest and the
+/// highest of any pair.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+struct PooledOffset {
     median_ms: f64,
     low_ms: f64,
     high_ms: f64,
-    episodes: Vec<EpisodeOffset>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+/// Frame time minus message time in one episode: the median over its pairs.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 struct EpisodeOffset {
+    #[serde(rename = "episode_id")]
     episode: EpisodeId,
     median_ms: f64,
-    /// Over the episode's first five seconds.
-    opening_ms: Option<f64>,
-}
-
-/// One stream's offset from the camera in one episode, as its cell keeps
-/// it: frame time minus message time over the episode's pairs — their
-/// median, the median over its first five seconds, the lowest and the
-/// highest.
-#[derive(Deserialize)]
-pub(super) struct OffsetPart {
-    part: String,
-    median_ms: f64,
-    opening_ms: Option<f64>,
-    low_ms: f64,
-    high_ms: f64,
 }
 
 impl ClockOffset {
@@ -83,30 +90,79 @@ impl ClockOffset {
         CheckColumn::of(CheckKind::Clock, parts)
     }
 
-    /// The offsets `cells` measured, each set of streams logged at the same
-    /// instants — as `timings` tell them — once, judged against the
-    /// camera's usual frame interval in `frames`.
-    pub(super) fn read(
+    /// Each set of streams logged at the same instants, once, and its offset
+    /// from the camera, judged in Spiral over the column among `columns`
+    /// that `table` holds against the camera's usual frame interval in
+    /// `frames`.
+    pub(super) async fn judge(
+        table: &CheckTable,
+        columns: &[CheckColumn],
         streams: CheckedStreams<'_>,
-        timings: &StreamTimings,
         frames: &CameraFrames,
-        cells: &CheckCells<OffsetPart>,
-    ) -> Self {
-        let Some(camera) = Self::camera(streams).map(DatasetTopic::name) else {
-            return Self {
-                camera: None,
-                period_ms: 0.0,
-                pairings: Vec::new(),
-            };
+    ) -> Result<Self, String> {
+        let period_ms = Self::camera(streams)
+            .and_then(|camera| frames.period_ns(camera.name()))
+            .unwrap_or_default()
+            / 1e6;
+        let judged = match table.parts(columns, CheckKind::Clock) {
+            Some(parts) => table.rows(Self::judgment(&parts, period_ms)).await?,
+            None => Vec::new(),
         };
-        let pairings = Self::groups(streams, timings, camera)
-            .iter()
-            .map(|group| ClockPairing::read(group, cells))
-            .collect();
+        Ok(Self::of(streams, period_ms, judged))
+    }
+
+    /// The judgment over `parts`, every episode's offsets, against a frame
+    /// interval of `period_ms`. Streams whose every episode reads alike, to
+    /// a hundredth of a millisecond, are logged at the same instants: they
+    /// pair as one, read from the first of them by name. Per pairing, the
+    /// median of its episodes' medians, the lowest and highest of any pair,
+    /// whether it is flagged and the episodes that flag it, and the three
+    /// episodes furthest from its median.
+    fn judgment(parts: &str, period_ms: f64) -> String {
+        format!(
+            "WITH o AS (SELECT episode_id, part, median_ms, opening_ms, low_ms, high_ms, CAST(round(median_ms * 100) AS BIGINT) AS centi_ms FROM {parts} p), \
+             n AS (SELECT part, count(*) AS episodes FROM o GROUP BY part), \
+             a AS (SELECT mine.part AS part, theirs.part AS peer, count(*) AS episodes FROM o mine \
+               JOIN o theirs ON theirs.episode_id = mine.episode_id AND theirs.centi_ms = mine.centi_ms GROUP BY mine.part, theirs.part), \
+             k AS (SELECT a.part AS part, min(a.peer) AS lead FROM a JOIN n mine ON mine.part = a.part JOIN n theirs ON theirs.part = a.peer \
+               WHERE a.episodes = mine.episodes AND a.episodes = theirs.episodes GROUP BY a.part), \
+             g AS (SELECT lead, spql.list.collect(part) AS streams FROM k GROUP BY lead), \
+             e AS (SELECT o.episode_id AS episode_id, o.part AS part, o.median_ms AS median_ms, o.opening_ms AS opening_ms, o.low_ms AS low_ms, o.high_ms AS high_ms \
+               FROM o JOIN g ON g.lead = o.part), \
+             t AS (SELECT part, spql.agg.approx_quantile(median_ms, 0.5) AS median_ms, min(low_ms) AS low_ms, max(high_ms) AS high_ms, count(*) AS episodes, \
+               max(median_ms) - min(median_ms) AS spread, max(abs(opening_ms - median_ms)) AS drift FROM e GROUP BY part), \
+             j AS (SELECT part, median_ms, low_ms, high_ms, episodes, \
+               CASE WHEN abs(median_ms) > {frame} OR spread > {frame} OR drift > {half} THEN true ELSE false END AS flagged FROM t), \
+             x AS (SELECT e.part AS part, spql.list.collect(STRUCT_PACK(episode_id := e.episode_id, median_ms := e.median_ms)) AS apart \
+               FROM e JOIN j ON j.part = e.part WHERE j.flagged AND (abs(e.median_ms) > {frame} OR abs(e.opening_ms - e.median_ms) > {half}) GROUP BY e.part), \
+             r AS (SELECT e.part AS part, e.episode_id AS episode_id, e.median_ms AS median_ms, \
+               ROW_NUMBER() OVER (PARTITION BY e.part ORDER BY abs(e.median_ms - t.median_ms) DESC) AS distance_rank FROM e JOIN t ON t.part = e.part), \
+             f AS (SELECT part, spql.list.collect(STRUCT_PACK(episode_id := episode_id, median_ms := median_ms)) AS furthest FROM r WHERE distance_rank <= 3 GROUP BY part) \
+             SELECT g.streams AS streams, j.median_ms AS median_ms, j.low_ms AS low_ms, j.high_ms AS high_ms, j.episodes AS episodes, j.flagged AS flagged, \
+               x.apart AS apart, f.furthest AS furthest \
+             FROM g JOIN j ON j.part = g.lead JOIN f ON f.part = g.lead LEFT JOIN x ON x.part = g.lead",
+            frame = period_ms,
+            half = period_ms / 2.0,
+        )
+    }
+
+    /// The pairings `judged`, against a frame interval of `period_ms`, in the
+    /// order `streams` declares their streams: the first leads the finding.
+    fn of(streams: CheckedStreams<'_>, period_ms: f64, judged: Vec<ClockPairing>) -> Self {
+        let mut pairings = judged
+            .into_iter()
+            .map(|pairing| pairing.ordered(streams))
+            .collect::<Vec<_>>();
+        pairings.sort_by_cached_key(|pairing| {
+            pairing
+                .streams
+                .first()
+                .and_then(|stream| ClockPairing::declared(streams, stream))
+        });
         Self {
-            camera: Some(camera.to_owned()),
-            period_ms: frames.period_ns(camera).unwrap_or_default() / 1e6,
-            pairings: ClockPairing::merged(pairings),
+            camera: Self::camera(streams).map(|camera| camera.name().to_owned()),
+            period_ms,
+            pairings,
         }
     }
 
@@ -124,40 +180,6 @@ impl ClockOffset {
             .collect::<Vec<_>>();
         let overview = StreamCatalog::overview_camera(&names)?;
         cameras.into_iter().find(|topic| topic.name() == overview)
-    }
-
-    /// The data streams logged at the same instants in every episode, each
-    /// set once, when some episode logs them once per frame of `camera`.
-    fn groups<'a>(
-        streams: CheckedStreams<'a>,
-        timings: &StreamTimings,
-        camera: &str,
-    ) -> Vec<Vec<&'a DatasetTopic>> {
-        let Some(frames) = timings.of(camera) else {
-            return Vec::new();
-        };
-        let mut groups: Vec<Vec<&DatasetTopic>> = Vec::new();
-        for topic in streams.topics().iter().filter(|topic| !topic.is_video()) {
-            let Some(timing) = timings.of(topic.name()) else {
-                continue;
-            };
-            let per_frame = timing.iter().any(|(episode, timing)| {
-                frames
-                    .get(episode)
-                    .is_some_and(|frames| frames.messages() == timing.messages())
-            });
-            if !per_frame {
-                continue;
-            }
-            match groups
-                .iter_mut()
-                .find(|group| timings.of(group[0].name()) == Some(timing))
-            {
-                Some(group) => group.push(topic),
-                None => groups.push(vec![topic]),
-            }
-        }
-        groups
     }
 
     /// Each episode's offset between `camera` and `stream`: frame n paired
@@ -200,10 +222,7 @@ impl ClockOffset {
                 Finding::why(format!("No stream logs one message per {camera} frame")),
             );
         };
-        let flagged = self
-            .pairings
-            .iter()
-            .any(|pairing| pairing.flagged(self.period_ms));
+        let flagged = self.pairings.iter().any(|pairing| pairing.flagged);
         let others = self
             .pairings
             .iter()
@@ -211,7 +230,7 @@ impl ClockOffset {
             .sum::<usize>();
         // How far apart the camera's frames and the streams logged with them
         // are stamped, and which comes first when they are apart at all.
-        let (offset, order) = match first.median_ms {
+        let (offset, order) = match first.offset.median_ms {
             ms if ms.abs() < 0.5 => ("0 ms".to_owned(), ""),
             ms if ms < 0.0 => (Milliseconds::magnitude(ms), ", frames first"),
             ms => (Milliseconds::magnitude(ms), ", frames last"),
@@ -222,8 +241,8 @@ impl ClockOffset {
         let apart = self
             .pairings
             .iter()
-            .filter(|pairing| pairing.flagged(self.period_ms))
-            .flat_map(|pairing| pairing.apart(self.period_ms))
+            .flat_map(ClockPairing::apart)
+            .map(EpisodeOffset::evidence)
             .collect::<Vec<_>>();
         let pairings = self.pairings.clone();
         let period = self.period_ms;
@@ -242,10 +261,10 @@ impl ClockOffset {
                                     StreamName { key: "{stream}", topic: stream, camera: false }
                                 }
                             }
-                            td { class: "is-number", "{Milliseconds::signed(pairing.median_ms)}" }
-                            td { class: "is-number", "{Milliseconds::signed(pairing.low_ms)} to {Milliseconds::signed(pairing.high_ms)}" }
-                            td { class: "is-number", "{pairing.episodes.len()} of {episodes}" }
-                            td { EvidenceChips { evidence: pairing.furthest() } }
+                            td { class: "is-number", "{Milliseconds::signed(pairing.offset.median_ms)}" }
+                            td { class: "is-number", "{Milliseconds::signed(pairing.offset.low_ms)} to {Milliseconds::signed(pairing.offset.high_ms)}" }
+                            td { class: "is-number", "{pairing.episodes} of {episodes}" }
+                            td { EvidenceChips { evidence: pairing.furthest.iter().map(EpisodeOffset::evidence).collect::<Vec<_>>() } }
                         }
                     }
                 }
@@ -258,123 +277,35 @@ impl ClockOffset {
 }
 
 impl ClockPairing {
-    /// The streams of `group`, logged at the same instants, as `cells`
-    /// measured the first of them in each episode.
-    fn read(group: &[&DatasetTopic], cells: &CheckCells<OffsetPart>) -> Self {
-        let measured = cells
-            .parts()
-            .filter(|(_, part)| part.part == group[0].name())
-            .collect::<Vec<_>>();
-        Self {
-            streams: group.iter().map(|topic| topic.name().to_owned()).collect(),
-            median_ms: Median::of(measured.iter().map(|(_, part)| part.median_ms))
-                .unwrap_or_default(),
-            low_ms: measured
-                .iter()
-                .map(|(_, part)| part.low_ms)
-                .reduce(f64::min)
-                .unwrap_or_default(),
-            high_ms: measured
-                .iter()
-                .map(|(_, part)| part.high_ms)
-                .reduce(f64::max)
-                .unwrap_or_default(),
-            episodes: measured
-                .iter()
-                .map(|&(episode, part)| EpisodeOffset {
-                    episode: episode.clone(),
-                    median_ms: part.median_ms,
-                    opening_ms: part.opening_ms,
-                })
-                .collect(),
-        }
-    }
-    /// Pairings whose every episode reads alike are one set of instants.
-    fn merged(pairings: Vec<Self>) -> Vec<Self> {
-        let mut merged: Vec<Self> = Vec::new();
-        for pairing in pairings
-            .into_iter()
-            .filter(|pairing| !pairing.episodes.is_empty())
-        {
-            match merged.iter_mut().find(|kept| kept.reads_like(&pairing)) {
-                Some(kept) => kept.streams.extend(pairing.streams),
-                None => merged.push(pairing),
-            }
-        }
-        merged
-    }
-    fn reads_like(&self, other: &Self) -> bool {
-        let offsets = |pairing: &Self| {
-            let mut offsets = pairing
-                .episodes
-                .iter()
-                .map(|episode| {
-                    (
-                        episode.episode.clone(),
-                        (episode.median_ms * 100.0).round() as i64,
-                    )
-                })
-                .collect::<Vec<_>>();
-            offsets.sort();
-            offsets
-        };
-        offsets(self) == offsets(other)
-    }
-    /// Whether the camera and these streams disagree by more than a frame,
-    /// episodes disagree with each other by more than one, or an episode
-    /// opens more than half a frame away from where it runs.
-    fn flagged(&self, period_ms: f64) -> bool {
-        let medians = self.episodes.iter().map(|episode| episode.median_ms);
-        let spread = medians.clone().fold(f64::NEG_INFINITY, f64::max)
-            - medians.fold(f64::INFINITY, f64::min);
-        let drift = self
-            .episodes
-            .iter()
-            .filter_map(|episode| Some((episode.opening_ms? - episode.median_ms).abs()))
-            .fold(0.0, f64::max);
-        self.median_ms.abs() > period_ms || spread > period_ms || drift > period_ms / 2.0
-    }
-    /// The episodes whose frames sit over a frame interval from their
-    /// messages, or drift over half of one in their first five seconds.
-    fn apart(&self, period_ms: f64) -> Vec<Evidence> {
-        self.episodes
-            .iter()
-            .filter(|episode| {
-                episode.median_ms.abs() > period_ms
-                    || episode.opening_ms.is_some_and(|opening| {
-                        (opening - episode.median_ms).abs() > period_ms / 2.0
-                    })
-            })
-            .map(|episode| {
-                Evidence::whole(
-                    episode.episode.clone(),
-                    Milliseconds::signed(episode.median_ms),
-                )
-            })
-            .collect()
-    }
-    /// The three episodes whose offset is furthest from the others'.
-    fn furthest(&self) -> Vec<Evidence> {
-        let Some(typical) = Median::of(self.episodes.iter().map(|episode| episode.median_ms))
-        else {
-            return Vec::new();
-        };
-        let mut episodes = self.episodes.iter().collect::<Vec<_>>();
-        episodes.sort_by(|left, right| {
+    /// This pairing with its streams in the order `streams` declares them,
+    /// and its furthest episodes furthest first.
+    fn ordered(mut self, streams: CheckedStreams<'_>) -> Self {
+        self.streams
+            .sort_by_cached_key(|stream| Self::declared(streams, stream));
+        let typical = self.offset.median_ms;
+        self.furthest.sort_by(|left, right| {
             (right.median_ms - typical)
                 .abs()
                 .total_cmp(&(left.median_ms - typical).abs())
         });
-        episodes
-            .into_iter()
-            .take(3)
-            .map(|episode| {
-                Evidence::whole(
-                    episode.episode.clone(),
-                    Milliseconds::signed(episode.median_ms),
-                )
-            })
-            .collect()
+        self
+    }
+    /// Where `streams` declares `stream`.
+    fn declared(streams: CheckedStreams<'_>, stream: &str) -> Option<usize> {
+        streams
+            .topics()
+            .iter()
+            .position(|topic| topic.name() == stream)
+    }
+    /// The episodes that flag this pairing.
+    fn apart(&self) -> impl Iterator<Item = &EpisodeOffset> {
+        self.apart.iter().flatten()
+    }
+}
+
+impl EpisodeOffset {
+    fn evidence(&self) -> Evidence {
+        Evidence::whole(self.episode.clone(), Milliseconds::signed(self.median_ms))
     }
 }
 
@@ -396,68 +327,48 @@ impl Milliseconds {
 
 #[cfg(test)]
 mod tests {
-    use super::super::camera_frames::FramesPart;
-    use super::super::recording_rate::TimingPart;
     use super::*;
     use serde_json::json;
     use spiral_robotics_common::curation::AnswerSource;
     use spiral_robotics_common::datasets::DatasetSelection;
 
-    fn episode_id(ordinal: u32) -> EpisodeId {
-        EpisodeId::try_from(format!("{ordinal:032x}")).unwrap()
-    }
-
-    fn episode(ordinal: u32, median_ms: f64, opening_ms: f64) -> EpisodeOffset {
-        EpisodeOffset {
-            episode: episode_id(ordinal),
-            median_ms,
-            opening_ms: Some(opening_ms),
-        }
-    }
-
-    /// One part of a cell, as the answers table stores it.
-    fn stored<P: serde::de::DeserializeOwned>(part: serde_json::Value) -> P {
-        serde_json::from_value(part).unwrap()
+    fn episode(ordinal: u32) -> String {
+        format!("{ordinal:032x}")
     }
 
     #[test]
-    fn streams_logged_at_the_same_instants_merge_and_offsets_past_a_frame_are_flagged() {
-        let pairing = |stream: &str, offsets: &[(f64, f64)]| ClockPairing {
-            streams: vec![stream.into()],
-            median_ms: -99.0,
-            low_ms: -188.0,
-            high_ms: -14.0,
-            episodes: offsets
-                .iter()
-                .zip(1..)
-                .map(|((median, opening), ordinal)| episode(ordinal, *median, *opening))
-                .collect(),
-        };
-        let state = pairing(
-            "/left-arm-state",
-            &[(-96.1, -95.0), (-105.2, -104.0), (-125.9, -122.0)],
+    fn the_judgment_pairs_streams_whose_episodes_read_alike_and_flags_them_in_spiral() {
+        let sql = ClockOffset::judgment("(parts)", 33.4);
+        assert!(
+            sql.contains("CAST(round(median_ms * 100) AS BIGINT) AS centi_ms FROM (parts) p"),
+            "{sql}"
         );
-        let action = pairing(
-            "/left-arm-action",
-            &[(-96.1, -95.0), (-105.2, -104.0), (-125.9, -122.0)],
+        // Streams read alike when every episode of each reads alike in the other.
+        assert!(
+            sql.contains("JOIN o theirs ON theirs.episode_id = mine.episode_id AND theirs.centi_ms = mine.centi_ms"),
+            "{sql}"
         );
-        let other = pairing("/right-arm-state", &[(-10.0, -10.0)]);
-        let merged = ClockPairing::merged(vec![state, action, other]);
-        assert_eq!(merged.len(), 2);
-        assert_eq!(merged[0].streams, ["/left-arm-state", "/left-arm-action"]);
-        assert!(merged[0].flagged(33.4));
-        assert_eq!(merged[0].furthest()[0].measure(), "−126 ms");
-        let aligned = ClockPairing {
-            median_ms: 0.0,
-            ..pairing("/frame", &[(0.0, 0.0), (0.2, 0.1)])
-        };
-        assert!(!aligned.flagged(33.3));
-        assert_eq!(Milliseconds::signed(0.0), "0 ms");
-        assert_eq!(Milliseconds::signed(12.4), "+12 ms");
+        assert!(
+            sql.contains("WHERE a.episodes = mine.episodes AND a.episodes = theirs.episodes"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("spql.agg.approx_quantile(median_ms, 0.5) AS median_ms"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("CASE WHEN abs(median_ms) > 33.4 OR spread > 33.4 OR drift > 16.7 THEN true ELSE false END AS flagged"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("WHERE j.flagged AND (abs(e.median_ms) > 33.4 OR abs(e.opening_ms - e.median_ms) > 16.7)"),
+            "{sql}"
+        );
+        assert!(sql.contains("WHERE distance_rank <= 3"), "{sql}");
     }
 
     #[test]
-    fn each_repeated_stream_pairs_with_the_overview_camera_and_shared_clocks_read_once() {
+    fn each_repeated_stream_pairs_with_the_overview_camera_and_pairings_read_in_declared_order() {
         let dataset = DatasetSelection::new(vec!["dataset_folding".into()]).unwrap();
         let video = || vec!["foxglove.CompressedVideo".to_owned()];
         let topics = [
@@ -465,6 +376,7 @@ mod tests {
             DatasetTopic::new("/top-camera".into(), video()).with_coverage(2, Some(7)),
             DatasetTopic::new("/left-arm-state".into(), vec![]).with_coverage(2, Some(7)),
             DatasetTopic::new("/left-arm-action".into(), vec![]).with_coverage(2, Some(7)),
+            DatasetTopic::new("/right-arm-state".into(), vec![]).with_coverage(2, Some(7)),
             DatasetTopic::new("/instruction".into(), vec![]).with_coverage(2, Some(2)),
         ];
         let streams = CheckedStreams::new(&dataset, &topics);
@@ -486,71 +398,37 @@ mod tests {
                 .is_none()
         );
 
-        let timing = |topic: &str, messages: u64| -> TimingPart {
-            stored(
-                json!({"part": topic, "messages": messages, "first_ns": 0, "last_ns": messages * 33_000_000}),
-            )
-        };
-        let (_, timings) = RecordingRate::read(
-            streams,
-            &CheckCells::fixture(vec![
-                (
-                    episode_id(1),
-                    vec![
-                        timing("/top-camera", 3),
-                        timing("/left-arm-state", 3),
-                        timing("/left-arm-action", 3),
-                    ],
-                ),
-                (
-                    episode_id(2),
-                    vec![
-                        timing("/top-camera", 4),
-                        timing("/left-arm-state", 4),
-                        timing("/left-arm-action", 4),
-                    ],
-                ),
-            ]),
-        );
-        let camera: FramesPart = stored(json!({
-            "part": "/top-camera", "frames": 3, "span_ns": 66_000_000, "worst_gap_ns": 33_000_000,
-            "worst_at": 0.033, "late": 0, "period_ns": 33_300_000.0
-        }));
-        let frames = CameraFrames::read(
-            streams,
-            &CheckCells::fixture(vec![(episode_id(1), vec![camera])]),
-        );
-        let offset = |topic: &str, (median, low, high): (f64, f64, f64)| -> OffsetPart {
-            stored(
-                json!({"part": topic, "median_ms": median, "opening_ms": null, "low_ms": low, "high_ms": high}),
-            )
-        };
-        let cells = CheckCells::fixture(
-            [(1, (-100.0, -120.0, -30.0)), (2, (-110.0, -130.0, -90.0))]
-                .into_iter()
-                .map(|(ordinal, measured)| {
-                    (
-                        episode_id(ordinal),
-                        vec![
-                            offset("/left-arm-state", measured),
-                            offset("/left-arm-action", measured),
-                        ],
-                    )
-                })
-                .collect(),
-        );
-        let clock = ClockOffset::read(streams, &timings, &frames, &cells);
+        let judged: Vec<ClockPairing> = serde_json::from_value(json!([
+            {
+                "streams": ["/right-arm-state"], "median_ms": -10.0, "low_ms": -12.0, "high_ms": -8.0,
+                "episodes": 1, "flagged": false, "apart": null,
+                "furthest": [{"episode_id": episode(1), "median_ms": -10.0}]
+            },
+            {
+                "streams": ["/left-arm-action", "/left-arm-state"], "median_ms": -105.0, "low_ms": -130.0, "high_ms": -30.0,
+                "episodes": 3, "flagged": true,
+                "apart": [{"episode_id": episode(1), "median_ms": -100.0}, {"episode_id": episode(2), "median_ms": -110.0}],
+                "furthest": [
+                    {"episode_id": episode(1), "median_ms": -100.0},
+                    {"episode_id": episode(3), "median_ms": -126.0},
+                    {"episode_id": episode(2), "median_ms": -110.0}
+                ]
+            }
+        ]))
+        .unwrap();
+        let clock = ClockOffset::of(streams, 33.3, judged);
         assert_eq!(clock.camera.as_deref(), Some("/top-camera"));
-        assert!((clock.period_ms - 33.3).abs() < 1e-9);
-        // The state and action share a clock, so they read as one.
-        assert_eq!(clock.pairings.len(), 1);
-        let pairing = &clock.pairings[0];
-        assert_eq!(pairing.streams, ["/left-arm-state", "/left-arm-action"]);
-        assert_eq!(
-            (pairing.median_ms, pairing.low_ms, pairing.high_ms),
-            (-105.0, -130.0, -30.0)
-        );
-        assert_eq!(pairing.episodes.len(), 2);
-        assert!(pairing.flagged(clock.period_ms));
+        // The pairing whose stream is declared first leads, its streams as
+        // declared, and its furthest episode first.
+        let first = &clock.pairings[0];
+        assert_eq!(first.streams, ["/left-arm-state", "/left-arm-action"]);
+        assert_eq!(first.offset.median_ms, -105.0);
+        assert!(first.flagged);
+        assert_eq!(first.furthest[0].evidence().measure(), "−126 ms");
+        assert_eq!(first.apart().count(), 2);
+        // A pairing no episode flags names none.
+        assert_eq!(clock.pairings[1].apart().count(), 0);
+        assert_eq!(Milliseconds::signed(0.0), "0 ms");
+        assert_eq!(Milliseconds::signed(12.4), "+12 ms");
     }
 }

@@ -10,8 +10,9 @@
 //! it and every answer cast to what the table stores.
 use super::{EpisodeUuids, StudioDataset};
 use crate::{ProjectConnection, ProjectStore, StorageManager};
-use arrow_array::{Array, ArrayRef, ListArray, RecordBatch, StructArray};
+use arrow_array::{Array, ArrayRef, ListArray, RecordBatch, StructArray, make_array};
 use arrow_buffer::OffsetBuffer;
+use arrow_data::transform::MutableArrayData;
 use arrow_schema::{DataType, Field, Fields, Schema};
 use spiral_robotics_common::curation::{AnswerColumn, AnswerTable};
 use spiral_robotics_common::datasets::EpisodeId;
@@ -274,20 +275,34 @@ impl StatementAnswers {
 }
 
 /// The answers one fill holds for one column until it writes them: each
-/// episode it computed, beside its answer.
+/// episode it computed, beside its answer, and how many bytes they hold.
 #[derive(Default)]
 pub struct ColumnAnswers {
     episodes: Vec<EpisodeId>,
     answers: Vec<ArrayRef>,
+    bytes: usize,
 }
 
 impl ColumnAnswers {
+    /// The most answer bytes one write carries. Spiral refuses to change
+    /// more than 16 MiB of a hosted table in one statement, so a fill writes
+    /// what it holds each time it reaches this, well below that.
+    const WRITE_BUDGET_BYTES: usize = 4 * 1024 * 1024;
+
+    /// Hold `episode`'s answer, copied out of whatever it was read with, so
+    /// it keeps no more than its own row and is counted once.
     pub fn hold(&mut self, episode: EpisodeId, answer: EpisodeAnswer) {
+        let read = answer.0.to_data();
+        let mut alone = MutableArrayData::new(vec![&read], false, 1);
+        alone.extend(0, 0, 1);
+        let alone = make_array(alone.freeze());
+        self.bytes += alone.get_array_memory_size();
         self.episodes.push(episode);
-        self.answers.push(answer.0);
+        self.answers.push(alone);
     }
-    pub fn len(&self) -> usize {
-        self.episodes.len()
+    /// Whether what it holds fills one write.
+    pub fn is_full(&self) -> bool {
+        self.bytes >= Self::WRITE_BUDGET_BYTES
     }
     pub fn is_empty(&self) -> bool {
         self.episodes.is_empty()
@@ -595,6 +610,40 @@ mod tests {
                 .is_failed()
         );
         assert!(EpisodeAnswer::from_statement(&one, &[row(vec![Some(0.5), None])]).is_err());
+    }
+
+    #[test]
+    fn answers_fill_one_write_by_what_each_holds_alone() {
+        // 64 episodes' scores of 256 KiB each, read as one 16 MiB column.
+        let scores = DataType::List(Arc::new(Field::new_list_field(DataType::Float32, false)));
+        let schema = Schema::new(vec![
+            EpisodeUuids::field("episode_id"),
+            Field::new(ANSWER, scores, true),
+        ]);
+        let frames = 64 * 1024;
+        let read = ListArray::new(
+            Arc::new(Field::new_list_field(DataType::Float32, false)),
+            OffsetBuffer::from_lengths(vec![frames; 64]),
+            Arc::new(Float32Array::from(vec![0.5; 64 * frames])),
+            None,
+        );
+        let episodes = (0..64).map(episode).collect::<Vec<_>>();
+        let batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![EpisodeUuids::array(&episodes).unwrap(), Arc::new(read)],
+        )
+        .unwrap();
+        let mut answered = StatementAnswers::from_statement(&schema, &[batch]).unwrap();
+        let mut held = ColumnAnswers::default();
+        for episode in &episodes[..15] {
+            held.hold(episode.clone(), answered.answer(episode));
+        }
+        assert!(
+            !held.is_full(),
+            "each answer counts its own row, not the read's"
+        );
+        held.hold(episodes[15].clone(), answered.answer(&episodes[15]));
+        assert!(held.is_full(), "16 answers of 256 KiB fill a write");
     }
 
     #[test]
