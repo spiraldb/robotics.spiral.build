@@ -61,7 +61,7 @@ Data, Curation, and Training do not poll hardware telemetry.
 
 Curation owns its graph draft locally. It fetches documents by ID and submits
 the complete graph on an explicit Save, which acknowledges the saved revision
-while preserving subsequent local edits. Only preview runs are polled; the
+while preserving subsequent local edits. Only fill runs are polled; the
 draft is never reconciled from a backend snapshot. Settings similarly
 distinguishes fetched values from its draft.
 

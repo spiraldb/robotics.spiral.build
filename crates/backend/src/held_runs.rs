@@ -1,5 +1,5 @@
-//! The background runs one project starts — a curation's preview and fill
-//! runs, a dataset's import — each held under an id until it is forgotten.
+//! The background runs one project starts — a curation's fill runs, a
+//! dataset's import — each held under an id until it is forgotten.
 //! A run lives in memory: a restarted backend holds none.
 use crate::OperationError;
 use crate::clock::StableIdSequence;
@@ -76,16 +76,6 @@ impl<R: HeldWork> HeldRuns<R> {
             .collect()
     }
 
-    /// End the task working run `id` now, keeping the run to be read.
-    pub(crate) fn abort(&self, id: &str) -> Result<(), OperationError> {
-        let runs = self.runs.recover_lock();
-        let held = runs.get(id).ok_or_else(|| {
-            OperationError::NotFound("This run is no longer held; run it again.".into())
-        })?;
-        held.task.abort();
-        Ok(())
-    }
-
     /// End and drop every run `replaced` picks.
     pub(crate) fn replace(&self, replaced: impl Fn(&R) -> bool) {
         self.runs.recover_lock().retain(|_, held| {
@@ -109,14 +99,5 @@ impl<R: HeldWork> HeldRuns<R> {
         self.runs
             .recover_lock()
             .retain(|_, held| !held.run.is_forgotten());
-    }
-
-    /// Whether the task working run `id` has ended.
-    #[cfg(test)]
-    pub(crate) fn is_finished(&self, id: &str) -> bool {
-        self.runs
-            .recover_lock()
-            .get(id)
-            .is_some_and(|held| held.task.is_finished())
     }
 }

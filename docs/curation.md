@@ -235,34 +235,30 @@ reach the node as the curation's own run, and the node card and the top bar
 say how far it has got ("Breaking down 3 of 5 episodes"). The backend first
 fills the node's stored answers for those episodes (a fill run over listed
 episodes, `POST /api/curation-fills`, polled every second; Stop stops it and
-keeps what it answered), then each episode is read with one query, the
-episode bound as `$1`: the node's entries over that episode's row, as the
-published view writes them (`CurationPath::preview`). A preview carries what
-the Select's views need and nothing bigger: Score progress its frames'
-times and progress rates, Track objects each picture's time and how many
-objects it holds, and the subtask nodes their subtasks with their judgments.
-A timeline answers as one Arrow stream, subtasks as rows. The boxes Track
-objects stored are read for the one episode opened (`track_objects/tracks.rs`).
+keeps what it answered), then one statement reads every one of those
+episodes, bound as `$1` through `$N`: the node's entries over their rows,
+as the published view writes them (`CurationPath::preview`), each entry with
+its episode. A preview carries what the Select's views need and nothing
+bigger: Score progress its frames' times and progress rates, Track objects
+each picture's time and how many objects it holds, and the subtask nodes
+their subtasks with their judgments. Timelines answer as one Arrow stream
+(`POST /api/queries/episodes/arrow`), subtasks as rows
+(`POST /api/queries/episodes`), each episode bounded as one episode's read
+is; the browser splits the answer by episode. The boxes Track objects stored
+are read for the one episode opened (`track_objects/tracks.rs`).
 
-A pass hands every query to the backend as one run
-(`POST /api/curation-previews`), which answers at once and works through them
-eight at a time. The browser polls it every second
-(`GET /api/curation-previews/{id}`) and fetches each answer as it lands
-(`…/answers/{query}`), so no request of the page waits on a model: a query can
-take a minute, and the browser opens only six connections to the backend.
-
-Stop (`…/stop`) ends the run at once: it starts no further query, and the
-backend drops the ones in flight, whose episodes read as never run and wait
-for the next Run. Spiral cannot cancel a statement it is computing, so a
-dropped query finishes the batch it is on and its answer is thrown away; the
-model calls it made are still spent. A run nobody polls for 30 seconds only
-starts nothing more, since the page that wanted it has gone, and a settled
-run is dropped once it has gone unread that long. Runs live in the backend's
-memory, so a restarted backend holds none. A failed episode is listed with its reason and
-never stops the rest. What the preview reads is held in the browser for the
-session, under the node's answer column, and is gone after a reload; a
-curation opened reads back what its columns already hold, from the top of
-the graph down.
+The read asks no model, since the fill already stored every answer, so it
+answers like any other query: over the 100-episode sample it is one
+round trip of about the cost of one episode's. Stop pressed while it is read
+drops what it answers, and its episodes wait for the next Run. A failed
+episode is listed with its reason and never stops the rest; an episode whose
+stored answer is empty failed when it was filled. What the preview reads is
+held in the browser for the session, under the node's answer column, and is
+gone after a reload. A curation opened reads back what its columns already
+hold, from the top of the graph down: each node reads its episodes the same
+way while it asks which of them its column holds
+(`POST /api/curation-answers/filled`), so an empty answer reads as failed
+and a missing one as not yet run.
 
 A preview depends only on the node's own call, so changing a node's
 settings leaves it having read nothing, and nothing below it goes out of
@@ -376,7 +372,7 @@ views its payload lists as published.
 | Model nodes add columns; the Select is the one filter (decided 2026-10-08) | One place owns every cutoff, and any column can be cut on, such as duration per bottle | Each measure keeping by its own rule |
 | Column meaning is the compiler's, by node id | A Select, Data, and Training read a column by what wrote it, and a renamed category is still the same column | Inspecting the view's types at run time |
 | The reach chain carries only `kept`, and columns fold from the episode row | Folding `kept` needs `GROUP BY`, which carries no other column, and carrying big answers through an unnest copies them per row | Window aggregates carrying every column |
-| A preview reads the node's own entries for the bound episode | Its answers are the ones a publish reuses, and it no longer depends on what reached the node | Previewing over the parent's rows as `VALUES` |
+| A preview reads the node's own entries for the episodes it lists, in one statement | Its answers are the ones a publish reuses, and it no longer depends on what reached the node | Previewing over the parent's rows as `VALUES` |
 | Preview reads the first 100 episodes in recording order | Fast enough to iterate on | A random sample |
 | Curation only chooses data | Sample rate, cameras, image size, and normalization are the policy's input contract, which rollout replays | Shape nodes in Curation |
 | Publish is explicit and named; Save stays local | Exploratory leaves must not become views readers depend on, and readers need a stable name | Auto-publishing every leaf |

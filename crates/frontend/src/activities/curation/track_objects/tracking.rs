@@ -89,7 +89,7 @@ impl ModelNode for ObjectTracking {
         Ok(ModelEntries::new(
             vec![entry],
             "timestamp_ns",
-            "timestamp_ns, spql.list.len(objects) AS value".to_owned(),
+            "episode_id, timestamp_ns, spql.list.len(objects) AS value".to_owned(),
         )
         .folding(
             TableColumn::of_node(step.node(), &step.name(), ColumnMeaning::TrackedObjects),

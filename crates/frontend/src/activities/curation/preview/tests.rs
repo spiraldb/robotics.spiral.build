@@ -150,10 +150,10 @@ fn every_model_node_previews_what_it_has_the_backend_answer_and_store_first() {
         let plan = PreviewPlan::of(&reader, node, &episodes).unwrap();
         let fill = plan.fill();
         assert_eq!(fill.episodes(), &FillEpisodes::Listed(episodes.to_vec()));
-        // Each episode's preview then reads what was stored, and asks nothing.
+        // One read then reads what was stored of both, and asks nothing.
         let statement = plan.statement();
         assert!(statement.contains(&format!("a.{}.value", fill.column())));
-        assert!(statement.contains("WHERE e.id = $1)"));
+        assert!(statement.contains("WHERE e.id IN ($1, $2))"));
         assert!(!statement.contains("spql.ai."), "{statement}");
         match fill.source() {
             AnswerSource::ProgressService { .. } => assert_eq!(node, &score),

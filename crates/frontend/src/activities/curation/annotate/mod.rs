@@ -201,10 +201,10 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
         chosen.focus(focus.episode(), focus.interval());
     });
 
-    // The preview reads what this node stored of each episode that reaches
-    // it, one query per episode, after the backend asks the model. The pass
-    // is the curation's, not this view's: choosing another node leaves it
-    // reading. Stop ends it at once; the episodes in flight stay unread.
+    // The preview reads what this node stored of every episode that reaches
+    // it, in one query, after the backend asks the model. The pass is the
+    // curation's, not this view's: choosing another node leaves it reading.
+    // Stop ends it at once; the episodes not yet read stay unread.
     let run = controller.run_state(&node);
     let problem = use_signal(|| Option::<String>::None);
     let start = {

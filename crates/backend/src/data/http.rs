@@ -15,7 +15,9 @@ use spiral_robotics_common::datasets::{
     HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection, HuggingFaceDatasetSource,
     LeRobotImportStatus, ProjectResource,
 };
-use spiral_robotics_common::relations::{EpisodeQueryRequest, QueryRequest, SpiralQuerySnapshot};
+use spiral_robotics_common::relations::{
+    EpisodeQueryRequest, EpisodesQueryRequest, QueryRequest, SpiralQuerySnapshot,
+};
 use spiral_robotics_storage::ingestion::HuggingFaceDatasetDiscovery as _;
 
 pub(crate) struct DatasetQueryEndpoints;
@@ -33,6 +35,11 @@ impl DatasetQueryEndpoints {
             .route(
                 "/queries/episode/arrow",
                 post(Self::run_episode_arrow_query),
+            )
+            .route("/queries/episodes", post(Self::run_episodes_query))
+            .route(
+                "/queries/episodes/arrow",
+                post(Self::run_episodes_arrow_query),
             )
             .route(
                 "/datasets/hugging-face/inspect",
@@ -173,6 +180,30 @@ impl DatasetQueryEndpoints {
             .storage()
             .queries()
             .arrow_for_episode(&request)
+            .await
+            .map_err(OperationError::External)?;
+        Ok(ArrowResponse(stream))
+    }
+    async fn run_episodes_query(
+        Project(project): Project,
+        ApiJson(request): ApiJson<EpisodesQueryRequest>,
+    ) -> Result<Json<SpiralQuerySnapshot>, OperationError> {
+        let snapshot = project
+            .storage()
+            .queries()
+            .query_for_episodes(&request)
+            .await
+            .map_err(OperationError::External)?;
+        Ok(Json(snapshot))
+    }
+    async fn run_episodes_arrow_query(
+        Project(project): Project,
+        ApiJson(request): ApiJson<EpisodesQueryRequest>,
+    ) -> Result<ArrowResponse, OperationError> {
+        let stream = project
+            .storage()
+            .queries()
+            .arrow_for_episodes(&request)
             .await
             .map_err(OperationError::External)?;
         Ok(ArrowResponse(stream))

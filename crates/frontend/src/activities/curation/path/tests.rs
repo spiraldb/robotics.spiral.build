@@ -46,8 +46,9 @@ fn published(graph: &CurationGraph, node: &str) -> String {
     CurationPath::to(graph, node).unwrap().statement().unwrap()
 }
 
+/// What `node`'s preview of two listed episodes reads.
 fn preview(graph: &CurationGraph, node: &str) -> String {
-    CurationPath::to(graph, node).unwrap().preview().unwrap()
+    CurationPath::to(graph, node).unwrap().preview(2).unwrap()
 }
 
 /// A Break down node on the top camera of a dataset that records the
@@ -197,15 +198,17 @@ fn the_fastest_quarter_by_duration_per_bottle_ranks_every_reaching_episode() {
         reaching.ends_with("\nSELECT episode_id FROM dataset"),
         "{reaching}"
     );
-    // The preview reads how many bottles each picture of the bound episode
-    // held, never the boxes.
+    // The preview reads how many bottles each picture of the listed
+    // episodes held, never the boxes.
     let counting = preview(&graph, &track);
     assert!(counting.contains(&format!(
-        "episodes AS (SELECT e.id AS episode_id, CAST(e.message_start_time AS BIGINT) AS origin_ns, a.{tracks}.value AS {tracks} FROM spql.mcap.episodes('dataset_abc130k') e JOIN {ANSWERS} a ON a.episode_id = e.id WHERE e.id = $1)"
+        "episodes AS (SELECT e.id AS episode_id, CAST(e.message_start_time AS BIGINT) AS origin_ns, a.{tracks}.value AS {tracks} FROM spql.mcap.episodes('dataset_abc130k') e JOIN {ANSWERS} a ON a.episode_id = e.id WHERE e.id IN ($1, $2))"
     )));
     assert!(counting.ends_with(
-        "\nSELECT timestamp_ns, spql.list.len(objects) AS value FROM track_objects_1_entries"
+        "\nSELECT episode_id, timestamp_ns, spql.list.len(objects) AS value FROM track_objects_1_entries"
     ));
+    let path = CurationPath::to(&graph, &track).unwrap();
+    assert!(path.preview(0).is_err(), "a preview lists an episode");
     admitted(&published, &counting);
     // The rate is part of the call: another rate is another column.
     if let CurationNodeKind::TrackObjects(tracking) = graph.node_mut(&track).unwrap().kind_mut() {
@@ -249,13 +252,11 @@ fn a_progress_rate_narrows_kept_to_the_stretches_progressing_fast_enough() {
     ] {
         assert!(published.contains(&step), "{step}\n{published}");
     }
-    // The preview reads the bound episode's frames and their rates.
+    // The preview reads the listed episodes' frames and their rates.
     let scoring = preview(&graph, &score);
-    assert!(
-        scoring.ends_with(
-            "\nSELECT timestamp_ns, progress_rate AS value FROM score_progress_1_entries"
-        )
-    );
+    assert!(scoring.ends_with(
+        "\nSELECT episode_id, timestamp_ns, progress_rate AS value FROM score_progress_1_entries"
+    ));
     assert!(!scoring.contains("spql.ai.") && !scoring.contains("read_topic"));
     admitted(&published, &scoring);
     let fills = CurationPath::to(&graph, &moving).unwrap().fills().unwrap();
@@ -339,7 +340,7 @@ fn a_breakdown_reads_each_episode_whole_and_lists_its_subtasks_in_log_time() {
         panic!("a published fill asks what reaches the node")
     };
     assert!(reaching.ends_with("\nSELECT episode_id FROM select_1"));
-    // The preview reads the bound episode's stored subtasks.
+    // The preview reads the listed episodes' stored subtasks.
     let breaking = preview(&graph, &annotate);
     assert!(breaking.ends_with(
         "\nSELECT episode_id, description, start_ns, end_ns FROM break_down_subtasks_1_entries"

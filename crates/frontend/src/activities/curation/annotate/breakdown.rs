@@ -79,7 +79,7 @@ impl ModelNode for SubtaskAnnotation {
     /// stored.
     fn episode_columns(&self, row: &mut EpisodeRow, step: &ModelStep<'_>) -> Result<(), PathError> {
         match row.source() {
-            PathSource::Published | PathSource::Preview => row.stored(step.column()),
+            PathSource::Published | PathSource::Preview { .. } => row.stored(step.column()),
             PathSource::Fill => {
                 let call = self.call(row)?;
                 row.asked(step.column(), call)

@@ -7,8 +7,8 @@ use serde_json::{Map, Value};
 use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_common::relations::SpiralQuerySnapshot;
 
-/// The most subtasks one preview query answers with: the query endpoint's own
-/// bound. Break down answers a few dozen for a long episode.
+/// The most subtasks a preview reads for each episode it lists: the query
+/// endpoint's own bound. Break down answers a few dozen for a long episode.
 pub(in crate::activities::curation) const MAX_SUBTASKS: usize = 1_000;
 
 /// The category a grouping put one subtask in, and how probable that was.
@@ -158,9 +158,7 @@ impl SubtaskReading {
         sample: &EpisodeSample,
     ) -> Result<Vec<SubtaskRow>, String> {
         if answer.truncated() {
-            return Err(format!(
-                "The preview answered with more than {MAX_SUBTASKS} subtasks."
-            ));
+            return Err("The preview answered with more subtasks than one read holds.".into());
         }
         let mut rows = answer
             .rows()

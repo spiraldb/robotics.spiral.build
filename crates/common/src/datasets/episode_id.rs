@@ -54,6 +54,13 @@ impl TryFrom<&str> for EpisodeId {
     }
 }
 
+/// The member UUID's sixteen bytes, as an Arrow `arrow.uuid` value holds them.
+impl From<[u8; 16]> for EpisodeId {
+    fn from(uuid: [u8; 16]) -> Self {
+        Self(uuid.iter().map(|byte| format!("{byte:02x}")).collect())
+    }
+}
+
 impl From<EpisodeId> for String {
     fn from(id: EpisodeId) -> Self {
         id.0
@@ -74,6 +81,11 @@ mod tests {
     fn an_id_is_the_member_uuid_spiral_returns_and_reads_by_its_tail() {
         let id = EpisodeId::try_from("01A0989FB6557788A2DD36342635E3D1").unwrap();
         assert_eq!(id.as_str(), "01a0989fb6557788a2dd36342635e3d1");
+        let bytes = [
+            0x01, 0xa0, 0x98, 0x9f, 0xb6, 0x55, 0x77, 0x88, 0xa2, 0xdd, 0x36, 0x34, 0x26, 0x35,
+            0xe3, 0xd1,
+        ];
+        assert_eq!(EpisodeId::from(bytes), id);
         assert_eq!(id.short(), "2635e3d1");
         assert_eq!(
             serde_json::to_value(&id).unwrap(),

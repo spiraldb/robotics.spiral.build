@@ -18,7 +18,9 @@ use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, ImageFormat};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use spiral_robotics_common::datasets::EpisodeId;
-use spiral_robotics_common::relations::{EpisodeQueryRequest, QueryColumn, SpiralQuerySnapshot};
+use spiral_robotics_common::relations::{
+    EpisodeQueryRequest, EpisodesQueryRequest, QueryColumn, SpiralQuerySnapshot,
+};
 
 use super::database::{DatabaseSession, RecordBatchStream, SqlStatement};
 use super::project_store::{ProjectConnection, ProjectStore};
@@ -214,6 +216,44 @@ impl<'a> ProjectQueries<'a> {
             .await
     }
 
+    /// A bounded read over listed members of one dataset, bound as `$1`
+    /// through `$N`: each member may answer as many rows as one member's
+    /// read.
+    pub async fn query_for_episodes(
+        &self,
+        request: &EpisodesQueryRequest,
+    ) -> Result<SpiralQuerySnapshot, String> {
+        let statement = Self::bound_listed(request)?;
+        let mut connection = self.project_store.connect().await?;
+        let rows = request.max_rows().clamp(1, MAX_QUERY_ROWS);
+        QueryExecution::bound(
+            statement,
+            QueryLimits::new(
+                rows.saturating_mul(request.episodes().len()),
+                MAX_QUERY_RESPONSE_BYTES,
+            ),
+        )
+        .run_async(&mut connection)
+        .await
+    }
+
+    /// The same listed members read as one Arrow IPC stream, exact to the
+    /// value.
+    pub async fn arrow_for_episodes(
+        &self,
+        request: &EpisodesQueryRequest,
+    ) -> Result<Vec<u8>, String> {
+        let statement = Self::bound_listed(request)?;
+        let mut connection = self.project_store.connect().await?;
+        let rows = request.max_rows().clamp(1, MAX_ARROW_ROWS);
+        connection
+            .query(statement)
+            .await
+            .map_err(|error| format!("executing Spiral query: {error}"))?
+            .into_arrow_ipc(rows.saturating_mul(request.episodes().len()))
+            .await
+    }
+
     /// The same episode read whole, as the backend works with it: every
     /// batch, and the schema they share even when there is none.
     pub async fn batches_for_episode(
@@ -341,6 +381,16 @@ impl<'a> ProjectQueries<'a> {
         Ok(crate::datasets::EpisodeTopicQuery::for_episode(
             request.episode().dataset(),
             request.episode().episode_id(),
+            request.statement().trim().to_owned(),
+        )?
+        .into_statement())
+    }
+
+    fn bound_listed(request: &EpisodesQueryRequest) -> Result<SqlStatement, String> {
+        SpiralSql::ensure_read_only(request.statement())?;
+        Ok(crate::datasets::EpisodeTopicQuery::for_episodes(
+            request.dataset(),
+            request.episodes(),
             request.statement().trim().to_owned(),
         )?
         .into_statement())

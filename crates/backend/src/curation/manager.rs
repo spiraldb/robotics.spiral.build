@@ -8,7 +8,6 @@
 //! single authority on which revision a document currently holds, so two tabs
 //! racing to save produce exactly one winner and one conflict.
 use super::fill::FillRuns;
-use super::preview::PreviewRuns;
 use crate::OperationError;
 use spiral_robotics_common::curation::{
     AnswerTable, CurationDeletion, CurationDocument, CurationSummary, FillRequest, FillStatus,
@@ -27,7 +26,6 @@ const DELETE_SAVED_ELSEWHERE: &str =
 
 pub(crate) struct CurationManager {
     storage: Arc<StorageManager>,
-    previews: PreviewRuns,
     fills: FillRuns,
 }
 
@@ -35,15 +33,9 @@ impl CurationManager {
     /// `keys` reach the Modal service that scores progress.
     pub(crate) fn new(storage: Arc<StorageManager>, keys: Arc<ProviderKeys>) -> Self {
         Self {
-            previews: PreviewRuns::new(storage.clone()),
             fills: FillRuns::new(storage.clone(), keys),
             storage,
         }
-    }
-
-    /// The preview runs this project's curations have started.
-    pub(super) fn previews(&self) -> &PreviewRuns {
-        &self.previews
     }
 
     /// The fill runs this project's curations have started.
@@ -51,9 +43,8 @@ impl CurationManager {
         &self.fills
     }
 
-    /// Abandon every preview and fill run; the project is closing.
+    /// Abandon every fill run; the project is closing.
     pub(crate) fn shutdown(&self) {
-        self.previews.shutdown();
         self.fills.shutdown();
     }
 

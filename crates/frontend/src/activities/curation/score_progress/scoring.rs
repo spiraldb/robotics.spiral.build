@@ -138,7 +138,7 @@ impl ModelNode for ProgressScoring {
         Ok(ModelEntries::new(
             vec![entry],
             "timestamp_ns",
-            "timestamp_ns, progress_rate AS value".to_owned(),
+            "episode_id, timestamp_ns, progress_rate AS value".to_owned(),
         )
         .folding(
             TableColumn::of_node(step.node(), &step.name(), ColumnMeaning::ProgressRates),

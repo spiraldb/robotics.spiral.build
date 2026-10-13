@@ -1,37 +1,41 @@
 //! One model node's preview as a run: the backend first fills the node's
-//! stored answers for the episodes it previews, then reads the node's
-//! entries of each episode, one query per episode, on a run the backend
-//! holds, and the pass holds what comes back. A curation opened restores its
-//! previews the same way without the fill, reading only the episodes whose
-//! answers are already stored.
-use super::held_run::HeldRun;
+//! stored answers for the episodes it previews, then one statement reads the
+//! node's entries of every one of them, bound as `$1` through `$N`, and the
+//! pass holds what each answered. A curation opened restores its previews
+//! the same way without the fill, holding the episodes whose answers are
+//! already stored.
 use super::reads::PreviewRows;
-use crate::activities::curation::annotate::{MAX_SUBTASKS, SubtaskReading};
+use crate::activities::curation::annotate::{MAX_SUBTASKS, SubtaskReading, SubtaskRow};
 use crate::activities::curation::client::{CurationClient, FillRuns};
 use crate::activities::curation::document::{CurationGraph, CurationNodeKind};
 use crate::activities::curation::measured_timeline::MeasuredTimeline;
 use crate::activities::curation::path::{CurationPath, PathError};
 use crate::activities::curation::population::{EpisodeSample, PopulationReader};
 use crate::activities::curation::state::{CurationController, RunHandle};
+use crate::activities::data::DatasetClient;
 use spiral_robotics_common::curation::{
-    AnswerColumn, ColumnFill, FillRequest, FillState, FilledEpisodesRequest, PreviewQuery,
-    PreviewQueryState,
+    AnswerColumn, ColumnFill, FillRequest, FillState, FilledEpisodesRequest,
 };
-use spiral_robotics_common::datasets::{EpisodeId, EpisodeSelection};
-use spiral_robotics_common::relations::EpisodeQueryRequest;
+use spiral_robotics_common::datasets::EpisodeId;
+use spiral_robotics_common::relations::EpisodesQueryRequest;
+use std::collections::BTreeMap;
 
-/// How often a pass asks the backend how far its run has got.
+/// How often a pass asks the backend how far its fill has got.
 const POLL_INTERVAL_MS: u32 = 1_000;
 /// How soon, between polls, a pass notices Stop.
 const STOP_CHECK_MS: u32 = 100;
 
-/// How a preview's answers read back: a timeline as one Arrow stream, or
+/// How a preview's answers read back: timelines as one Arrow stream, or
 /// subtasks as rows.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum PreviewReading {
     Timeline,
     Subtasks(SubtaskReading),
 }
+
+/// What one read answered, by episode: an episode whose stored answer holds
+/// nothing is absent.
+type EpisodeAnswers = BTreeMap<EpisodeId, PreviewRows>;
 
 /// One model node's preview: the node and the column it stores its answers
 /// in, the stored answers it fills first, its statement and the episodes it
@@ -42,7 +46,7 @@ pub(in crate::activities::curation) struct PreviewPlan {
     node: (String, AnswerColumn),
     fill: ColumnFill,
     statement: String,
-    episodes: Vec<EpisodeSelection>,
+    episodes: Vec<EpisodeId>,
     reading: PreviewReading,
     /// What a pass of it says it is doing: "Scoring".
     verb: &'static str,
@@ -58,7 +62,7 @@ impl PreviewPlan {
         CurationPath::to(graph, node)?.table().map(|_| ())
     }
 
-    /// The preview of `episodes` of `node`: one query per episode.
+    /// The preview of `episodes` of `node`: one statement over all of them.
     pub(in crate::activities::curation) fn of(
         reader: &PopulationReader<'_>,
         node: &str,
@@ -88,28 +92,20 @@ impl PreviewPlan {
                 return Err(PathError::new("Only a node that asks a model previews."));
             }
         };
-        let path = CurationPath::to(graph, node)?;
-        let episodes = episodes
+        if let Some(unlisted) = episodes
             .iter()
-            .map(|episode| {
-                reader
-                    .sample()
-                    .episode(episode)
-                    .map(|episode| episode.selection())
-                    .ok_or_else(|| PathError::new("The sample no longer lists this episode."))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let fill = path.fill_for(
-            episodes
-                .iter()
-                .map(|episode| episode.episode_id().clone())
-                .collect(),
-        )?;
+            .find(|episode| reader.sample().episode(episode).is_none())
+        {
+            return Err(PathError::new(format!(
+                "The sample no longer lists episode {unlisted}."
+            )));
+        }
+        let path = CurationPath::to(graph, node)?;
         Ok(Self {
             node: (node.to_owned(), path.answer_column()?),
-            fill,
-            statement: path.preview()?,
-            episodes,
+            fill: path.fill_for(episodes.to_vec())?,
+            statement: path.preview(episodes.len())?,
+            episodes: episodes.to_vec(),
             reading,
             verb,
             sample: reader.sample().clone(),
@@ -127,59 +123,76 @@ impl PreviewPlan {
         &self.fill
     }
 
-    /// The query reading `episode`, asking for its answer in the form this
-    /// preview reads.
-    fn query(&self, episode: &EpisodeSelection) -> PreviewQuery {
-        let (bound, statement) = (episode.clone(), self.statement.clone());
+    /// The query reading every episode the plan previews, each bounded as
+    /// one episode's read is.
+    fn request(&self) -> EpisodesQueryRequest {
+        let max_rows = match self.reading {
+            PreviewReading::Timeline => MeasuredTimeline::MAX_ENTRIES,
+            PreviewReading::Subtasks(_) => MAX_SUBTASKS,
+        };
+        EpisodesQueryRequest::new(
+            self.sample.dataset().clone(),
+            self.episodes.clone(),
+            self.statement.clone(),
+            max_rows,
+        )
+    }
+
+    /// What every episode the plan previews answered, in one read.
+    async fn read(&self) -> Result<EpisodeAnswers, String> {
+        let datasets = DatasetClient::current();
+        let request = self.request();
+        let fail = |error: crate::client::CommandError| error.to_string();
         match self.reading {
-            PreviewReading::Timeline => PreviewQuery::EpisodeArrow(EpisodeQueryRequest::new(
-                bound,
-                statement,
-                MeasuredTimeline::MAX_ENTRIES,
-            )),
-            PreviewReading::Subtasks(_) => {
-                PreviewQuery::EpisodeRows(EpisodeQueryRequest::new(bound, statement, MAX_SUBTASKS))
+            PreviewReading::Timeline => {
+                let stream = datasets
+                    .run_episodes_arrow_query(&request)
+                    .await
+                    .map_err(fail)?;
+                Ok(MeasuredTimeline::read_each(&stream, &self.sample)?
+                    .into_iter()
+                    .map(|(episode, timeline)| (episode, PreviewRows::Timeline(timeline)))
+                    .collect())
+            }
+            PreviewReading::Subtasks(reading) => {
+                let answer = datasets.run_episodes_query(&request).await.map_err(fail)?;
+                let mut subtasks = BTreeMap::<EpisodeId, Vec<SubtaskRow>>::new();
+                for row in reading.read(&answer, &self.sample)? {
+                    subtasks.entry(row.episode().clone()).or_default().push(row);
+                }
+                Ok(subtasks
+                    .into_iter()
+                    .map(|(episode, rows)| (episode, PreviewRows::Subtasks(rows)))
+                    .collect())
             }
         }
     }
 
-    /// Fetch what query `query` of `run`, `episode`'s, answered.
-    async fn read(
+    /// What `episode` answered among `answers`. An episode absent from them
+    /// stored an empty answer, which a timeline reads as the model having
+    /// answered nothing — the service rejected the video, or the recording
+    /// has none — and subtasks as none found.
+    fn answer_of(
         &self,
-        run: &HeldRun,
-        (query, episode): (usize, &EpisodeSelection),
+        answers: &mut EpisodeAnswers,
+        episode: &EpisodeId,
     ) -> Result<PreviewRows, String> {
-        let fail = |error: crate::client::CommandError| error.to_string();
-        match self.reading {
-            PreviewReading::Timeline => {
-                let episode = self
-                    .sample
-                    .episode(episode.episode_id())
-                    .ok_or("The sample no longer lists this episode.")?;
-                let stream = run.stream(query).await.map_err(fail)?;
-                let timeline = MeasuredTimeline::read(&stream, episode)?;
-                // A stored failure is an empty answer: the service rejected
-                // the video, or the recording has none.
-                if timeline.is_empty() {
-                    return Err("The model answered nothing for this recording.".into());
-                }
-                Ok(PreviewRows::Timeline(timeline))
+        match (answers.remove(episode), self.reading) {
+            (Some(rows), _) => Ok(rows),
+            (None, PreviewReading::Timeline) => {
+                Err("The model answered nothing for this recording.".into())
             }
-            PreviewReading::Subtasks(reading) => {
-                let answer = run.rows(query).await.map_err(fail)?;
-                Ok(PreviewRows::Subtasks(reading.read(&answer, &self.sample)?))
-            }
+            (None, PreviewReading::Subtasks(_)) => Ok(PreviewRows::Subtasks(Vec::new())),
         }
     }
 }
 
 /// One node's preview as the curation's run: the backend fills its stored
-/// answers, then its queries go to the backend as one run, which is polled
-/// every second, and each answer is fetched and held for the session as it
-/// lands. Stop ends the run at once: the backend starts nothing more and
-/// drops the queries in flight, whose episodes stay unread for the next Run;
-/// what the fill answered by then stays stored. A failed query never stops
-/// the rest. A restore is the same pass without the fill.
+/// answers as a run polled every second, then one read fetches what every
+/// episode answered and the pass holds it for the session. Stop stops the
+/// fill, and what it answered by then stays stored; a read Stop lands on is
+/// dropped, and its episodes stay unread for the next Run. A failed episode
+/// never stops the rest. A restore is the same pass without the fill.
 pub(in crate::activities::curation) struct PreviewPass {
     controller: CurationController,
     run: RunHandle,
@@ -203,99 +216,60 @@ impl PreviewPass {
         let verb = self.plan.verb;
         let total = self.plan.episodes.len();
         self.run.report(format!("{verb} 0 of {total} episodes"));
-        let Some(episodes) = self.filled(verb).await else {
+        let Some(answered) = self.filled(verb).await else {
             return;
         };
-        self.read_all(episodes, verb, total).await;
+        let read = self.plan.read().await;
+        self.hold_read(&answered, read);
     }
 
     /// Read back what the node's stored answers hold, asking no model: of
-    /// the episodes the plan previews, those its column already holds. A
-    /// column that cannot be listed restores nothing, and the node stays
-    /// unread for its next Run.
+    /// the episodes the plan previews, those its column already holds,
+    /// listed while they are read. A column that cannot be listed restores
+    /// nothing, and the node stays unread for its next Run.
     pub(in crate::activities::curation) async fn restore(self) {
+        let total = self.plan.episodes.len();
+        self.run.report(format!("Reading 0 of {total} episodes"));
         let request = FilledEpisodesRequest::new(
             self.plan.sample.dataset().clone(),
             self.plan.fill.column().clone(),
         );
-        let Ok(filled) = CurationClient::current().filled(&request).await else {
+        let client = CurationClient::current();
+        let (filled, read) =
+            futures_util::future::join(client.filled(&request), self.plan.read()).await;
+        let Ok(filled) = filled else {
             return;
         };
-        let episodes = self
-            .plan
-            .episodes
-            .iter()
-            .filter(|episode| filled.contains(episode.episode_id()))
+        let stored = (self.plan.episodes.iter())
+            .filter(|episode| filled.contains(*episode))
             .cloned()
             .collect::<Vec<_>>();
-        let total = episodes.len();
-        self.read_all(episodes, "Reading", total).await;
+        self.hold_read(&stored, read);
     }
 
-    /// Read `episodes` on one run the backend holds, and hold each answer as it
-    /// lands; the pass reports on `total` episodes, every one not among
-    /// `episodes` already settled.
-    async fn read_all(&self, episodes: Vec<EpisodeSelection>, verb: &str, total: usize) {
-        let plan = &self.plan;
-        let mut done = total - episodes.len();
-        self.run
-            .report(format!("{verb} {done} of {total} episodes"));
-        if episodes.is_empty() {
+    /// Hold what each of `episodes` answered in `read`, or why the read
+    /// failed; nothing once Stop was pressed while it was read.
+    fn hold_read(&self, episodes: &[EpisodeId], read: Result<EpisodeAnswers, String>) {
+        if !self.run.wanted() {
             return;
         }
-        let queries = episodes
-            .iter()
-            .map(|episode| plan.query(episode))
-            .collect::<Vec<_>>();
-        let (held, mut status) = match HeldRun::start(&queries).await {
-            Ok(started) => started,
-            Err(error) => return self.fail(&episodes, &error.to_string()),
-        };
-        let mut read = vec![false; episodes.len()];
-        let mut stopping = false;
-        loop {
-            for (query, state) in status.queries().iter().enumerate() {
-                let episode = &episodes[query];
-                let answer = match state {
-                    _ if read[query] => continue,
-                    PreviewQueryState::Queued | PreviewQueryState::Running => continue,
-                    PreviewQueryState::Answered => plan.read(&held, (query, episode)).await,
-                    PreviewQueryState::Failed(reason) => Err(reason.clone()),
-                };
-                self.hold(episode, answer);
-                read[query] = true;
-                done += 1;
-                self.run
-                    .report(format!("{verb} {done} of {total} episodes"));
-            }
-            if status.is_settled() {
-                return;
-            }
-            // Just stopped, the run is read again at once: it has settled.
-            let stopped_now = !stopping && !self.run.wanted() && held.stop().await.is_ok();
-            stopping |= stopped_now;
-            if !stopped_now {
-                self.pause(stopping).await;
-            }
-            status = match held.status().await {
-                Ok(status) => status,
-                Err(error) => {
-                    let unread = (episodes.iter().zip(&read))
-                        .filter(|(_, read)| !**read)
-                        .map(|(episode, _)| episode.clone())
-                        .collect::<Vec<_>>();
-                    return self.fail(&unread, &error.to_string());
+        match read {
+            Ok(mut answers) => {
+                for episode in episodes {
+                    let answer = self.plan.answer_of(&mut answers, episode);
+                    self.hold(episode, answer);
                 }
-            };
+            }
+            Err(reason) => self.fail(episodes, &reason),
         }
     }
 
     /// Have the backend fill the stored answers the node's preview reads, as
     /// one run polled every second; Stop stops it, and what it answered by
-    /// then stays stored. The queries left to read: every one but those of
-    /// episodes whose answer failed, which are held with why. None once the
-    /// run stopped or failed, when nothing more is read.
-    async fn filled(&self, verb: &str) -> Option<Vec<EpisodeSelection>> {
+    /// then stays stored. The episodes left to read: every one but those
+    /// whose answer failed, which are held with why. None once the run
+    /// stopped or failed, when nothing more is read.
+    async fn filled(&self, verb: &str) -> Option<Vec<EpisodeId>> {
         let episodes = &self.plan.episodes;
         let client = FillRuns::current();
         let request = FillRequest::new(
@@ -340,7 +314,7 @@ impl PreviewPass {
             let failure = status
                 .failures()
                 .iter()
-                .find(|failure| failure.episode() == episode.episode_id());
+                .find(|failure| failure.episode() == episode);
             match failure {
                 Some(failure) => self.hold(episode, Err(failure.reason().to_owned())),
                 None => left.push(episode.clone()),
@@ -361,18 +335,15 @@ impl PreviewPass {
     }
 
     /// Hold `reason` for every episode of `episodes`: none of them will be read.
-    fn fail(&self, episodes: &[EpisodeSelection], reason: &str) {
+    fn fail(&self, episodes: &[EpisodeId], reason: &str) {
         for episode in episodes {
             self.hold(episode, Err(reason.to_owned()));
         }
     }
 
-    /// Hold what one query read for its episode, or why it failed.
-    fn hold(&self, episode: &EpisodeSelection, read: Result<PreviewRows, String>) {
-        self.controller.record_preview(
-            (&self.plan.node.0, &self.plan.node.1),
-            episode.episode_id(),
-            read,
-        );
+    /// Hold what one episode answered, or why it failed.
+    fn hold(&self, episode: &EpisodeId, read: Result<PreviewRows, String>) {
+        self.controller
+            .record_preview((&self.plan.node.0, &self.plan.node.1), episode, read);
     }
 }

@@ -23,9 +23,10 @@
 //! columns and asks no model.
 //!
 //! A preview reads one model node's entries over the stored answers of the
-//! episode bound as `$1`, which it fills first: what the Select's views need
-//! of the node, never the node's big lists. A Select has no preview; the
-//! browser reads its conditions over the previews above it.
+//! episodes it lists, bound as `$1` through `$N`, which it fills first: what
+//! the Select's views need of the node, never the node's big lists, each
+//! entry with its episode. A Select has no preview; the browser reads its
+//! conditions over the previews above it.
 mod episode_row;
 mod table;
 
@@ -42,9 +43,9 @@ use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 /// Which reading of a path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PathSource {
-    /// One model node's entries for the episode bound as `$1`, reading its
-    /// stored answers.
-    Preview,
+    /// One model node's entries for `episodes` listed episodes, bound as
+    /// `$1` through `$N`, reading its stored answers.
+    Preview { episodes: usize },
     /// Chained into the view over every episode of the dataset, reading the
     /// stored answers.
     Published,
@@ -274,9 +275,12 @@ impl<'a> CurationPath<'a> {
         self.compile().map(|compiled| compiled.table)
     }
 
-    /// The last node's entries for the episode bound as `$1`, over its stored
-    /// answers: what its preview reads.
-    pub(super) fn preview(&self) -> Result<String, PathError> {
+    /// The last node's entries for `episodes` listed episodes, bound as `$1`
+    /// through `$N`, over its stored answers: what its preview reads.
+    pub(super) fn preview(&self, episodes: usize) -> Result<String, PathError> {
+        if episodes == 0 {
+            return Err(PathError::new("A preview reads at least one episode."));
+        }
         let dataset = self.dataset()?;
         let columns = self.answer_columns()?;
         let depth = self.nodes.len() - 1;
@@ -285,7 +289,7 @@ impl<'a> CurationPath<'a> {
             return Err(PathError::new("Only a node that asks a model previews."));
         };
         let step = Self::step(node, stored);
-        let mut row = EpisodeRow::new(dataset, PathSource::Preview);
+        let mut row = EpisodeRow::new(dataset, PathSource::Preview { episodes });
         model.episode_columns(&mut row, &step)?;
         let built = model.entries(&step)?;
         let mut entries = row.entries()?;

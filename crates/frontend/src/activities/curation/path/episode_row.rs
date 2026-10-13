@@ -21,8 +21,8 @@ enum RowAnswer {
 /// it. A stored answer is read from the answers table; one asked on the row
 /// reads the camera videos and the instructions its call names, a camera two
 /// models watch read once, and no video leaves the row. Published, the row is
-/// built on the dataset's listing, one per episode; previewed or filled, it
-/// is the bound episode's alone.
+/// built on the dataset's listing, one per episode; previewed, it is the
+/// listed episodes'; filled, the bound episode's alone.
 pub(in crate::activities::curation) struct EpisodeRow {
     dataset: DatasetSelection,
     source: PathSource,
@@ -114,7 +114,7 @@ impl EpisodeRow {
                 self.joins("d.episode_id")?,
                 origin = Self::ORIGIN,
             ),
-            PathSource::Preview | PathSource::Fill => self.bound_episode()?,
+            PathSource::Preview { .. } | PathSource::Fill => self.bound_episodes()?,
         });
         Ok(entries)
     }
@@ -150,12 +150,23 @@ impl EpisodeRow {
         }
     }
 
-    /// The bound episode's row, read from the dataset's listing.
-    fn bound_episode(&self) -> Result<String, PathError> {
+    /// The bound episodes' rows, read from the dataset's listing: the one a
+    /// fill binds as `$1`, or every one a preview lists, `$1` through `$N`.
+    fn bound_episodes(&self) -> Result<String, PathError> {
         let listed = Self::LISTED;
+        let members = match self.source {
+            PathSource::Preview { episodes } => {
+                let bound = (1..=episodes)
+                    .map(|place| format!("${place}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{listed}.id IN ({bound})")
+            }
+            PathSource::Published | PathSource::Fill => format!("{listed}.id = $1"),
+        };
         Ok(format!(
             "{} AS (SELECT {listed}.id AS episode_id, CAST({listed}.message_start_time AS BIGINT) AS {}{} \
-             FROM spql.mcap.episodes({}) {listed}{} WHERE {listed}.id = $1)",
+             FROM spql.mcap.episodes({}) {listed}{} WHERE {members})",
             Self::EPISODES,
             Self::ORIGIN,
             self.answer_columns(),

@@ -5,7 +5,9 @@ use crate::client::transport::{CommandError, HttpRequest};
 use spiral_robotics_common::datasets::{
     DatasetInspection, DatasetSelection, DatasetSummary, ProjectResource,
 };
-use spiral_robotics_common::relations::{EpisodeQueryRequest, QueryRequest, SpiralQuerySnapshot};
+use spiral_robotics_common::relations::{
+    EpisodeQueryRequest, EpisodesQueryRequest, QueryRequest, SpiralQuerySnapshot,
+};
 use std::future::Future;
 
 #[derive(Clone)]
@@ -200,5 +202,23 @@ impl DatasetClient {
     ) -> impl Future<Output = Result<Vec<u8>, CommandError>> + use<> {
         self.project
             .request_bytes(HttpRequest::new("POST", "/api/queries/episode/arrow").json(request))
+    }
+    /// A read-only query over listed episodes of one dataset; `$1` through
+    /// `$N` bind their UUIDs.
+    pub(in crate::activities) fn run_episodes_query(
+        &self,
+        request: &EpisodesQueryRequest,
+    ) -> impl Future<Output = Result<SpiralQuerySnapshot, CommandError>> + use<> {
+        self.project
+            .request(HttpRequest::new("POST", "/api/queries/episodes").json(request))
+    }
+    /// The same listed episodes' query as one complete Arrow IPC stream,
+    /// refused rather than cut short.
+    pub(in crate::activities) fn run_episodes_arrow_query(
+        &self,
+        request: &EpisodesQueryRequest,
+    ) -> impl Future<Output = Result<Vec<u8>, CommandError>> + use<> {
+        self.project
+            .request_bytes(HttpRequest::new("POST", "/api/queries/episodes/arrow").json(request))
     }
 }

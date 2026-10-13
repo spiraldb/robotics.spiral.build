@@ -372,13 +372,33 @@ impl EpisodeTopicQuery {
         episode_id: &EpisodeId,
         sql: String,
     ) -> Result<Self, String> {
+        Self::for_episodes(dataset, std::slice::from_ref(episode_id), sql)
+    }
+
+    /// `sql` over the listed members of `dataset`: `$1` through `$N` bind
+    /// their UUIDs, in order.
+    pub(crate) fn for_episodes(
+        dataset: &DatasetSelection,
+        episodes: &[EpisodeId],
+        sql: String,
+    ) -> Result<Self, String> {
         let selection = DatasetSelection::new(dataset.path().to_vec())?;
         if !selection.can_preview() {
             return Err("Preview is unavailable for this dataset name".to_owned());
         }
+        if episodes.is_empty() {
+            return Err("A statement over listed episodes lists at least one".to_owned());
+        }
+        let fields = (1..=episodes.len())
+            .map(|place| EpisodeUuids::field(&format!("id_{place}")))
+            .collect::<Vec<_>>();
+        let columns = episodes
+            .iter()
+            .map(|episode| EpisodeUuids::array(std::slice::from_ref(episode)))
+            .collect::<Result<Vec<_>, _>>()?;
         let parameters = arrow_array::RecordBatch::try_new(
-            std::sync::Arc::new(arrow_schema::Schema::new(vec![EpisodeUuids::field("id")])),
-            vec![EpisodeUuids::array(std::slice::from_ref(episode_id))?],
+            std::sync::Arc::new(arrow_schema::Schema::new(fields)),
+            columns,
         )
         .map_err(|error| error.to_string())?;
         crate::db::SqlStatement::from(sql)
@@ -424,8 +444,8 @@ impl EpisodeUuids {
             .ok_or("Episode ids must be member UUIDs")?;
         (0..uuids.len())
             .map(|row| {
-                let uuid = uuid::Uuid::from_slice(uuids.value(row)).map_err(|e| e.to_string())?;
-                EpisodeId::try_from(uuid.simple().to_string())
+                let bytes = <[u8; 16]>::try_from(uuids.value(row)).map_err(|e| e.to_string())?;
+                Ok(EpisodeId::from(bytes))
             })
             .collect()
     }
@@ -559,6 +579,29 @@ mod tests {
         assert_eq!(values.value(0), id.as_bytes());
         // An id that is not a member UUID never reaches a statement at all.
         assert!(EpisodeId::try_from("' OR true --").is_err());
+    }
+
+    #[test]
+    fn listed_episodes_bind_one_uuid_each_in_their_order() {
+        let dataset = DatasetSelection::new(vec!["dataset_default".into()]).unwrap();
+        let ids = [
+            EpisodeId::try_from("01900000000070008000000000000001").unwrap(),
+            EpisodeId::try_from("01a0b63c7b7f779b9237d4e0206c08ff").unwrap(),
+        ];
+        let statement = EpisodeTopicQuery::for_episodes(
+            &dataset,
+            &ids,
+            "SELECT value FROM source WHERE id IN ($1, $2)".into(),
+        )
+        .unwrap()
+        .statement;
+        let parameters = statement.parameters().unwrap();
+        assert_eq!(parameters.num_rows(), 1);
+        let bound = (0..parameters.num_columns())
+            .map(|place| EpisodeUuids::read(parameters.column(place).as_ref()).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(bound, [vec![ids[0].clone()], vec![ids[1].clone()]]);
+        assert!(EpisodeTopicQuery::for_episodes(&dataset, &[], "SELECT 1".into()).is_err());
     }
 
     #[test]
