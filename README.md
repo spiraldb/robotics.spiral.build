@@ -188,13 +188,15 @@ for project data. Its permissions are also limited by the signed-in user's
 permissions. Create projects in Spiral Studio before adding their workspaces here.
 
 Set `SPIRAL_ROBOTICS_CLIENT_ID` to the registration for this environment.
-The Nix development shell sets Dev (`client_aRm8njLb18Px`); the hosted image
-sets Prod (`client_PiwYy0njXU92`). These IDs are public, not secrets.
+The Nix development shell sets Dev (`client_sQWdRwk7ZTBd`); the hosted image
+sets Prod (`client_3CMizYLaPa3h`). These IDs are public, not secrets.
 `SPIRAL_ROBOTICS_PUBLIC_URL` (or `--public-url`) sets the address browsers reach
-Studio at, `http://localhost:3000` by default. Register its exact `/callback` URL:
-`http://localhost:3000/callback` for Dev and
-`https://robotics.spiraldb.com/callback` for Prod. The two registrations belong to
-the Spiral organization and have separate client IDs. No client secret is needed.
+Studio at, `http://localhost:3000` by default. Prod registers
+`https://robotics.spiraldb.com/callback`; Dev registers `http://localhost/callback`,
+which matches any port. Both registrations belong to the project
+`xiangpeng-robotics-618551` and need no client secret. Each is installed in the
+Spiral organization on every project: a registered application's tokens reach only
+the projects its installation selects, so without one Studio sees no project.
 `SPIRAL_ROBOTICS_AUTH_URL` defaults to `https://auth.spiraldb.com`.
 
 Each browser gets its own session. The backend keeps that user's tokens in SQLite,

@@ -223,7 +223,7 @@
                 "SPIRAL_ROBOTICS_STUDIO_DB=${studioHome}/studio.sqlite3"
                 # Spiral's sign-in returns browsers to this address's /callback.
                 "SPIRAL_ROBOTICS_PUBLIC_URL=https://robotics.spiraldb.com"
-                "SPIRAL_ROBOTICS_CLIENT_ID=client_PiwYy0njXU92"
+                "SPIRAL_ROBOTICS_CLIENT_ID=client_3CMizYLaPa3h"
                 # The Modal services Score progress, Track objects, and
                 # training run on, in the spiral-dev workspace; their shared
                 # token is a deployment secret.
@@ -287,7 +287,7 @@
               VK_ICD_FILENAMES = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.${hostPlatform.parsed.cpu.name}.json";
             };
           developmentShell = sharedShell // {
-            SPIRAL_ROBOTICS_CLIENT_ID = "client_aRm8njLb18Px";
+            SPIRAL_ROBOTICS_CLIENT_ID = "client_sQWdRwk7ZTBd";
             packages = sharedShell.packages ++ [ pkgs.ffmpeg ] ++ webBuildInputs;
             # Studio's provider keys for local runs come from the checkout's
             # untracked .env.local, in the variables the hosted image is given.
