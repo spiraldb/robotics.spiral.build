@@ -5432,6 +5432,7 @@ name = "spiral-robotics-backend"
 version = "0.1.0"
 dependencies = [
  "arrow-array",
+ "arrow-buffer",
  "arrow-cast",
  "arrow-ipc",
  "arrow-schema",
@@ -5444,6 +5445,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "http-body",
+ "image",
  "reqwest",
  "serde",
  "serde_json",

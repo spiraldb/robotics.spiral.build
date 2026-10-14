@@ -10,6 +10,7 @@
 //! one run over the episodes it previews, publishing nothing.
 use super::PublishedView;
 use super::answers::AnswerColumn;
+use super::subtasks::{SubtaskBreakdown, SubtaskClassification, SubtaskSimilarity};
 use crate::datasets::{DatasetSelection, EpisodeId};
 use serde::{Deserialize, Serialize};
 
@@ -17,9 +18,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AnswerSource {
-    /// A statement over the episode bound as `$1`, answering `episode_id`
-    /// and `answer` in one row.
-    Statement { statement: String },
     /// A statement over the whole dataset, answering `episode_id` and
     /// `answer` in one row per episode it measures: one read answers every
     /// episode the column is filled for, where reading each episode alone
@@ -42,6 +40,15 @@ pub enum AnswerSource {
         model: String,
         revision: String,
     },
+    /// Break down's subtasks of the episode's video, asked of a multimodal
+    /// model through OpenRouter.
+    BreakDown(SubtaskBreakdown),
+    /// Find similar's similarity of each subtask a Break down stored for the
+    /// episode, asked of a decision model through OpenRouter.
+    Similarity(SubtaskSimilarity),
+    /// Group similar's category of each subtask a Break down stored for the
+    /// episode, asked of a decision model through OpenRouter.
+    Classify(SubtaskClassification),
 }
 
 /// Which episodes a column is filled for.
@@ -255,14 +262,17 @@ mod tests {
                 "Find similar subtasks",
                 column,
                 FillEpisodes::Listed(vec![EpisodeId::try_from("0".repeat(32)).unwrap()]),
-                AnswerSource::Statement {
-                    statement: "SELECT $1 AS episode_id, 1 AS answer".into(),
-                },
+                AnswerSource::Similarity(SubtaskSimilarity::new(
+                    AnswerColumn::of("breakdown_task", &["m"]).unwrap(),
+                    "fold the towel",
+                    "typesafe/jev-1.13",
+                )),
             )],
         )
         .publishing(vec![PublishedView::new("folds", "SELECT 1")]);
         let json = serde_json::to_value(&request).unwrap();
-        assert_eq!(json["columns"][0]["source"]["kind"], "statement");
+        assert_eq!(json["columns"][0]["source"]["kind"], "similarity");
+        assert_eq!(json["columns"][0]["source"]["query"], "fold the towel");
         assert_eq!(json["columns"][0]["episodes"]["kind"], "listed");
         assert_eq!(
             serde_json::from_value::<FillRequest>(json).unwrap(),

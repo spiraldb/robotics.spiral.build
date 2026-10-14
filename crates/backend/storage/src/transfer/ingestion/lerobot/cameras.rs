@@ -3,15 +3,15 @@
 //! unit per frame, no B-frames, a keyframe every 30 frames with its
 //! parameter sets, so every episode decodes from its first frame whatever
 //! codec and keyframe spacing the repository used.
+use crate::FfmpegExecutable;
 use spiral_robotics_common::datasets::H264AccessUnit;
 use spiral_robotics_recording::AccessUnits;
 use std::path::Path;
 use std::process::Stdio;
 
-/// The FFmpeg executable cameras are encoded with: `SPIRAL_ROBOTICS_FFMPEG`,
-/// or `ffmpeg` on `PATH`.
+/// The FFmpeg executable cameras are encoded with.
 pub(super) struct CameraEncoder {
-    executable: String,
+    executable: FfmpegExecutable,
 }
 
 /// An episode's frames within a video: the second to seek to and how many
@@ -77,14 +77,9 @@ impl<'a> CameraCut<'a> {
 }
 
 impl CameraEncoder {
-    const EXECUTABLE: &str = "SPIRAL_ROBOTICS_FFMPEG";
-
     pub(super) fn from_environment() -> Self {
         Self {
-            executable: std::env::var(Self::EXECUTABLE)
-                .ok()
-                .filter(|executable| !executable.trim().is_empty())
-                .unwrap_or_else(|| "ffmpeg".to_owned()),
+            executable: FfmpegExecutable::from_environment(),
         }
     }
 
@@ -97,7 +92,7 @@ impl CameraEncoder {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|error| format!("could not start {:?}: {error}", self.executable))?
+            .map_err(|error| format!("could not start {:?}: {error}", self.executable.to_string()))?
             .wait_with_output()
             .await
             .map_err(|error| format!("FFmpeg failed: {error}"))?;

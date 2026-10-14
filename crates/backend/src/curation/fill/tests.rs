@@ -1,11 +1,14 @@
 use super::*;
 use crate::curation::video_service::tests::MockService;
-use spiral_robotics_common::curation::{AnswerColumn, PublishedView};
+use spiral_robotics_common::curation::{
+    AnswerColumn, CategoryDefinition, PublishedView, SampleInterval, SubtaskBreakdown,
+    SubtaskClassification, SubtaskSimilarity,
+};
 use spiral_robotics_common::datasets::{DatasetSelection, DatasetStreams};
 use spiral_robotics_storage::{ProjectStore, StudioStore};
 use std::collections::HashMap;
 
-/// The token, and the address of each Modal service `urls` sets, by its
+/// The token, and each Modal service address or key `urls` sets, by its
 /// variable.
 fn keys(urls: &[(&str, &str)]) -> Arc<ProviderKeys> {
     let urls = urls
@@ -81,10 +84,10 @@ async fn a_run_is_admitted_only_with_read_only_statements_and_the_services_it_ne
         AnswerTable::of(&dataset("folding")).table()
     );
     let writing = column(
-        "Break down subtasks",
+        "Health check",
         FillEpisodes::Reaching(deleting.clone()),
-        AnswerSource::Statement {
-            statement: "SELECT $1 AS episode_id, 1 AS answer".into(),
+        AnswerSource::DatasetStatement {
+            statement: "SELECT 1 AS episode_id, 1 AS answer".into(),
         },
     );
     assert!(refused(
@@ -134,6 +137,54 @@ async fn object_tracking_is_admitted_only_with_its_own_service() {
         keys(&[("OBJECT_TRACKING_URL", "https://tracks.modal.run")]),
     );
     assert!(fills.admit(request()).is_ok());
+}
+
+#[tokio::test]
+async fn model_calls_are_admitted_only_with_openrouter_and_questions_jev_takes() {
+    let subtasks = AnswerColumn::of("breakdown_task", &["m"]).unwrap();
+    let interval = SampleInterval::from_seconds(0.5).unwrap();
+    let calls = [
+        (
+            "Break down subtasks",
+            AnswerSource::BreakDown(SubtaskBreakdown::new("/top", interval, "gemini", None)),
+        ),
+        (
+            "Find similar subtasks",
+            AnswerSource::Similarity(SubtaskSimilarity::new(subtasks.clone(), "fold", "jev")),
+        ),
+        (
+            "Group similar subtasks",
+            AnswerSource::Classify(SubtaskClassification::new(
+                subtasks.clone(),
+                vec![CategoryDefinition::new("fold", "Folding the cloth.")],
+                "jev",
+            )),
+        ),
+    ];
+    let request = |(node, source): &(&str, AnswerSource)| {
+        let call = column(node, FillEpisodes::Listed(Vec::new()), source.clone());
+        FillRequest::new(dataset("folding"), vec![call])
+    };
+    let without = FillRuns::new(storage(), keys(&[]));
+    let with = FillRuns::new(storage(), keys(&[("OPENROUTER_API_KEY", "sk-or-test")]));
+    for call in &calls {
+        let Err(OperationError::InvalidInput(reason)) = without.admit(request(call)) else {
+            panic!("{} needs OpenRouter", call.0)
+        };
+        assert!(reason.starts_with(call.0) && reason.contains("OPENROUTER_API_KEY"));
+        assert!(with.admit(request(call)).is_ok());
+    }
+    let blank = AnswerSource::Similarity(SubtaskSimilarity::new(subtasks.clone(), "  ", "jev"));
+    assert!(refused(&with, request(&("Find similar subtasks", blank))));
+    let twice = AnswerSource::Classify(SubtaskClassification::new(
+        subtasks,
+        vec![
+            CategoryDefinition::new("fold", "Folding."),
+            CategoryDefinition::new("fold", "Folding again."),
+        ],
+        "jev",
+    ));
+    assert!(refused(&with, request(&("Group similar subtasks", twice))));
 }
 
 #[test]
@@ -225,18 +276,17 @@ async fn a_run_fills_each_column_once_and_then_publishes_its_view() {
             scoring("/camera/top/video"),
         );
         let score_column = scores.column().clone();
-        // A later column reads the one before it: each episode's velocities.
+        // A later column reads the one before it: how many pictures each
+        // episode's scores hold.
         let velocities = column(
             "Find similar subtasks",
             FillEpisodes::Reaching(format!(
                 "SELECT episode_id FROM {answers} WHERE {score_column} IS NOT NULL"
             )),
-            AnswerSource::Statement {
+            AnswerSource::DatasetStatement {
                 statement: format!(
-                    "WITH stored AS (SELECT a.episode_id, a.{score_column}.value AS scores FROM {answers} a WHERE a.episode_id = $1), \
-                     listed AS (SELECT s.episode_id, g._ AS position, spql.list.get(s.scores, g._) AS score \
-                     FROM stored s CROSS JOIN LATERAL spql.range(CAST(spql.list.len(s.scores) AS BIGINT)) g) \
-                     SELECT l.episode_id, l.position, CAST(l.score.velocity AS DOUBLE) AS answer FROM listed l"
+                    "SELECT a.episode_id, CAST(spql.list.len(a.{score_column}.value) AS BIGINT) AS answer \
+                     FROM {answers} a WHERE a.{score_column} IS NOT NULL"
                 ),
             },
         );

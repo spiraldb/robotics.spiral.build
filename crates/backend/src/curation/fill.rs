@@ -13,12 +13,20 @@
 //! then ends the run. A run lives in memory: a restarted backend loses the
 //! answers held since the last write, and publishing again resumes past
 //! every episode already written.
+use super::break_down::EpisodeBreakdown;
 use super::object_tracking::ObjectTrackingService;
+use super::openrouter::OpenRouter;
 use super::progress_service::ProgressService;
+use super::subtask_judgment::{
+    CategoryQuestions, SimilarityQuestions, StoredSubtasks, SubtaskJudgment,
+};
 use super::video_service::{VideoAnswer, VideoQuestion};
 use crate::OperationError;
 use crate::held_runs::{ABANDONED_AFTER, HeldRuns, HeldWork};
 use crate::sync::MutexRecovery;
+use arrow_array::RecordBatch;
+use arrow_array::cast::AsArray as _;
+use arrow_schema::DataType;
 use futures_util::StreamExt as _;
 use spiral_robotics_common::curation::{
     AnswerColumn, AnswerSource, AnswerTable, ColumnFill, EpisodeFailure, FillEpisodes, FillRequest,
@@ -26,21 +34,23 @@ use spiral_robotics_common::curation::{
 };
 use spiral_robotics_common::datasets::{
     CameraVideo, DatasetInspection, DatasetSelection, DatasetStreams, EpisodeId, EpisodeSelection,
-    TopicRevision,
+    EpisodeTask,
 };
 use spiral_robotics_common::relations::EpisodeQueryRequest;
 use spiral_robotics_common::sql::{ReadOnlyQuery, ReadOnlyQueryMode};
 use spiral_robotics_storage::answers::{
     ColumnAnswers, DatasetAnswers, EpisodeAnswer, StatementAnswers,
 };
-use spiral_robotics_storage::{ProviderKeys, StorageManager};
+use spiral_robotics_storage::{FfmpegExecutable, ProviderKeys, StorageManager};
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{OnceCell, Semaphore, mpsc};
 use tokio::time::Instant;
 
-/// How many episodes a statement column asks Spiral about at once.
-const STATEMENTS_IN_FLIGHT: usize = 8;
+/// How many episodes a column asks about at once when no Modal service's
+/// capacity bounds it: as many as each Spiral statement asking a model
+/// about one episode had in flight.
+const EPISODES_IN_FLIGHT: usize = 8;
 /// How many requests the progress service has in flight, across every run.
 /// The uploads bound it: each container takes in eight at once while its GPU
 /// scores (`target_inputs` in `modal/warp_progress/app.py`), and more in
@@ -58,6 +68,7 @@ const PUBLISHING: &str = "Publishing";
 pub(crate) struct FillRuns {
     storage: Arc<StorageManager>,
     keys: Arc<ProviderKeys>,
+    ffmpeg: FfmpegExecutable,
     scorings: Arc<Semaphore>,
     trackings: Arc<Semaphore>,
     runs: HeldRuns<FillRun>,
@@ -68,6 +79,7 @@ impl FillRuns {
         Self {
             storage,
             keys,
+            ffmpeg: FfmpegExecutable::from_environment(),
             scorings: Arc::new(Semaphore::new(SCORINGS_IN_FLIGHT)),
             trackings: Arc::new(Semaphore::new(TRACKINGS_IN_FLIGHT)),
             runs: HeldRuns::new("fill"),
@@ -75,8 +87,8 @@ impl FillRuns {
     }
 
     /// `request`, admitted as a run: every statement read-only, every view
-    /// named as a view, and each Modal service configured when a column
-    /// needs it.
+    /// named as a view, every judgment's questions ones jev takes, and each
+    /// Modal service and OpenRouter configured when a column needs it.
     pub(super) fn admit(&self, request: FillRequest) -> Result<AdmittedFill, OperationError> {
         let invalid = OperationError::InvalidInput;
         if request.columns().is_empty() && request.views().is_empty() {
@@ -84,13 +96,13 @@ impl FillRuns {
         }
         let mut progress = None;
         let mut tracking = None;
+        let mut openrouter = None;
         for column in request.columns() {
             if let FillEpisodes::Reaching(statement) = column.episodes() {
                 Self::read_only(statement)?;
             }
             match column.source() {
-                AnswerSource::Statement { statement }
-                | AnswerSource::DatasetStatement { statement } => Self::read_only(statement)?,
+                AnswerSource::DatasetStatement { statement } => Self::read_only(statement)?,
                 AnswerSource::ProgressService { .. } if progress.is_none() => {
                     progress = Some(
                         ProgressService::of(&self.keys, self.scorings.clone()).map_err(invalid)?,
@@ -102,7 +114,24 @@ impl FillRuns {
                             .map_err(invalid)?,
                     );
                 }
-                AnswerSource::ProgressService { .. } | AnswerSource::ObjectTracking { .. } => {}
+                AnswerSource::Similarity(call) => {
+                    SimilarityQuestions::new(call.query()).map_err(invalid)?;
+                }
+                AnswerSource::Classify(call) => {
+                    CategoryQuestions::new(call.categories()).map_err(invalid)?;
+                }
+                AnswerSource::ProgressService { .. }
+                | AnswerSource::ObjectTracking { .. }
+                | AnswerSource::BreakDown(_) => {}
+            }
+            let asks_openrouter = matches!(
+                column.source(),
+                AnswerSource::BreakDown(_)
+                    | AnswerSource::Similarity(_)
+                    | AnswerSource::Classify(_)
+            );
+            if asks_openrouter && openrouter.is_none() {
+                openrouter = Some(OpenRouter::of(&self.keys, column.node()).map_err(invalid)?);
             }
         }
         let mut views = Vec::new();
@@ -117,6 +146,8 @@ impl FillRuns {
                 storage: self.storage.clone(),
                 progress,
                 tracking,
+                openrouter,
+                ffmpeg: self.ffmpeg.clone(),
                 inspection: OnceCell::new(),
             },
         })
@@ -183,21 +214,46 @@ pub(super) struct AdmittedFill {
     work: FillWork,
 }
 
-/// What a run works with: the project's storage, each Modal service when one
-/// needs it, and the dataset's streams once a camera's video is asked about.
+/// What a run works with: the project's storage, each Modal service and
+/// OpenRouter when one needs it, the FFmpeg Break down decodes with, and
+/// the dataset's streams once a camera's video or an instruction is asked
+/// about.
 struct FillWork {
     storage: Arc<StorageManager>,
     progress: Option<ProgressService>,
     tracking: Option<ObjectTrackingService>,
-    /// The dataset as the run first read it for a camera: the streams the
-    /// browser's camera topics are found in.
+    openrouter: Option<OpenRouter>,
+    ffmpeg: FfmpegExecutable,
+    /// The dataset as the run first read it for a topic: the streams the
+    /// browser's camera and instruction topics are found in.
     inspection: OnceCell<DatasetInspection>,
 }
 
 /// One episode's answer, and why it failed when it did.
-struct Answered {
+pub(super) struct Answered {
     answer: EpisodeAnswer,
     failure: Option<String>,
+}
+
+impl Answered {
+    pub(super) fn given(answer: EpisodeAnswer) -> Self {
+        Self {
+            answer,
+            failure: None,
+        }
+    }
+
+    /// No answer of `answer_type`, for `reason`.
+    pub(super) fn failed(answer_type: &DataType, reason: impl Into<String>) -> Self {
+        Self {
+            answer: EpisodeAnswer::failed(answer_type),
+            failure: Some(reason.into()),
+        }
+    }
+
+    pub(super) fn into_parts(self) -> (EpisodeAnswer, Option<String>) {
+        (self.answer, self.failure)
+    }
 }
 
 /// The answers a column's asking holds until they fill one write, each full
@@ -249,9 +305,10 @@ impl FillWork {
     /// How many of a column's episodes `source` is asked about at once.
     fn in_flight(source: &AnswerSource) -> usize {
         match source {
-            AnswerSource::Statement { .. } | AnswerSource::DatasetStatement { .. } => {
-                STATEMENTS_IN_FLIGHT
-            }
+            AnswerSource::DatasetStatement { .. }
+            | AnswerSource::BreakDown(_)
+            | AnswerSource::Similarity(_)
+            | AnswerSource::Classify(_) => EPISODES_IN_FLIGHT,
             AnswerSource::ProgressService { .. } => SCORINGS_IN_FLIGHT,
             AnswerSource::ObjectTracking { .. } => TRACKINGS_IN_FLIGHT,
         }
@@ -267,15 +324,6 @@ impl FillWork {
     ) -> Result<Answered, String> {
         let selected = EpisodeSelection::new(request.dataset().clone(), episode.clone());
         match source {
-            AnswerSource::Statement { statement } => {
-                let bound = EpisodeQueryRequest::new(selected, statement.clone(), 1);
-                let (schema, batches) = self.storage.queries().batches_for_episode(&bound).await?;
-                let answer = EpisodeAnswer::from_statement(&schema, &batches)?;
-                let failure = answer
-                    .is_failed()
-                    .then(|| "The model could not answer.".to_owned());
-                Ok(Answered { answer, failure })
-            }
             AnswerSource::DatasetStatement { .. } => Err(
                 "A dataset statement answers every episode in one read, not one at a time.".into(),
             ),
@@ -305,7 +353,37 @@ impl FillWork {
                 let tracking = service.tracking((prompt, *rate), (model, revision));
                 self.video_answer(selected, camera, tracking).await
             }
+            AnswerSource::BreakDown(call) => {
+                let breakdown = EpisodeBreakdown::new(call, self.openrouter()?, &self.ffmpeg);
+                let Some(packets) = self.camera_packets(&selected, call.camera()).await? else {
+                    let reason = Self::unrecorded(call.camera());
+                    return Ok(Answered::failed(&EpisodeBreakdown::answer_type(), reason));
+                };
+                let task = match call.task() {
+                    Some(task) => self.episode_task(selected, task).await?,
+                    None => None,
+                };
+                breakdown.answer(&packets, task.as_deref()).await
+            }
+            AnswerSource::Similarity(call) => {
+                let questions = SimilarityQuestions::new(call.query())?;
+                let judgment = SubtaskJudgment::new(questions, call.model(), self.openrouter()?);
+                let stored = self.stored_subtasks(selected, call.subtasks()).await?;
+                judgment.answer(episode, stored).await
+            }
+            AnswerSource::Classify(call) => {
+                let questions = CategoryQuestions::new(call.categories())?;
+                let judgment = SubtaskJudgment::new(questions, call.model(), self.openrouter()?);
+                let stored = self.stored_subtasks(selected, call.subtasks()).await?;
+                judgment.answer(episode, stored).await
+            }
         }
+    }
+
+    fn openrouter(&self) -> Result<&OpenRouter, String> {
+        self.openrouter
+            .as_ref()
+            .ok_or_else(|| "OpenRouter is not set up.".to_owned())
     }
 
     /// What `question` answers about the `selected` episode's video on
@@ -317,42 +395,99 @@ impl FillWork {
         camera: &str,
         question: VideoQuestion<'_>,
     ) -> Result<Answered, String> {
-        let stream = self.camera_stream(selected.dataset(), camera).await?;
-        let video = CameraVideo::new(selected.dataset(), &stream).packets();
-        let bound = EpisodeQueryRequest::new(selected, video, 1);
-        let (schema, batches) = self.storage.queries().batches_for_episode(&bound).await?;
-        let packets = arrow_select::concat::concat_batches(&schema, &batches)
-            .map_err(|error| error.to_string())?;
-        let answered = if packets.num_rows() == 0 {
-            VideoAnswer::Rejected(format!("This episode records no {camera} video."))
-        } else {
-            question.ask(&packets).await?
+        let answered = match self.camera_packets(&selected, camera).await? {
+            Some(packets) => question.ask(&packets).await?,
+            None => VideoAnswer::Rejected(Self::unrecorded(camera)),
         };
         Ok(match answered {
-            VideoAnswer::Answered(answer) => Answered {
-                answer,
-                failure: None,
-            },
-            VideoAnswer::Rejected(reason) => Answered {
-                answer: EpisodeAnswer::failed(&question.answer_type()),
-                failure: Some(reason),
-            },
+            VideoAnswer::Answered(answer) => Answered::given(answer),
+            VideoAnswer::Rejected(reason) => Answered::failed(&question.answer_type(), reason),
         })
     }
 
-    /// The stream `dataset` records the camera topic `camera`'s video in,
-    /// found among the dataset's streams, which a run reads once.
-    async fn camera_stream(
+    /// The `selected` episode's packets on the camera topic `camera`, in
+    /// decode order, as [`CameraVideo::packets`] reads them; none when that
+    /// camera recorded no video of it.
+    async fn camera_packets(
         &self,
-        dataset: &DatasetSelection,
+        selected: &EpisodeSelection,
         camera: &str,
-    ) -> Result<TopicRevision, String> {
+    ) -> Result<Option<RecordBatch>, String> {
+        let streams = self.streams(selected.dataset()).await?;
+        let stream = streams.camera(camera)?.revision();
+        let video = CameraVideo::new(selected.dataset(), stream).packets();
+        let bound = EpisodeQueryRequest::new(selected.clone(), video, 1);
+        let (schema, batches) = self.storage.queries().batches_for_episode(&bound).await?;
+        let packets = arrow_select::concat::concat_batches(&schema, &batches)
+            .map_err(|error| error.to_string())?;
+        Ok((packets.num_rows() > 0).then_some(packets))
+    }
+
+    fn unrecorded(camera: &str) -> String {
+        format!("This episode records no {camera} video.")
+    }
+
+    /// The `selected` episode's task, where `task` says its dataset records
+    /// it: the first message it records on the instruction topic, or the
+    /// first task its dataset lists beside it; none when it records none.
+    async fn episode_task(
+        &self,
+        selected: EpisodeSelection,
+        task: &EpisodeTask,
+    ) -> Result<Option<String>, String> {
+        let dataset = selected.dataset();
+        let statement = match task {
+            EpisodeTask::Recorded(topic) => {
+                let streams = self.streams(dataset).await?;
+                format!(
+                    "SELECT r.value.data AS task FROM {} r WHERE r.id = $1 \
+                     ORDER BY r.log_time, r.ordinal LIMIT 1",
+                    dataset.messages(streams.topic(topic)?.revision())
+                )
+            }
+            EpisodeTask::Listed => format!(
+                "SELECT spql.list.get(e.tasks, 0) AS task FROM {} e WHERE e.id = $1",
+                dataset.episodes()
+            ),
+        };
+        let bound = EpisodeQueryRequest::new(selected, statement, 1);
+        let (_, batches) = self.storage.queries().batches_for_episode(&bound).await?;
+        let Some(batch) = batches.iter().find(|batch| batch.num_rows() > 0) else {
+            return Ok(None);
+        };
+        let tasks = batch
+            .column_by_name("task")
+            .ok_or("The task was not read.")?;
+        let tasks = arrow_cast::cast(tasks, &DataType::Utf8).map_err(|error| error.to_string())?;
+        Ok(tasks
+            .as_string::<i32>()
+            .iter()
+            .next()
+            .flatten()
+            .map(str::to_owned))
+    }
+
+    /// The subtasks the Break down column `column` stores for the `selected`
+    /// episode.
+    async fn stored_subtasks(
+        &self,
+        selected: EpisodeSelection,
+        column: &AnswerColumn,
+    ) -> Result<StoredSubtasks, String> {
+        let statement = StoredSubtasks::statement(selected.dataset(), column);
+        let bound = EpisodeQueryRequest::new(selected, statement, 1);
+        let (_, batches) = self.storage.queries().batches_for_episode(&bound).await?;
+        StoredSubtasks::read(&batches)
+    }
+
+    /// The streams `dataset` records, among which the browser's topics are
+    /// found, which a run reads once.
+    async fn streams(&self, dataset: &DatasetSelection) -> Result<DatasetStreams<'_>, String> {
         let inspection = self
             .inspection
             .get_or_try_init(|| self.storage.inspect_dataset(dataset.clone()))
             .await?;
-        let stream = DatasetStreams::new(inspection.topics()).camera(camera)?;
-        Ok(stream.revision().clone())
+        Ok(DatasetStreams::new(inspection.topics()))
     }
 }
 
@@ -521,8 +656,8 @@ impl FillRun {
             })
             .buffer_unordered(FillWork::in_flight(source));
         while let Some((episode, answer)) = answering.next().await {
-            match answer {
-                Ok(Answered { answer, failure }) => {
+            match answer.map(Answered::into_parts) {
+                Ok((answer, failure)) => {
                     let mut progress = self.progress.recover_lock();
                     if let Some(reason) = failure {
                         progress

@@ -21,9 +21,9 @@ mod selection;
 mod tests;
 
 use super::annotate::SubtaskRow;
-use crate::activities::episode::{EpisodeListing, EpisodeTask};
+use crate::activities::episode::EpisodeListing;
 use serde::{Deserialize, Serialize};
-use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
+use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId, EpisodeTask};
 use spiral_robotics_common::sql::UnquotedSqlIdentifier;
 use spiral_robotics_common::training::PublishedModel;
 use std::collections::{BTreeMap, BTreeSet};

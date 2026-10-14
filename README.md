@@ -76,8 +76,9 @@ DX builds them together using the `@client` and `@server` package selections.
 
 Agent orchestration belongs to the frontend: imported robot discovery and
 Curation's category proposals own their prompts, model responses, and tool
-selection in the browser. Curation's per-row model work runs in Spiral, as the
-`spql.ai` functions its views compile to. `GET /api/providers` tells the frontend which
+selection in the browser. Curation's per-row model work runs in the backend's
+fill runs: Break down and the judgments of its subtasks call OpenRouter, and
+Score progress and Track objects their Modal services. `GET /api/providers` tells the frontend which
 model provider is configured; it constructs provider requests and interprets
 responses. `/api/proxy` relays external HTTP requests, attaches the key Studio
 holds for the destination's origin, and streams the responses back.
@@ -165,10 +166,9 @@ MODAL_SERVICE_TOKEN='…'
 ```
 
 An unset key turns off only what needs it. The relay attaches each key to
-requests bound for its provider's origin, and Studio passes the first two to
-the Spiral driver: the OpenRouter key as `spiral.openrouter_api_key` for the
-`spql.ai` model functions Curation compiles to, and the token as
-`spiral.huggingface_token`. The startup log says which keys are set, never
+requests bound for its provider's origin, Curation's fill runs send the
+OpenRouter key with their own model calls, and Studio passes the Hugging Face
+token to the Spiral driver as `spiral.huggingface_token`. The startup log says which keys are set, never
 their values. To change a key, restart the backend.
 
 Robot discovery calls `openai/gpt-5.6-terra` through OpenRouter, with `medium`

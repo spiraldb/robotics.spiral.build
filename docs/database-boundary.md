@@ -25,11 +25,11 @@ Endpoints and the signed-in user's access token are passed as database options,
 without changing process environment variables. The driver never refreshes the
 token: Studio replaces `spiral.access_token` on every open database whenever it
 refreshes the session, which requires a driver with that option.
-Studio's provider keys, which the backend reads from its environment at
-startup, are passed as write-only options: the OpenRouter key as
-`spiral.openrouter_api_key`, which the `spql.ai` model functions read, and the
-Hugging Face token as `spiral.huggingface_token`. The driver takes them when a
-database is created.
+Studio's Hugging Face token, which the backend reads from its environment at
+startup, is passed as the write-only option `spiral.huggingface_token`, which
+the driver reads pinned Hugging Face blobs with; it takes it when a database is
+created. Studio makes its own model calls, so the driver gets no OpenRouter
+key.
 
 `flake.nix` pins the official version and SHA-256 archive digests in
 `adbcVersion` and `adbcArchiveHashes`.

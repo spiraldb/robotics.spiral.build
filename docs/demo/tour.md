@@ -92,7 +92,7 @@ Pacing follows the [demo guide](guide.md):
 | "the whole graph becomes one SQL view" | A published view is one read-only statement over every episode. Studio stores it, not the Spiral catalog. **The series line "publish this curation to the Spiral catalog" is no longer true; don't reuse it.** | [curation.md](../curation.md#publishing) |
 
 What the narration avoids claiming:
-- that the models run inside SpiralDB (WARP scoring runs on our Modal service, and Break down and Find similar go through `spql.ai`);
+- that the models run inside SpiralDB (WARP scoring runs on our Modal service, and Studio's backend asks OpenRouter for Break down and Find similar);
 - that the demos are physical-robot footage (they're human-teleoperated simulation);
 - that every fumble is gone. Only the moments below the cutoff are, which is why the last line says "the stalls".
 

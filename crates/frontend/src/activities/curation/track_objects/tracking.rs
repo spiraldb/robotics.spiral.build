@@ -13,7 +13,6 @@ use crate::activities::curation::path::{
     ColumnMeaning, EpisodeRow, ModelEntries, ModelNode, ModelStep, PathError, TableColumn,
 };
 use spiral_robotics_common::curation::{AnswerColumn, AnswerSource};
-use spiral_robotics_common::datasets::{DatasetSelection, DatasetStreams};
 
 /// The released SAM 3.1 checkpoint on the Modal service, and the service
 /// revision whose tracks the answers store. A service that runs another
@@ -59,12 +58,7 @@ impl ModelNode for ObjectTracking {
         .map_err(PathError::new)
     }
 
-    fn answer_source(
-        &self,
-        _dataset: &DatasetSelection,
-        _streams: DatasetStreams<'_>,
-        _step: &ModelStep<'_>,
-    ) -> Result<AnswerSource, PathError> {
+    fn answer_source(&self, _step: &ModelStep<'_>) -> Result<AnswerSource, PathError> {
         let (camera, prompt) = self.asked()?;
         Ok(AnswerSource::ObjectTracking {
             camera: camera.to_owned(),

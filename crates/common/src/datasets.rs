@@ -4,6 +4,7 @@ mod camera_video;
 mod catalog;
 mod dataset_import;
 mod episode_id;
+mod episode_task;
 mod h264;
 mod joint_roles;
 mod messages;
@@ -17,6 +18,7 @@ pub use catalog::{
 };
 pub use dataset_import::{DatasetImportPhase, DatasetImportRequest, DatasetImportStatus};
 pub use episode_id::EpisodeId;
+pub use episode_task::EpisodeTask;
 pub use h264::H264AccessUnit;
 pub use joint_roles::{
     ArmRoles, DatasetJointRoles, DatasetJointRolesSave, GripperRoles, NamedValues, PolicyJoints,

@@ -262,7 +262,7 @@ impl LumaFrame {
 
 /// Frames FFmpeg decodes to compare a cut with the video it was cut from.
 struct FrameReader {
-    executable: String,
+    executable: crate::FfmpegExecutable,
 }
 
 impl FrameReader {
@@ -375,7 +375,7 @@ async fn cut_episodes_start_and_end_at_their_own_frames() {
             .await
             .unwrap();
         let reader = FrameReader {
-            executable: std::env::var("SPIRAL_ROBOTICS_FFMPEG").unwrap_or_else(|_| "ffmpeg".into()),
+            executable: crate::FfmpegExecutable::from_environment(),
         };
         let fps = episodes.info.fps;
         for &position in positions {

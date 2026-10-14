@@ -1,6 +1,6 @@
 //! Break down subtasks: the node splits every episode that reaches it into
-//! subtasks with `spql.ai.breakdown_task`, and its preview reads what it
-//! stored of each, as the curation's own run. What the preview read is held
+//! subtasks with a multimodal model the backend asks, and its preview reads
+//! what it stored of each, as the curation's own run. What the preview read is held
 //! for the session, and the judgments below read it.
 mod breakdown;
 mod episodes;
@@ -31,11 +31,23 @@ use output::{
     AnnotatedEpisode, AnnotationOutput, ChosenSubtask, EpisodeFailure, EpisodeSubtasks,
     SubtaskIndex,
 };
-use spiral_robotics_common::datasets::EpisodeId;
+use spiral_robotics_common::datasets::{EpisodeId, EpisodeTask};
 use spiral_robotics_ui::{
     ActionPurpose, BrowserFocus, Button, ButtonVariant, ChevronIcon, Field, FieldLayout, Notice,
     NoticeTone, Place, Select, TextInput, TextInputKind,
 };
+
+impl SubtaskAnnotation {
+    /// Where each episode's task is read from, as a settings note says it.
+    fn task_note(&self) -> Option<&'static str> {
+        Some(match self.task()? {
+            EpisodeTask::Recorded(_) => {
+                "Each episode's task is read from the instruction it recorded."
+            }
+            EpisodeTask::Listed => "Each episode's task is the one its dataset lists.",
+        })
+    }
+}
 
 /// Which episodes one run covers.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -539,8 +551,8 @@ fn AnnotationSettings(
                             },
                         }
                     }
-                    if let Some(task) = settings.task() {
-                        p { class: "curation-annotate-settings-note", "{task.note()}" }
+                    if let Some(note) = settings.task_note() {
+                        p { class: "curation-annotate-settings-note", "{note}" }
                     }
                     span { class: "curation-annotate-replace-slot", {reannotate} }
                 }

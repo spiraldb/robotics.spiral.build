@@ -3,6 +3,7 @@
 pub mod curations;
 mod datasets;
 mod db;
+mod ffmpeg;
 mod manager;
 mod provider_keys;
 mod robot_connector_tokens;
@@ -46,6 +47,7 @@ pub use db::{
     RecordBatchStream, RelationName, SqlStatement,
 };
 pub use db::{KeptInterval, SCHEMA_VERSION};
+pub use ffmpeg::FfmpegExecutable;
 pub use manager::StorageManager;
 pub use provider_keys::ProviderKeys;
 pub use robot_connector_tokens::RobotConnectorTokens;

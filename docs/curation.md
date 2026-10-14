@@ -173,36 +173,61 @@ without asking any model. Unpublishing drops only the view.
 | --- | --- |
 | Score progress | the Modal service's WARP scores, by the chosen model, of the camera that model was trained on (the released head's: the top camera): `{timestamp_ns, frame_index, velocity, support, …}` per frame, from the episode's first message |
 | Track objects | the Modal object tracking service's SAM 3.1 tracks at the node's rate: `{timestamp_ns, objects}` per sampled picture, from the episode's first message |
-| Break down | `spql.ai.breakdown_task` over the chosen camera's packet video, with the episode's task as its `task` when the dataset records one — its first `/instruction` message, or the first of the `tasks` a LeRobot dataset lists (`EpisodeTask`) —: `{description, start_ns, end_ns}` on the video's timeline |
-| Find similar | `spql.ai.similarity(subtask, query)` of every subtask of the Break down above, one list aligned with its subtasks |
-| Group similar | `spql.ai.classify(subtask, categories)` the same way, the categories written into the call as a literal list: `{category, probability}` |
+| Break down | the subtasks `google/gemini-3.8-flash` reads off contact sheets of the chosen camera's video, told the episode's task when the dataset records one — its first `/instruction` message, or the first of the `tasks` a LeRobot dataset lists (`EpisodeTask`): `{start_ns, end_ns, description}` on the video's timeline |
+| Find similar | the similarity to the query `typesafe/jev-1.13` judges for every subtask of the Break down above, one list of doubles aligned with its subtasks |
+| Group similar | the category `typesafe/jev-1.13` judges most probable for every subtask, the same way, the categories carried in the call: `{category, probability}` |
 
 `CurationPath::fills` compiles, for each node that asks a model in path
 order, its column, the episodes that reach it (the reach chain above it,
 compiled over the columns already filled, `SELECT episode_id`), and how one
-episode's answer is computed: a statement over the episode bound as `$1`,
-or, for Score progress and Track objects, their Modal service. A node names
-its camera and instruction by topic; Break down's statement reads each from
-its stream's `messages` table, found among the streams the dataset records
-(`DatasetStreams`), which the curation reads with its sample. Break down's
-statement asks its model once per episode, and a judgment's judges the
-episode's whole stored list of subtasks in one call (the list forms of
-`spql.ai.similarity` and `spql.ai.classify`), which answers with a list
-aligned with them. Break down lists its subtasks with `spql.range` and
-`spql.list.get`, each carrying its place, and a judgment reads each
-subtask's answer at that place; Spiral has no `WITH ORDINALITY`.
+episode's answer is computed (`AnswerSource`): for Score progress and Track
+objects their Modal service, and for Break down and the judgments of its
+subtasks a call the backend makes itself through OpenRouter, named by what
+it asks — the camera, the sample interval, and where the task is read; the
+Break down column and the query or the categories — and the model. A node
+names its camera and instruction by topic, which the backend finds among the
+streams the dataset records (`DatasetStreams`). Break down's subtasks are
+listed in the view with `spql.range` and `spql.list.get`, each carrying its
+place, and a judgment reads each subtask's answer at that place; Spiral has
+no `WITH ORDINALITY`.
+
+Break down (`crates/backend/src/curation/break_down.rs`) reads the
+episode's camera packets in decode order (`CameraVideo::packets`) and its
+task: the first message on the instruction topic, or the first task its
+LeRobot listing lists. It samples a picture every sample interval from the
+first, each the nearest picture and none twice, over a timeline that runs
+one mean picture period past the last. FFmpeg (`SPIRAL_ROBOTICS_FFMPEG`, or
+`ffmpeg` on `PATH`) decodes the episode's access units and writes back only
+the sampled pictures, which are tiled twenty to a JPEG contact sheet, five
+across and four down, each tile 224 px wide at the recording's aspect ratio
+with its time from the first picture burned in below it. One chat completion
+at low reasoning effort reads every sheet, with a strict JSON schema for the
+answer, and names where each subtask ends, in those seconds. The answer is
+refused whole when it is empty, a description is blank, a boundary is not
+after the one before, or a subtask other than the last reaches the end of
+the recording; the last ends with the timeline wherever the model put it.
+An episode whose sheets pass 20 MB is not asked. A judgment
+(`subtask_judgment.rs`) reads the descriptions the Break down column stores
+for the episode and asks jev through OpenRouter's Decisions API, one
+question per subtask against one shared state (a Noul against the query for
+Find similar, a Choice among the categories for Group similar), as many to
+a request as its token budget carries: usually one request per episode. Its
+answer is a list aligned with the subtasks, NULL where jev did not answer or
+a subtask has no description; an episode Break down stored no subtasks for
+is its failed answer. These calls keep the models, prompts, sampling,
+checks, and answer types of Spiral's `spql.ai.breakdown_task`,
+`spql.ai.similarity`, and `spql.ai.classify`, which answered them before
+Studio made them, and each column keeps the call those functions were named
+in, so what they stored is read without asking again.
 
 The models read each episode whole, so what they are asked never depends on
 anything above the node. Studio's packets carry presentation times counted
 from the episode's first message, so a stored time's log time is that
-message's time plus its own. The text judgments are asked of
-`typesafe/jev-1.13`, named in the statement so every answer names the model
-that gave it. Every model function is paid for with the deployment's
-OpenRouter key, which the backend passes to the driver as
-`spiral.openrouter_api_key` (see [the database boundary](database-boundary.md)).
-Literals go through `SqlLiteral`; a function parameter that must be a
-constant, such as `sample_interval`, takes a bare number, because Spiral types
-a `CAST` as nullable.
+message's time plus its own. Every model is named in its call, so every
+answer names the model that gave it, and paid for with the deployment's
+OpenRouter key (`OPENROUTER_API_KEY`), which the backend sends with its own
+requests; a run that asks a model through OpenRouter is refused without it.
+Literals in a view go through `SqlLiteral`.
 
 ### Rules the compiler keeps
 
@@ -281,7 +306,7 @@ browser's reading to the compiled SQL for every kind of condition.
 Group similar's categories are configuration. One model call in the browser,
 through the Studio provider, proposes four to eight from the descriptions of
 the subtasks that reach the node, and the operator may rename or merge them.
-Either way the node's statement names them, and changing them runs the
+Either way the node's call names them, and changing them runs the
 classification again, never the proposal. A proposal numbers its categories
 afresh and points every Select choosing among them at all of them; a renamed
 category keeps its id, and a merged one's Selects choose the category it
@@ -303,18 +328,22 @@ once.
 Before the run starts, the backend checks each view name and admits every
 statement as one read-only query. The run is the backend's and outlives the
 page. For each column in order it reads the episodes that reach the node,
-skips those the column holds, asks about the rest (a statement eight at a
-time; the progress service twenty across runs, its containers each taking in
-eight uploads while the GPU scores; the object tracking service eight, two
-H100 containers' worth; and retries 408s, 429s, 5xx, and timeouts with a pause),
+skips those the column holds, asks about the rest (eight episodes at a time,
+Break down's and the judgments' included; the progress service twenty across
+runs, its containers each taking in eight uploads while the GPU scores; the
+object tracking service eight, two H100 containers' worth; and retries 408s,
+429s, 5xx, and timeouts with a pause, an OpenRouter one as its `Retry-After`
+says),
 and holds the answers in memory until they reach 4 MiB, since Spiral refuses
 to change more than 16 MiB of a hosted table in one statement. Each full set,
 and the rest at the end, is written while the asking goes on: ingested into a
 staging table, the column added the first time, merged in by `episode_id`,
 and the staging table dropped. A rejected video (422) is that episode's
-failed answer; a refused token, a service on another revision or a model it
-can't run (409), a model it doesn't know (404), or an error ends the run once
-what it answered is written. Once every column is filled it checks that
+failed answer, and so is an episode a model through OpenRouter could not
+answer; a refused token, a service on another revision or a model it can't
+run (409), a model it doesn't know (404), a refused OpenRouter key or an
+account out of credit (401, 402), or an error ends the run once what it
+answered is written. Once every column is filled it checks that
 each view's statement plans (`LIMIT 0`) and stores it in the Studio SQLite
 table `curated_views`, replacing the statement its name had, so a reader sees
 the old view or the new one. Spiral keeps no hosted views, so Studio does:
@@ -371,7 +400,7 @@ published view, since each read Spiral's retired Datasets.
 | --- | --- | --- |
 | No SQL node, joins, or free-form query shapes | Curation always ends in training input; analytics is not the product | A SQL escape-hatch node |
 | Every node compiles to Spiral SQL, and a published view is the whole curation | One executable form: every reader sees exactly what was curated | Studio materializing results |
-| Per-row model work is a `spql.ai` function, or a Modal service for video models; an authoring suggestion, such as proposed categories, stays in the browser and becomes a literal | A view reads only what Spiral stores | Browser-orchestrated calls per episode |
+| Per-row model work is the backend's: a call it makes through OpenRouter, or a Modal service for video models; an authoring suggestion, such as proposed categories, stays in the browser and becomes part of the call | A view reads only what Spiral stores, and Studio owns the calls its models answer | Browser-orchestrated calls per episode; Spiral's `spql.ai` functions in fill statements |
 | Model answers are stored per dataset, one column per exact call, filled by a backend run | A view over the whole dataset must not ask its models on every read, and identical calls share their work | Re-asking on every read over the first 20 episodes; waiting for Spiral to cache |
 | One row per episode, with `kept` as a list of ranges (decided 2026-10-08) | Upstream SpiralDB is moving to one episode as one row; an episode's answers stay whole beside what is kept of it | One row per kept interval; one row per moment |
 | Model nodes add columns; the Select is the one filter (decided 2026-10-08) | One place owns every cutoff, and any column can be cut on, such as duration per bottle | Each measure keeping by its own rule |

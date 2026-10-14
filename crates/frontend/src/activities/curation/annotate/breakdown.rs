@@ -1,25 +1,25 @@
 //! What a Break down subtasks node adds to a path, and the listing of its
 //! subtasks every judgment of them reads too.
 //!
-//! The node asks each episode for `spql.ai.breakdown_task` over the chosen
+//! The node asks the backend to break each episode down over the chosen
 //! camera's video, with the episode's task when the dataset records one: its
-//! recorded instruction, or the task a LeRobot dataset lists. A fill stores the answer in the dataset's
-//! answers table, and the published view and the preview read it from there.
-//! The model reads each episode whole, so what it is asked never depends on
-//! anything above the node. Its entries list the subtasks of every episode,
-//! each with its place in the answer, which the stored judgments below read
-//! by. The function answers on the video's presentation timeline, which
-//! Studio's packets count from the episode's first message, so a subtask's
-//! log time is that message's time plus its own.
+//! recorded instruction, or the task a LeRobot dataset lists. A fill stores
+//! the answer in the dataset's answers table, and the published view and the
+//! preview read it from there. The model reads each episode whole, so what
+//! it is asked never depends on anything above the node. Its entries list
+//! the subtasks of every episode, each with its place in the answer, which
+//! the stored judgments below read by. The answer is on the video's
+//! presentation timeline, which Studio's packets count from the episode's
+//! first message, so a subtask's log time is that message's time plus its
+//! own.
 use crate::activities::curation::document::{DEFAULT_ANNOTATION_MODEL, SubtaskAnnotation};
 use crate::activities::curation::path::{
-    ColumnMeaning, EpisodeRow, ModelEntries, ModelNode, ModelStep, PathError, PathSource,
-    TableColumn,
+    ColumnMeaning, EpisodeRow, ModelEntries, ModelNode, ModelStep, PathError, TableColumn,
 };
-use crate::activities::episode::EpisodeTask;
-use spiral_robotics_common::curation::{AnswerColumn, AnswerSource};
-use spiral_robotics_common::datasets::{DatasetSelection, DatasetStreams};
-use spiral_robotics_common::sql::SqlLiteral;
+use spiral_robotics_common::curation::{
+    AnswerColumn, AnswerSource, SampleInterval, SubtaskBreakdown,
+};
+use spiral_robotics_common::datasets::EpisodeTask;
 
 impl SubtaskAnnotation {
     /// The camera the model watches.
@@ -27,25 +27,13 @@ impl SubtaskAnnotation {
         self.camera()
             .ok_or_else(|| PathError::new("Choose the camera Break down reads."))
     }
-    /// The model's call over the episode's row.
-    fn call(&self, row: &mut EpisodeRow<'_>) -> Result<String, PathError> {
-        let interval = SqlLiteral::number(self.sample_interval_seconds())
-            .ok_or_else(|| PathError::new("The sample interval must be a number."))?;
-        let video = row.video(self.watched()?)?;
-        let task = match self.task() {
-            Some(task) => format!(", task => {}", row.task(&task)?),
-            None => String::new(),
-        };
-        Ok(format!(
-            "spql.ai.breakdown_task({video}, sample_interval => {interval}, model => {}{task})",
-            SqlLiteral::text(DEFAULT_ANNOTATION_MODEL)
-        ))
-    }
 }
 
 /// Each episode's subtasks are stored under the model, the camera, the
 /// sample interval, and where it was told its task from: the instruction
-/// topic, or the task its dataset lists.
+/// topic, or the task its dataset lists. The call keeps the name of the
+/// Spiral function that first answered it, so what that stored is read
+/// without asking again.
 impl ModelNode for SubtaskAnnotation {
     fn answer_column(&self, _subtasks: Option<&AnswerColumn>) -> Result<AnswerColumn, PathError> {
         let task = match self.task() {
@@ -63,33 +51,15 @@ impl ModelNode for SubtaskAnnotation {
         AnswerColumn::of("breakdown_task", &call).map_err(PathError::new)
     }
 
-    fn answer_source(
-        &self,
-        dataset: &DatasetSelection,
-        streams: DatasetStreams<'_>,
-        step: &ModelStep<'_>,
-    ) -> Result<AnswerSource, PathError> {
-        let mut row = EpisodeRow::filling(dataset, streams);
-        self.episode_columns(&mut row, step)?;
-        Ok(AnswerSource::Statement {
-            statement: row.answering()?,
-        })
-    }
-
-    /// A fill asks the model on the row; every other reading reads what it
-    /// stored.
-    fn episode_columns(
-        &self,
-        row: &mut EpisodeRow<'_>,
-        step: &ModelStep<'_>,
-    ) -> Result<(), PathError> {
-        match row.source() {
-            PathSource::Published | PathSource::Preview { .. } => row.stored(step.column()),
-            PathSource::Fill => {
-                let call = self.call(row)?;
-                row.asked(step.column(), call)
-            }
-        }
+    fn answer_source(&self, _step: &ModelStep<'_>) -> Result<AnswerSource, PathError> {
+        let interval =
+            SampleInterval::from_seconds(self.sample_interval_seconds()).map_err(PathError::new)?;
+        Ok(AnswerSource::BreakDown(SubtaskBreakdown::new(
+            self.watched()?,
+            interval,
+            DEFAULT_ANNOTATION_MODEL,
+            self.task(),
+        )))
     }
 
     /// Every subtask the model found in the episode, at its place in the

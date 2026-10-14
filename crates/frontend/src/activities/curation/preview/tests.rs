@@ -8,22 +8,15 @@ use crate::activities::curation::path::CurationPath;
 use crate::activities::curation::population::{EpisodeSample, PopulationReader};
 use crate::activities::episode::Episode;
 use spiral_robotics_common::curation::{AnswerColumn, AnswerSource, FillEpisodes};
-use spiral_robotics_common::datasets::{DatasetTopic, EpisodeId, TopicRevision};
+use spiral_robotics_common::datasets::EpisodeId;
 
 /// Two episodes of 20 and 12 seconds, whose first messages are at one second
-/// of log time, of a dataset recording a top camera.
+/// of log time.
 fn sample() -> EpisodeSample {
-    let camera = DatasetTopic::new(
-        "/top-camera".into(),
-        TopicRevision::new("top_camera_0a1b2c3d").unwrap(),
-        "protobuf".into(),
-    )
-    .with_schema(Some("foxglove.CompressedVideo".into()));
     EpisodeSample::fixture(vec![
         Episode::fixture(&EpisodeId::fixture(1), 20_000_000_000),
         Episode::fixture(&EpisodeId::fixture(2), 12_000_000_000),
     ])
-    .with_topics(vec![camera])
 }
 
 fn graph() -> CurationGraph {
@@ -176,15 +169,16 @@ fn every_model_node_previews_what_it_has_the_backend_answer_and_store_first() {
                     ("/top-camera", "bottle", 5)
                 );
             }
-            AnswerSource::Statement { statement } if node == &group => {
-                assert!(
-                    statement.contains("spql.ai.classify(s.listed.description"),
-                    "{statement}"
-                )
+            AnswerSource::BreakDown(call) => {
+                assert_eq!(node, &annotate);
+                assert_eq!(call.camera(), "/top-camera");
             }
-            AnswerSource::Statement { statement } => {
-                assert!(statement.contains("spql.ai.breakdown_task("), "{statement}")
+            AnswerSource::Classify(call) => {
+                assert_eq!(node, &group);
+                assert_eq!(call.subtasks(), &column(&graph, &annotate));
+                assert_eq!(call.categories()[0].name(), "fold");
             }
+            AnswerSource::Similarity(_) => panic!("No node here finds similar subtasks"),
             AnswerSource::DatasetStatement { .. } => {
                 panic!("A preview asks about its listed episodes, one at a time")
             }

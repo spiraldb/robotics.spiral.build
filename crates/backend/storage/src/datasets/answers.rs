@@ -23,7 +23,7 @@ use std::sync::Arc;
 /// The field every stored answer is wrapped in: a NULL struct is an episode
 /// not asked yet, a NULL `value` one the model could not answer.
 const VALUE: &str = "value";
-/// The column of a fill statement's result holding its answer.
+/// The column of a dataset statement's result holding its answer.
 const ANSWER: &str = "answer";
 
 /// The answers table's rows for episodes a write adds: each one's id, and
@@ -162,25 +162,6 @@ impl DatasetAnswers<'_> {
 pub struct EpisodeAnswer(ArrayRef);
 
 impl EpisodeAnswer {
-    /// What a fill statement answered for the episode it binds: its one
-    /// row's `answer`. A statement that answers no row gives no answer.
-    pub fn from_statement(schema: &Schema, batches: &[RecordBatch]) -> Result<Self, String> {
-        let answer = schema
-            .index_of(ANSWER)
-            .map_err(|_| "A fill statement must answer in `answer`.".to_owned())?;
-        let answers = batches
-            .iter()
-            .map(|batch| batch.column(answer).clone())
-            .collect::<Vec<_>>();
-        match answers.iter().map(|rows| rows.len()).sum::<usize>() {
-            0 => Ok(Self::failed(schema.field(answer).data_type())),
-            1 => Self::concatenated(&answers).map(Self),
-            rows => Err(format!(
-                "A fill statement answered {rows} rows for one episode."
-            )),
-        }
-    }
-
     /// Every row of `rows` as one list answer, in order.
     pub fn listing(rows: ArrayRef) -> Self {
         let field = Arc::new(Field::new_list_field(rows.data_type().clone(), true));
@@ -562,32 +543,6 @@ mod tests {
     }
 
     #[test]
-    fn a_statement_answers_in_one_row() {
-        let one = Schema::new(vec![
-            EpisodeUuids::field("episode_id"),
-            Field::new(ANSWER, DataType::Float64, true),
-        ]);
-        let row = |values: Vec<Option<f64>>| {
-            RecordBatch::try_new(
-                Arc::new(one.clone()),
-                vec![
-                    EpisodeUuids::array(&vec![episode(1); values.len()]).unwrap(),
-                    Arc::new(Float64Array::from(values)),
-                ],
-            )
-            .unwrap()
-        };
-        let answered = EpisodeAnswer::from_statement(&one, &[row(vec![Some(0.5)])]).unwrap();
-        assert!(!answered.is_failed());
-        assert!(
-            EpisodeAnswer::from_statement(&one, &[])
-                .unwrap()
-                .is_failed()
-        );
-        assert!(EpisodeAnswer::from_statement(&one, &[row(vec![Some(0.5), None])]).is_err());
-    }
-
-    #[test]
     fn answers_fill_one_write_by_what_each_holds_alone() {
         // 64 episodes' scores of 256 KiB each, read as one 16 MiB column.
         let scores = DataType::List(Arc::new(Field::new_list_field(DataType::Float32, false)));
@@ -733,23 +688,14 @@ mod tests {
             let times = times.as_any().downcast_ref::<Int64Array>().unwrap();
             assert_eq!(times.value(1) - times.value(0), 33_333_333);
 
-            // A statement's answer, and one answered per position, fill columns.
+            // A judgment's list, one value per subtask, fills a column.
             let answers = storage.dataset_answers(table.clone());
             let similarity = AnswerColumn::of("similarity", &["probe"]).unwrap();
             assert!(answers.filled(&similarity).await?.is_empty());
-            let listed = format!(
-                "WITH listed AS (SELECT e.id AS episode_id, [CAST(0.25 AS DOUBLE), CAST(0.5 AS DOUBLE)] AS scores FROM {} e WHERE e.id = $1) \
-                 SELECT l.episode_id, g._ AS position, spql.list.get(l.scores, g._) AS answer FROM listed l CROSS JOIN LATERAL spql.range(CAST(spql.list.len(l.scores) AS BIGINT)) g",
-                dataset.episodes()
-            );
-            let (schema, batches) = storage
-                .queries()
-                .batches_for_episode(&bound(&episodes[0], listed))
-                .await?;
             let mut first = ColumnAnswers::default();
             first.hold(
                 episodes[0].clone(),
-                EpisodeAnswer::from_statement(&schema, &batches)?,
+                EpisodeAnswer::listing(Arc::new(Float64Array::from(vec![0.25, 0.5]))),
             );
             answers.write(&similarity, first).await?;
             assert_eq!(answers.filled(&similarity).await?, BTreeSet::from([episodes[0].clone()]));

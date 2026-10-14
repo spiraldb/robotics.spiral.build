@@ -397,14 +397,7 @@ async fn training_runs_name_their_dataset_by_id() {
                 .map(|row| row.try_get_by_index::<String>(0).unwrap()),
         );
     }
-    assert_eq!(
-        read,
-        [
-            "0",
-            r#"{"id":"default"}"#,
-            "0",
-        ]
-    );
+    assert_eq!(read, ["0", r#"{"id":"default"}"#, "0",]);
 }
 
 /// A run recorded before training models had families trained ACT, and

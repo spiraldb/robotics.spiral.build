@@ -9,17 +9,23 @@
 //!
 //! The frontend also compiles each output to one read-only statement over
 //! the dataset's stored model answers (`answers`); the backend fills the
-//! answers the statement reads and then publishes it under a plain name at
-//! the catalog root, as one polled run (`fill`). A node's preview reads its
-//! stored answers of the episodes it previews with one statement, and a
-//! curation opened asks which episodes each of its columns already holds.
+//! answers the statement reads, asking each model itself (`subtasks` for
+//! the ones it asks through OpenRouter), and then publishes it under a
+//! plain name at the catalog root, as one polled run (`fill`). A node's
+//! preview reads its stored answers of the episodes it previews with one
+//! statement, and a curation opened asks which episodes each of its columns
+//! already holds.
 mod answers;
 mod fill;
+mod subtasks;
 
 pub use answers::{AnswerColumn, AnswerTable, FilledEpisodesRequest};
 pub use fill::{
     AnswerSource, ColumnFill, EpisodeFailure, FillEpisodes, FillRequest, FillState, FillStatus,
     FillStep,
+};
+pub use subtasks::{
+    CategoryDefinition, SampleInterval, SubtaskBreakdown, SubtaskClassification, SubtaskSimilarity,
 };
 
 use crate::sql::UnquotedSqlIdentifier;

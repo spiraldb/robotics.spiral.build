@@ -1,5 +1,5 @@
-//! One camera of the episodes a statement reads: each assembled out of its
-//! recorded packets into a Spiral packet video, or its packets as they are.
+//! One camera of the episodes a statement reads: a span of its recorded
+//! packets assembled into a Spiral packet video, or its packets as they are.
 use super::{DatasetSelection, TopicRevision};
 
 /// A camera stream of one dataset, read as each episode's packet video.
@@ -17,20 +17,6 @@ impl<'a> CameraVideo<'a> {
     /// `camera` is one of `dataset`'s video streams.
     pub fn new(dataset: &'a DatasetSelection, camera: &'a TopicRevision) -> Self {
         Self { dataset, camera }
-    }
-
-    /// Two `WITH` entries: `packets` reads this camera's packets of the
-    /// episode bound as `$1`, and `videos` assembles them into one packet
-    /// video, `(id, source)`.
-    pub fn videos(self, (packets, videos): (&str, &str)) -> String {
-        let timed = "spql.dt.from_epoch(recorded.log_ns, 'ns') - spql.dt.from_epoch(e.start_ns, 'ns') AS presentation_time";
-        format!(
-            "{packets} AS ({}), \
-             {videos} AS (SELECT id, spql.video.from_packets(\
-             spql.list.collect(STRUCT_PACK(payload := payload, decode_index := decode_index, presentation_time := presentation_time)), 'h264', 'annex_b') AS source \
-             FROM {packets} GROUP BY id)",
-            self.read(timed)
-        )
     }
 
     /// The packet video, as one row's `source`, of the episode bound as `$1`
@@ -110,17 +96,6 @@ mod tests {
             DatasetSelection::new("d").unwrap(),
             TopicRevision::new("c_00000000").unwrap(),
         )
-    }
-
-    #[test]
-    fn the_bound_episodes_packets_assemble_into_its_video() {
-        let (dataset, stream) = camera();
-        assert_eq!(
-            CameraVideo::new(&dataset, &stream).videos(("packets", "streams")),
-            format!(
-                "packets AS (SELECT recorded.id, recorded.payload, recorded.decode_index, spql.dt.from_epoch(recorded.log_ns, 'ns') - spql.dt.from_epoch(e.start_ns, 'ns') AS presentation_time FROM {RECORDED}), streams AS (SELECT id, spql.video.from_packets(spql.list.collect(STRUCT_PACK(payload := payload, decode_index := decode_index, presentation_time := presentation_time)), 'h264', 'annex_b') AS source FROM packets GROUP BY id)"
-            )
-        );
     }
 
     #[test]
