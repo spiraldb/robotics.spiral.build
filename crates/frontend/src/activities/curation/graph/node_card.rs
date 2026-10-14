@@ -1,7 +1,6 @@
 //! What one node of the curation graph says, and what its + offers. Everything
 //! here reads the payload and the sample it is interpreted over, so the
 //! canvas keeps no second copy of the graph.
-use spiral_robotics_common::datasets::DatasetSelection;
 
 use super::super::document::{
     CurationGraph, CurationNode, CurationNodeKind, DATASET_NODE_ID, NodePublication,
@@ -159,11 +158,10 @@ impl NodeCard {
         };
         match node.kind() {
             CurationNodeKind::Dataset => {
-                // The name the Dataset workspace and Data show, without the
-                // storage prefix that only pushed the count to a second line.
+                // The name the Dataset workspace and Data show.
                 let name = payload.dataset().map_or_else(
                     || "No dataset yet".to_owned(),
-                    DatasetSelection::display_name,
+                    |dataset| dataset.display_name().to_owned(),
                 );
                 // Every count below this card is over the episodes it reads, so
                 // a dataset read only in part says so here, once.

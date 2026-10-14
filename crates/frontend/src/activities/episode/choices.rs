@@ -300,7 +300,7 @@ impl StreamChoices {
         if stream.kind() == StreamKind::Video {
             return false;
         }
-        stream.samples().is_some_and(|samples| samples <= 1)
+        stream.samples() <= 1
             || matches!(
                 self.schemas.read().get(stream.key()),
                 Some(StreamSchema::Ready(root)) if root.plottable_leaves().is_empty()

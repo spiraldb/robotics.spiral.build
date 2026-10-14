@@ -310,7 +310,7 @@ mod tests {
                 output: "Score progress",
                 current: true,
             },
-            dataset: EpisodeListing::mcap_fixture("dataset_folding"),
+            dataset: EpisodeListing::mcap_fixture("folding"),
             subtasks: Vec::new(),
             published: None,
             fill: None,

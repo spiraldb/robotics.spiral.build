@@ -38,7 +38,7 @@ use super::graph::DatasetStep;
 use super::select::SelectStep;
 use crate::activities::episode::EpisodeListing;
 use spiral_robotics_common::curation::{AnswerColumn, AnswerSource, ColumnFill, FillEpisodes};
-use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
+use spiral_robotics_common::datasets::{DatasetSelection, DatasetStreams, EpisodeId};
 
 /// Which reading of a path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -168,14 +168,20 @@ pub(super) trait ModelNode {
     /// The column the node's call stores its answers in. `subtasks` is the
     /// column of the Break down above, for a node that judges its subtasks.
     fn answer_column(&self, subtasks: Option<&AnswerColumn>) -> Result<AnswerColumn, PathError>;
-    /// How a fill computes one episode's answer over `dataset`.
+    /// How a fill computes one episode's answer over `dataset`, whose
+    /// streams are `streams`.
     fn answer_source(
         &self,
         dataset: &DatasetSelection,
+        streams: DatasetStreams<'_>,
         step: &ModelStep<'_>,
     ) -> Result<AnswerSource, PathError>;
     /// The stored answers its entries read, as columns of the episode row.
-    fn episode_columns(&self, row: &mut EpisodeRow, step: &ModelStep<'_>) -> Result<(), PathError> {
+    fn episode_columns(
+        &self,
+        row: &mut EpisodeRow<'_>,
+        step: &ModelStep<'_>,
+    ) -> Result<(), PathError> {
         row.stored(step.column())
     }
     /// Its entries over the episode row, and the columns folding them.
@@ -292,7 +298,7 @@ impl<'a> CurationPath<'a> {
         let mut row = EpisodeRow::new(dataset, PathSource::Preview { episodes });
         model.episode_columns(&mut row, &step)?;
         let built = model.entries(&step)?;
-        let mut entries = row.entries()?;
+        let mut entries = row.entries();
         entries.extend(built.entries);
         Ok(format!(
             "WITH\n  {}\nSELECT {} FROM {}",
@@ -315,8 +321,8 @@ impl<'a> CurationPath<'a> {
     /// Every column the published view reads, in the order a fill writes
     /// them: for each node that asks a model, the episodes that reach it,
     /// read over the columns above, and how one episode's answer is
-    /// computed.
-    pub(super) fn fills(&self) -> Result<Vec<ColumnFill>, PathError> {
+    /// computed from `streams`, the dataset's.
+    pub(super) fn fills(&self, streams: DatasetStreams<'_>) -> Result<Vec<ColumnFill>, PathError> {
         let columns = self.answer_columns()?;
         let mut fills = Vec::new();
         for (depth, stored) in columns.iter().enumerate() {
@@ -328,34 +334,40 @@ impl<'a> CurationPath<'a> {
                 nodes: self.nodes[..depth].to_vec(),
             }
             .reaching()?;
-            fills.push(self.fill(self.nodes[depth], stored, FillEpisodes::Reaching(reaching))?);
+            let step = Self::step(self.nodes[depth], stored);
+            fills.push(self.fill(&step, FillEpisodes::Reaching(reaching), streams)?);
         }
         Ok(fills)
     }
 
-    /// The last node's column filled for `episodes`, as its preview fills
-    /// it before reading it.
-    pub(super) fn fill_for(&self, episodes: Vec<EpisodeId>) -> Result<ColumnFill, PathError> {
+    /// The last node's column filled for `episodes`, from `streams`, the
+    /// dataset's, as its preview fills it before reading it.
+    pub(super) fn fill_for(
+        &self,
+        episodes: Vec<EpisodeId>,
+        streams: DatasetStreams<'_>,
+    ) -> Result<ColumnFill, PathError> {
         let depth = self.nodes.len() - 1;
         let columns = self.answer_columns()?;
         let stored = columns[depth]
             .as_ref()
             .ok_or_else(|| PathError::new("This node asks no model."))?;
-        self.fill(self.nodes[depth], stored, FillEpisodes::Listed(episodes))
+        let step = Self::step(self.nodes[depth], stored);
+        self.fill(&step, FillEpisodes::Listed(episodes), streams)
     }
 
     fn fill(
         &self,
-        node: &CurationNode,
-        stored: &NodeColumns,
+        step: &ModelStep<'_>,
         episodes: FillEpisodes,
+        streams: DatasetStreams<'_>,
     ) -> Result<ColumnFill, PathError> {
-        let model =
-            Self::model(node.kind()).ok_or_else(|| PathError::new("This node asks no model."))?;
-        let source = model.answer_source(self.dataset()?, &Self::step(node, stored))?;
+        let kind = step.node.kind();
+        let model = Self::model(kind).ok_or_else(|| PathError::new("This node asks no model."))?;
+        let source = model.answer_source(self.dataset()?, streams, step)?;
         Ok(ColumnFill::new(
-            node.kind().label(),
-            stored.column.clone(),
+            kind.label(),
+            step.column.clone(),
             episodes,
             source,
         ))
@@ -423,7 +435,7 @@ impl<'a> CurationPath<'a> {
             model.episode_columns(&mut row, &Self::step(node, stored))?;
         }
         let mut entries = vec![DatasetStep::new(self.listing()?).entry()];
-        entries.extend(row.entries()?);
+        entries.extend(row.entries());
         let mut table = TableColumns::facts(self.listing()?);
         let mut reach = DatasetStep::NAME.to_owned();
         for (depth, node) in self.nodes.iter().enumerate() {

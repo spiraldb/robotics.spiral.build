@@ -101,7 +101,7 @@ impl MeasuredTimeline {
                     return Err("An entry of the preview has no episode or time.".into());
                 }
                 let id = <[u8; 16]>::try_from(ids.value(row))
-                    .map_err(|_| "An entry's episode is not a member UUID.".to_owned())?;
+                    .map_err(|_| "An entry's episode is not an episode UUID.".to_owned())?;
                 let (origin, entries) = match episodes.get_mut(&id) {
                     Some(episode) => episode,
                     None => {

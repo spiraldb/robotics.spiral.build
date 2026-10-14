@@ -5,13 +5,11 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
+use spiral_robotics_common::datasets::H264AccessUnit;
 use spiral_robotics_connector::EncoderDriver;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::mpsc;
 
-/// Repeat the parameter sets at every keyframe and delimit access units, so a
-/// recording decodes from any keyframe.
-const H264_PACKET_FILTER: &str = "dump_extra=freq=keyframe,h264_metadata=aud=insert";
 /// How long FFmpeg gets to flush its last frames once its input closes.
 const FINISH_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -62,21 +60,11 @@ impl EncoderDriver for FfmpegEncoder {
                     &codec,
                     "-vf",
                     "scale=in_range=auto:out_range=tv",
-                    "-pix_fmt",
-                    "yuv420p",
                     "-color_range",
                     "tv",
-                    "-bf",
-                    "0",
-                    "-g",
-                    "30",
-                    "-bsf:v",
-                    H264_PACKET_FILTER,
-                    "-f",
-                    "h264",
-                    "-y",
                 ])
-                .arg("pipe:1")
+                .args(H264AccessUnit::FFMPEG_OUTPUT_OPTIONS)
+                .args(["-y", "pipe:1"])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -152,7 +140,6 @@ impl EncoderDriver for FfmpegEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_common::datasets::H264AccessUnit;
     use spiral_robotics_recording::AccessUnits;
 
     #[test]
@@ -179,7 +166,7 @@ mod tests {
                 "-g",
                 "2",
                 "-bsf:v",
-                H264_PACKET_FILTER,
+                H264AccessUnit::FFMPEG_PACKET_FILTER,
                 "-f",
                 "h264",
                 "pipe:1",

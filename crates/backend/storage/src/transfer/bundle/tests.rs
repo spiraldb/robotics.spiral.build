@@ -230,7 +230,10 @@ fn data_archive_preserves_recording_bytes() {
         [arrow_payload(&sources)],
     );
     let decoded = ProjectBundle::decode(&bytes).unwrap();
-    assert_eq!(decoded.datasets, ["demonstrations"]);
+    assert_eq!(
+        decoded.datasets,
+        [DatasetSelection::new("demonstrations").unwrap()]
+    );
     assert_eq!(decoded.studio, b"sqlite validated separately");
     assert_eq!(decoded.tables, vec![(Table::DatasetSources, vec![sources])]);
 }
@@ -302,7 +305,10 @@ async fn format_five_is_a_manifest_sqlite_and_one_arrow_stream_per_relation() {
         ["manifest.json", "studio.sqlite3", "dataset_source.arrows"]
     );
     let decoded = ProjectBundle::decode(&bytes).unwrap();
-    assert_eq!(decoded.datasets, ["empty_dataset"]);
+    assert_eq!(
+        decoded.datasets,
+        [DatasetSelection::new("empty_dataset").unwrap()]
+    );
     assert_eq!(decoded.tables.len(), 1);
     StudioSnapshot::open(&decoded.studio, &source)
         .await
@@ -378,7 +384,7 @@ impl crate::DatabaseSession for FailingSpiral {
         &mut self,
         _: crate::SqlStatement,
     ) -> crate::DatabaseFuture<'_, crate::ExecutionSummary> {
-        panic!("no datasets to retire")
+        panic!("the project holds no tables to drop")
     }
     fn ingest(
         &mut self,
@@ -466,4 +472,153 @@ async fn spiral_failure_rolls_back_staged_sqlite_replacements() {
             .unwrap(),
         Some(original.with_revision(1))
     );
+}
+
+/// A project over the in-memory engine whose journal names an MCAP dataset
+/// `old` holding one episode and an empty LeRobot dataset `svla`.
+struct HeldDatasets {
+    /// Serves the catalog while the project lives.
+    _journal: crate::datasets::TestJournal,
+    spiral: Arc<crate::ProjectStore>,
+    studio: crate::StudioStore,
+}
+
+impl HeldDatasets {
+    async fn new() -> Self {
+        use crate::datasets::fixtures::RolloutFixture;
+        use crate::datasets::{DatasetImport, DatasetWrite, DecodedEpisode, McapFile};
+        let journal = crate::datasets::TestJournal::start().await;
+        let (spiral, _) = crate::db::UnquotedMemory::store_with_catalog(journal.endpoint()).await;
+        let old = DatasetSelection::new("old").unwrap();
+        let take = RolloutFixture::mcap("take", false);
+        DatasetImport::new(&spiral, &old, DatasetFormat::Mcap)
+            .commit(vec![
+                DecodedEpisode::of_mcap(McapFile::held("take.mcap", &take).unwrap(), &take)
+                    .unwrap(),
+            ])
+            .await
+            .unwrap();
+        let svla = DatasetSelection::new("svla").unwrap();
+        let mut connection = spiral.connect_exclusive().await.unwrap();
+        DatasetWrite::create(&mut connection, &svla, DatasetFormat::LeRobot)
+            .await
+            .unwrap()
+            .finish(&mut connection)
+            .await
+            .unwrap();
+        drop(connection);
+        journal.name(&[
+            old.episodes(),
+            old.topics(),
+            old.answers(),
+            old.files(),
+            svla.episodes(),
+            svla.topics(),
+            svla.answers(),
+        ]);
+        Self {
+            _journal: journal,
+            spiral: Arc::new(spiral),
+            studio: crate::StudioStore::in_memory(),
+        }
+    }
+
+    fn storage(&self) -> crate::StorageManager {
+        crate::StorageManager::new(
+            self.spiral.clone(),
+            self.studio.project(&self.spiral.connection_settings()),
+        )
+    }
+
+    /// A bundle of this project's Studio records whose `files` rows hold
+    /// one take in `demo`, and whose manifest names `datasets`.
+    async fn bundle(&self, datasets: &[&str]) -> Vec<u8> {
+        use crate::datasets::fixtures::RolloutFixture;
+        let studio = self.studio.project(&self.spiral.connection_settings());
+        let snapshot = StudioSnapshot::capture(&studio).await.unwrap();
+        let take = RolloutFixture::mcap("take", true);
+        let sources = RecordBatch::try_new(
+            Arc::new(Table::DatasetSources.schema()),
+            vec![
+                Arc::new(StringArray::from(vec!["demo"])),
+                Arc::new(StringArray::from(vec!["take.mcap"])),
+                Arc::new(BinaryArray::from(vec![take.as_slice()])),
+            ],
+        )
+        .unwrap();
+        Fixture::bundle(
+            &Manifest::current(datasets.iter().map(|name| (*name).to_owned()).collect()),
+            &snapshot.bytes().unwrap(),
+            [arrow_payload(&sources)],
+        )
+    }
+
+    /// How many rows `table` holds, or why it cannot be read.
+    async fn rows(&self, table: DatasetTable) -> Result<usize, String> {
+        let batches = self
+            .spiral
+            .connect()
+            .await?
+            .read_batches(&format!("SELECT * FROM {table}"))
+            .await?;
+        Ok(batches.iter().map(RecordBatch::num_rows).sum())
+    }
+}
+
+#[tokio::test]
+async fn an_import_replaces_the_mcap_datasets_and_leaves_lerobot_ones() {
+    let project = HeldDatasets::new().await;
+    let bytes = project.bundle(&["demo", "empty"]).await;
+    let summary = project
+        .storage()
+        .transfer()
+        .import_project(&bytes)
+        .await
+        .unwrap();
+    assert_eq!((summary.relations(), summary.rows()), (1, 1));
+    let demo = DatasetSelection::new("demo").unwrap();
+    let empty = DatasetSelection::new("empty").unwrap();
+    let svla = DatasetSelection::new("svla").unwrap();
+    for (table, expected) in [
+        (demo.episodes(), 1),
+        (demo.files(), 1),
+        (demo.answers(), 1),
+        (empty.episodes(), 0),
+        (empty.topics(), 0),
+        (empty.files(), 0),
+        (empty.answers(), 0),
+        (svla.episodes(), 0),
+        (svla.answers(), 0),
+    ] {
+        assert_eq!(
+            project.rows(table.clone()).await,
+            Ok(expected),
+            "{}",
+            table.target()
+        );
+    }
+    let old = DatasetSelection::new("old").unwrap();
+    assert!(
+        project.rows(old.episodes()).await.is_err(),
+        "the project's MCAP datasets are dropped"
+    );
+    assert!(project.rows(old.files()).await.is_err());
+}
+
+#[tokio::test]
+async fn an_import_refuses_a_bundle_naming_a_lerobot_dataset() {
+    let project = HeldDatasets::new().await;
+    let bytes = project.bundle(&["demo", "svla"]).await;
+    let error = project
+        .storage()
+        .transfer()
+        .import_project(&bytes)
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("datasets.svla is no MCAP dataset"),
+        "{error}"
+    );
+    let old = DatasetSelection::new("old").unwrap();
+    assert_eq!(project.rows(old.episodes()).await, Ok(1), "nothing changed");
 }

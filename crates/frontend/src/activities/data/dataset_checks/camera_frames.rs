@@ -334,6 +334,7 @@ impl Percent {
 mod tests {
     use super::*;
 
+    use crate::activities::data::dataset_checks::stream_reads::TwoArmDataset;
     use spiral_robotics_common::curation::AnswerSource;
     use spiral_robotics_common::datasets::DatasetSelection;
 
@@ -377,12 +378,12 @@ mod tests {
 
     #[test]
     fn each_camera_is_a_part_and_reads_as_its_judgment_answers() {
-        let dataset = DatasetSelection::new(vec!["dataset_folding".into()]).unwrap();
-        let video = || vec!["foxglove.CompressedVideo".to_owned()];
+        let dataset = DatasetSelection::new("folding").unwrap();
         let topics = [
-            DatasetTopic::new("/top-camera".into(), video()).with_coverage(3, Some(900)),
-            DatasetTopic::new("/wrist-camera".into(), video()).with_coverage(3, Some(900)),
-            DatasetTopic::new("/joints".into(), vec![]).with_coverage(3, Some(900)),
+            TwoArmDataset::stream("/top-camera", "foxglove.CompressedVideo").with_coverage(3, 900),
+            TwoArmDataset::stream("/wrist-camera", "foxglove.CompressedVideo")
+                .with_coverage(3, 900),
+            TwoArmDataset::stream("/joints", "JointState").with_coverage(3, 900),
         ];
         let streams = CheckedStreams::new(&dataset, &topics);
         let column = CameraFrames::column(streams).unwrap().unwrap();
@@ -396,7 +397,7 @@ mod tests {
         assert!(!statement.contains("/joints"));
         // Late frames are judged against each episode's own interval.
         assert!(statement.contains("approx_quantile(gap, 0.5) OVER (PARTITION BY id)"));
-        let no_camera = [DatasetTopic::new("/joints".into(), vec![])];
+        let no_camera = [TwoArmDataset::stream("/joints", "JointState")];
         assert!(
             CameraFrames::column(CheckedStreams::new(&dataset, &no_camera))
                 .unwrap()

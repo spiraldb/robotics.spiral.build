@@ -512,8 +512,7 @@ impl MessagePage {
         };
         Ok(MessageCursor::new(
             position("log_time")?,
-            position("chunk_start_offset")?,
-            u32::try_from(position("sample_ordinal")?).map_err(|e| e.to_string())?,
+            position("ordinal")?,
         ))
     }
 }
@@ -614,17 +613,10 @@ mod tests {
                 "log_time",
                 Arc::new(UInt64Array::from(vec![u64::MAX; 3])) as ArrayRef,
             ),
-            (
-                "sample_ordinal",
-                Arc::new(arrow_array::UInt32Array::from(vec![4, 5, 6])),
-            ),
+            ("ordinal", Arc::new(UInt64Array::from(vec![4, 5, 6]))),
             (
                 "field_0",
                 Arc::new(UInt64Array::from(vec![Some(u64::MAX), None, Some(1)])),
-            ),
-            (
-                "chunk_start_offset",
-                Arc::new(UInt64Array::from(vec![100, 100, 200])),
             ),
         ])
         .unwrap();
@@ -632,7 +624,6 @@ mod tests {
         let page = MessagePage::keep(batch.schema(), split, 2).unwrap();
         let cursor = page.next.unwrap();
         assert_eq!(cursor.time(), u64::MAX);
-        assert_eq!(cursor.chunk(), 100);
         assert_eq!(cursor.ordinal(), 5);
         assert_eq!(
             page.batches

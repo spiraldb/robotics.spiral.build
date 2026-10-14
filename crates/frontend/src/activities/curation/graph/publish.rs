@@ -17,6 +17,7 @@ use super::node_card::NodeCard;
 use crate::activities::curation::client::FillRuns;
 use crate::activities::curation::document::{NodePublication, PublishedOutput};
 use crate::activities::curation::path::{CurationPath, PathError};
+use crate::activities::curation::population::PopulationReader;
 use crate::activities::curation::state::CurationController;
 use crate::client::project::ProjectClient;
 use crate::client::queries::{QueryDomain, QueryRefresh};
@@ -46,10 +47,17 @@ struct CompiledOutput {
 }
 
 impl CompiledOutput {
-    fn of(path: &CurationPath<'_>) -> Result<Self, PathError> {
+    /// What `path` publishes as, its answers computed from the streams
+    /// `reader`'s sample says the dataset records.
+    fn of(
+        path: &CurationPath<'_>,
+        reader: Option<&PopulationReader<'_>>,
+    ) -> Result<Self, PathError> {
+        let reader = reader
+            .ok_or_else(|| PathError::new("The curation's episodes are still being read."))?;
         Ok(Self {
             statement: path.statement()?,
-            fills: path.fills()?,
+            fills: path.fills(reader.sample().streams())?,
         })
     }
 }
@@ -104,7 +112,7 @@ impl PublishableOutput {
                         label: card.label(),
                         summary: card.summary().to_owned(),
                         compiled: CurationPath::to(payload, output.id())
-                            .and_then(|path| CompiledOutput::of(&path))
+                            .and_then(|path| CompiledOutput::of(&path, reader))
                             .map_err(|error| error.message().to_owned()),
                         published: payload.node_publication(output.id()),
                     })
@@ -580,7 +588,7 @@ mod tests {
                 fills: vec![scores.clone(), subtasks.clone()],
             },
         ];
-        let dataset = DatasetSelection::new(vec!["dataset_folding".into()]).unwrap();
+        let dataset = DatasetSelection::new("folding").unwrap();
         let run = ChosenView::run(dataset, &views);
         assert_eq!(run.columns(), [scores, subtasks]);
         assert_eq!(

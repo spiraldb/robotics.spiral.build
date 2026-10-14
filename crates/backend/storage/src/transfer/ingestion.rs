@@ -1,25 +1,24 @@
-//! Hugging Face discovery and Spiral dataset materialization.
-//!
-//! Studio owns only repository inspection and catalog admission. Remote byte
-//! reads and MCAP parsing remain inside Spiral, so imported data has the same
-//! durable relation semantics as every other dataset.
+//! Hugging Face repositories: discovery, which resolves a repository's
+//! revision to a commit and lists its files without changing Spiral, and
+//! import, which downloads and decodes every episode at that commit and
+//! writes them into a new dataset 32 at a time
+//! ([datasets](../../../../../docs/datasets.md#writing)).
+mod downloads;
+mod lerobot;
 
-use std::sync::Arc;
-
-use arrow_array::{ArrayRef, RecordBatch, StringArray};
+use downloads::HuggingFaceDownloads;
+use lerobot::LeRobotRepository;
 use reqwest::StatusCode;
 use reqwest::header::LINK;
 use serde::Deserialize;
 use spiral_robotics_common::datasets::{
-    HuggingFaceDatasetFile, HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection,
-    HuggingFaceDatasetSource, HuggingFaceInspectionContents, HuggingFaceInspectionSource,
-    LeRobotImportPhase,
+    DatasetFormat, DatasetImportPhase, DatasetSelection, HuggingFaceDatasetFile,
+    HuggingFaceDatasetInspection, HuggingFaceDatasetSource, HuggingFaceInspectionContents,
+    HuggingFaceInspectionSource,
 };
 use url::Url;
 
-use crate::datasets::{
-    LeRobotDatasetDefinition, McapDatasetDefinition, McapSourceBlob, StudioDataset,
-};
+use crate::datasets::{DatasetImport, DatasetWrite, DecodedEpisode, McapFile};
 use crate::manager::StorageManager;
 
 const HUGGING_FACE_ORIGIN: &str = "https://huggingface.co";
@@ -91,6 +90,17 @@ impl TryFrom<&str> for HuggingFaceRepository {
 impl HuggingFaceRepository {
     fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// The client every request to Hugging Face is sent with.
+    fn client() -> Result<reqwest::Client, String> {
+        reqwest::Client::builder()
+            .user_agent(concat!(
+                "spiral-robotics-studio/",
+                env!("CARGO_PKG_VERSION")
+            ))
+            .build()
+            .map_err(|error| format!("creating the Hugging Face client: {error}"))
     }
 
     fn api_url(&self, operation: &str, revision: &str) -> Result<Url, String> {
@@ -179,11 +189,8 @@ impl HuggingFaceRepository {
         Ok(Some(url))
     }
 
-    /// The repository's root at `revision`, as a Location names it.
-    fn root_uri(&self, revision: &str) -> Result<String, String> {
-        self.file_uri(revision, "")
-    }
-
+    /// `path` at `revision`, as a Spiral Blob points at it; the repository's
+    /// root for an empty `path`.
     fn file_uri(&self, revision: &str, path: &str) -> Result<String, String> {
         let mut url = Url::parse("hf://datasets/")
             .map_err(|error| format!("building a Spiral Hugging Face URI: {error}"))?;
@@ -264,54 +271,152 @@ impl HuggingFaceDatasetDiscovery for HuggingFaceDatasetInspection {
     }
 }
 
-impl StorageManager {
-    /// Atomically materialize one already pinned inspection into the active
-    /// Spiral project.
-    pub async fn import_huggingface_dataset(
-        &self,
-        inspection: HuggingFaceDatasetInspection,
-    ) -> Result<HuggingFaceDatasetImportSummary, String> {
-        let relations = McapDatasetDefinition::new(inspection.dataset_id());
-        relations
-            .relations()
-            .refuse_existing(&self.project_resources().await?)?;
-        let files = vec![HuggingFaceSourceBatch::build(&inspection)?];
-        let mut connection = self.project_store().connect_exclusive().await?;
-        connection
-            .transaction("Hugging Face import", async |connection| {
-                relations.publish(connection, files).await
-            })
-            .await?;
-        Ok(HuggingFaceDatasetImportSummary::new(
-            inspection.files().len() as u64,
-            relations.relations().planned(),
-        )
-        .with_warnings(inspection.warnings().to_vec()))
+/// One pinned Hugging Face repository imported as a new dataset of one
+/// format: downloaded and decoded 32 episodes at a time, each batch written
+/// in its own transaction. A failed batch commits nothing; the batches
+/// before it stay.
+pub struct HuggingFaceImport {
+    format: DatasetFormat,
+    inspection: HuggingFaceDatasetInspection,
+    dataset: DatasetSelection,
+    downloads: HuggingFaceDownloads,
+}
+
+impl HuggingFaceImport {
+    /// The repository `inspection` pinned, as a new dataset of `format`,
+    /// read without a token.
+    pub fn new(
+        format: DatasetFormat,
+        inspection: &HuggingFaceDatasetInspection,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            format,
+            inspection: inspection.clone(),
+            dataset: DatasetSelection::new(inspection.dataset_id())?,
+            downloads: HuggingFaceDownloads::new(
+                HuggingFaceRepository::try_from(inspection.repository())?,
+                inspection.resolved_revision(),
+            )?,
+        })
     }
 
-    /// Import the LeRobot dataset one pinned inspection found, in one
-    /// transaction: a Location over the repository at its commit, the Dataset
-    /// made from it, and its answers table, saying each phase as it starts.
-    /// Spiral reads every episode and encodes its cameras again in this
-    /// process, which takes as long as the dataset is big; the connection is
-    /// shared, so the project stays readable meanwhile.
-    pub async fn import_lerobot_dataset(
-        &self,
-        inspection: &HuggingFaceDatasetInspection,
-        phase: &(dyn Fn(LeRobotImportPhase) + Send + Sync),
+    /// The same import, every download sending `token`, the deployment's
+    /// Hugging Face token, when there is one.
+    pub fn with_token(mut self, token: Option<&str>) -> Self {
+        self.downloads = self.downloads.with_token(token);
+        self
+    }
+
+    /// Import, saying how far it has got: listing the repository, then the
+    /// episodes committed after each batch.
+    pub async fn run(
+        self,
+        storage: &StorageManager,
+        progress: &(dyn Fn(DatasetImportPhase) + Send + Sync),
     ) -> Result<(), String> {
-        let root = HuggingFaceRepository::try_from(inspection.repository())?
-            .root_uri(inspection.resolved_revision())?;
-        let definition = LeRobotDatasetDefinition::new(inspection.dataset_id(), root);
-        definition
-            .relations()
-            .refuse_existing(&self.project_resources().await?)?;
-        let mut connection = self.project_store().connect().await?;
-        connection
-            .transaction("LeRobot import", async |connection| {
-                definition.import(connection, phase).await
-            })
-            .await
+        progress(DatasetImportPhase::ListingFiles);
+        let store = storage.project_store();
+        if store
+            .dataset_catalog()
+            .datasets()
+            .await?
+            .holds(&self.dataset)
+        {
+            return Err(format!(
+                "{} already exists; choose another dataset name or delete it first",
+                self.dataset.label()
+            ));
+        }
+        let mut import = DatasetImport::new(store, &self.dataset, self.format);
+        let mut source = match self.format {
+            DatasetFormat::Mcap => RepositoryEpisodes::Mcap(self.inspection.files()),
+            DatasetFormat::LeRobot => RepositoryEpisodes::LeRobot(Box::new(
+                LeRobotRepository::open(&self.downloads, self.inspection.files()).await?,
+            )),
+        };
+        let total = source.len();
+        let mut written = 0;
+        progress(DatasetImportPhase::ImportingEpisodes {
+            written: 0,
+            total: total as u64,
+        });
+        // Each batch is read while the one before it commits: reading is
+        // downloads and FFmpeg, committing is Spiral's, and neither waits on
+        // the other's resources.
+        let mut read = source
+            .batch(&self.downloads, Self::batch_after(0, total))
+            .await?;
+        while !read.is_empty() {
+            let committing = read.len();
+            let next = Self::batch_after(written + committing, total);
+            let (committed, following) = tokio::join!(
+                import.commit(std::mem::take(&mut read)),
+                source.batch(&self.downloads, next)
+            );
+            committed?;
+            written += committing;
+            progress(DatasetImportPhase::ImportingEpisodes {
+                written: written as u64,
+                total: total as u64,
+            });
+            read = following?;
+        }
+        Ok(())
+    }
+
+    /// The positions of the batch that starts at `start`, of `total`.
+    fn batch_after(start: usize, total: usize) -> std::ops::Range<usize> {
+        start.min(total)..total.min(start + DatasetWrite::MAX_EPISODES)
+    }
+}
+
+/// A repository's episodes, read one at a time in order.
+enum RepositoryEpisodes<'a> {
+    /// Each `.mcap` file one episode.
+    Mcap(&'a [HuggingFaceDatasetFile]),
+    LeRobot(Box<LeRobotRepository<'a>>),
+}
+
+impl RepositoryEpisodes<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Mcap(files) => files.len(),
+            Self::LeRobot(repository) => repository.len(),
+        }
+    }
+
+    /// The episodes at `positions`, read from `downloads` one after another.
+    async fn batch(
+        &mut self,
+        downloads: &HuggingFaceDownloads,
+        positions: std::ops::Range<usize>,
+    ) -> Result<Vec<DecodedEpisode>, String> {
+        let mut episodes = Vec::with_capacity(positions.len());
+        for position in positions {
+            episodes.push(self.episode(downloads, position).await?);
+        }
+        Ok(episodes)
+    }
+
+    /// The episode at `position`, read from `downloads`.
+    async fn episode(
+        &mut self,
+        downloads: &HuggingFaceDownloads,
+        position: usize,
+    ) -> Result<DecodedEpisode, String> {
+        match self {
+            Self::Mcap(files) => {
+                let path = files[position].path().to_owned();
+                let bytes = downloads.bytes(&path).await?;
+                let uri = downloads.pinned_uri(&path)?;
+                tokio::task::spawn_blocking(move || {
+                    DecodedEpisode::of_mcap(McapFile::pinned(&path, uri, &bytes)?, &bytes)
+                })
+                .await
+                .map_err(|error| format!("decoding an MCAP file failed: {error}"))?
+            }
+            Self::LeRobot(repository) => repository.episode(position).await,
+        }
     }
 }
 
@@ -321,11 +426,7 @@ trait HuggingFaceDatasetSourceValidation {
 
 impl HuggingFaceDatasetSourceValidation for HuggingFaceDatasetSource {
     fn validate_for_discovery(&self) -> Result<(), String> {
-        if !crate::db::StorageSchema::is_dataset_id(self.dataset_id())
-            || self.dataset_id().contains('.')
-        {
-            return Err("dataset name must contain 1–96 letters, numbers, '_' or '-'".to_owned());
-        }
+        DatasetSelection::new(self.dataset_id())?;
         let revision = self.revision().trim();
         if revision.is_empty()
             || revision.len() > 200
@@ -365,15 +466,9 @@ impl HuggingFaceFileSelection {
         request: HuggingFaceDatasetSource,
     ) -> Result<HuggingFaceDatasetInspection, String> {
         request.validate_for_discovery()?;
-        let dataset_id = request.dataset_id().to_owned();
+        let dataset = DatasetSelection::new(request.dataset_id())?;
         let repository = HuggingFaceRepository::try_from(request.repository())?;
-        let client = reqwest::Client::builder()
-            .user_agent(concat!(
-                "spiral-robotics-studio/",
-                env!("CARGO_PKG_VERSION")
-            ))
-            .build()
-            .map_err(|error| format!("creating the Hugging Face client: {error}"))?;
+        let client = HuggingFaceRepository::client()?;
         let info_url = repository.api_url("revision", request.revision())?;
         let response = client
             .get(info_url)
@@ -403,7 +498,6 @@ impl HuggingFaceFileSelection {
                 .checked_add(file.bytes())
                 .ok_or_else(|| "Hugging Face file sizes overflow u64".to_owned())
         })?;
-        let relations = StudioDataset::new(&dataset_id);
         let mut warnings = Vec::new();
         if selected.iter().any(|file| file.bytes() == 0) {
             warnings.push(
@@ -411,11 +505,21 @@ impl HuggingFaceFileSelection {
                 .to_owned(),
         );
         }
-        let source = HuggingFaceInspectionSource::new(dataset_id, repository.0)
+        let source = HuggingFaceInspectionSource::new(dataset.id(), repository.0)
             .with_resolved_revision(info.sha);
         let contents =
-            HuggingFaceInspectionContents::new(selected, total_bytes, relations.planned());
+            HuggingFaceInspectionContents::new(selected, total_bytes, self.planned(&dataset));
         Ok(HuggingFaceDatasetInspection::new(source, contents).with_warnings(warnings))
+    }
+
+    /// The tables importing into `dataset` creates, beside one per stream.
+    fn planned(self, dataset: &DatasetSelection) -> Vec<String> {
+        let mut tables = vec![dataset.episodes(), dataset.topics()];
+        if let Self::McapRecordings = self {
+            tables.push(dataset.files());
+        }
+        tables.push(dataset.answers());
+        tables.iter().map(|table| table.target()).collect()
     }
 
     fn select(self, entries: Vec<TreeEntry>) -> Result<Vec<HuggingFaceDatasetFile>, String> {
@@ -440,38 +544,9 @@ impl HuggingFaceFileSelection {
     }
 }
 
-struct HuggingFaceSourceBatch;
-
-impl HuggingFaceSourceBatch {
-    fn build(inspection: &HuggingFaceDatasetInspection) -> Result<RecordBatch, String> {
-        let files = inspection.files().iter().collect::<Vec<_>>();
-        let uris = files
-            .iter()
-            .map(|file| {
-                HuggingFaceRepository::try_from(inspection.repository())?
-                    .file_uri(inspection.resolved_revision(), file.path())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        RecordBatch::try_new(
-            McapDatasetDefinition::files_schema(),
-            vec![
-                Arc::new(StringArray::from_iter_values(
-                    files.iter().map(|file| file.path()),
-                )) as ArrayRef,
-                McapSourceBlob::external_array(
-                    &uris,
-                    &files.iter().map(|file| file.bytes()).collect::<Vec<_>>(),
-                )?,
-            ],
-        )
-        .map_err(|error| format!("building Hugging Face source batch: {error}"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::{StringViewArray, StructArray};
     fn entry(path: &str) -> TreeEntry {
         TreeEntry {
             kind: "file".into(),
@@ -522,61 +597,44 @@ mod tests {
         );
     }
     #[test]
-    fn a_location_names_the_repository_root_at_its_commit() {
+    fn files_are_pinned_to_the_commit_their_import_resolved() {
         let repository = HuggingFaceRepository::try_from("lerobot/svla_so101_pickplace").unwrap();
+        let commit = "f641879e22172be7e8161d5e6c1503c2d2feb657";
         assert_eq!(
-            repository
-                .root_uri("f641879e22172be7e8161d5e6c1503c2d2feb657")
-                .unwrap(),
+            repository.file_uri(commit, "").unwrap(),
             "hf://datasets/lerobot/svla_so101_pickplace@f641879e22172be7e8161d5e6c1503c2d2feb657/"
         );
+        assert_eq!(
+            repository
+                .file_uri(commit, "episodes/take one.mcap")
+                .unwrap(),
+            "hf://datasets/lerobot/svla_so101_pickplace@f641879e22172be7e8161d5e6c1503c2d2feb657/episodes/take%20one.mcap"
+        );
     }
     #[test]
-    fn import_uses_native_producer_and_quoted_names() {
-        let target = McapDatasetDefinition::new("pick-place");
+    fn an_import_plans_the_tables_under_its_namespace() {
+        let dataset = DatasetSelection::new("pick-place").unwrap();
         assert_eq!(
-            target.create_sql(),
-            "CREATE DATASET \"dataset_pick-place\" USING spql.mcap.dataset FROM \"dataset_files_pick-place\" WITH (key = 'recording', blob = 'source', on_error = 'fail', materialization = 'all')"
-        );
-        assert_eq!(
-            target.relations().planned(),
+            HuggingFaceFileSelection::McapRecordings.planned(&dataset),
             [
-                "dataset_pick-place",
-                "dataset_files_pick-place",
-                "dataset_answers_pick-place"
+                "datasets.pick-place.episodes",
+                "datasets.pick-place.topics",
+                "datasets.pick-place.files",
+                "datasets.pick-place.answers"
             ]
         );
-    }
-    #[test]
-    fn source_rows_keep_each_file_and_its_pinned_blob_uri() {
-        let source = HuggingFaceInspectionSource::new("pick-place", "org/recordings")
-            .with_resolved_revision("abcdef");
-        let contents = HuggingFaceInspectionContents::new(
-            vec![HuggingFaceDatasetFile::new("episode.mcap", 12)],
-            12,
-            StudioDataset::new("pick-place").planned(),
-        );
-        let inspection = HuggingFaceDatasetInspection::new(source, contents);
-        let batch = HuggingFaceSourceBatch::build(&inspection).unwrap();
-        assert_eq!(batch.schema(), McapDatasetDefinition::files_schema());
-        let recordings = batch.column_by_name("recording").unwrap();
         assert_eq!(
-            recordings
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap()
-                .value(0),
-            "episode.mcap"
+            HuggingFaceFileSelection::LeRobot.planned(&dataset),
+            [
+                "datasets.pick-place.episodes",
+                "datasets.pick-place.topics",
+                "datasets.pick-place.answers"
+            ]
         );
-        let blobs = batch.column_by_name("source").unwrap();
-        let blobs = blobs.as_any().downcast_ref::<StructArray>().unwrap();
-        let uris = blobs.column_by_name("uri").unwrap();
-        assert_eq!(
-            uris.as_any()
-                .downcast_ref::<StringViewArray>()
-                .unwrap()
-                .value(0),
-            "hf://datasets/org/recordings@abcdef/episode.mcap"
+        assert!(
+            HuggingFaceDatasetSource::new("pick.place", "org/data")
+                .validate_for_discovery()
+                .is_err()
         );
     }
     #[test]

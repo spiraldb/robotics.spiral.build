@@ -1,108 +1,160 @@
 # Datasets and recordings
 
-A dataset is a native Spiral Dataset. Studio makes two kinds, by the Spiral
-producer that turns their source files into episodes:
+A dataset is a set of ordinary Spiral tables under one namespace,
+`datasets.<id>`, that Studio writes itself. Studio decodes every source file
+when it imports it and stores each topic as rows, so reads never reopen a
+source file and never call a Spiral producer. Spiral's own Dataset resource
+kind, its producers (`spql.mcap.dataset`, `spql.lerobot.dataset`) and its
+reader functions (`spql.mcap.episodes`, `spql.mcap.read_topic`,
+`spql.mcap.read_video`, `spql.mcap.channels`) are not used.
 
-- **MCAP recordings** (`spql.mcap.dataset`): each `.mcap` file is one episode.
-  Rollout recording and the Hugging Face MCAP import both produce these files;
-  readers never ask which one produced an episode.
-- **LeRobot datasets** (`spql.lerobot.dataset`): a LeRobot v3 repository on
-  Hugging Face, each of its episodes one member and each feature one topic.
+A dataset has one of two formats, fixed when it is created:
+
+- **MCAP** (`mcap`): each `.mcap` file is one episode. Rollout recording and the
+  Hugging Face MCAP import both produce these files; readers never ask which
+  one produced an episode.
+- **LeRobot** (`lerobot`): a LeRobot v3 repository on Hugging Face, each of its
+  episodes one episode and each feature one topic.
 
 ```text
 Rollout capture on the robot connector → Studio → browser stores the episode ─┐
-                                                                    ├→ dataset_files_<name> (Table) ──→ dataset_<name> → Data, Curation, Training
-Hugging Face → pinned Blob URIs of .mcap files ─────────────────────┘
-Hugging Face LeRobot v3 repository @ commit → dataset_files_<name> (Location) → dataset_<name>
+Hugging Face → .mcap files at a pinned commit ──────────────────────────────────┼→ MCAP import → datasets.<id>.* → Data, Curation, Training
+Hugging Face LeRobot v3 repository @ commit → LeRobot import (FFmpeg) ─────────┘
 ```
-
-Readers decide what an episode lists by the dataset's producer, which the
-dataset's definition records and `POST /api/datasets/inspect` reports
-(`producer`), never by guessing per row.
 
 ## Catalog layout
 
-The selected Spiral project holds Studio's resources at its root:
+`<id>` is the dataset's name: 1–96 letters, numbers, `_` or `-`. Every
+relation is a plain table; `datasets` and `datasets.<id>` are namespace
+prefixes only.
 
-| Resource | Kind | Purpose |
+| Table | One row per | Holds |
 | --- | --- | --- |
-| `dataset_files_<name>` | Table, or Location | The files the Dataset is made from. MCAP: a table of `recording` (an opaque source key within its dataset, not an episode identity) and the `source` Blob. LeRobot: a Location over `hf://datasets/<org>/<repo>@<commit>/`, whose rows are the repository's files (`path`, `file` Blob), listed by Spiral and never copied |
-| `dataset_<name>` | Native Dataset | Made from its files through `spql.mcap.dataset` (`recording` the member key) or `spql.lerobot.dataset` (`path` the key, `file` the Blob), with `materialization = 'all'` |
-| `dataset_answers_<name>` | Table | One row per episode, keyed by `episode_id`, and one column per exact model call a curation made, each value `STRUCT(value …)`: NULL not asked yet, a NULL `value` asked and failed. Created from the Dataset's first refresh, given a row by every append, dropped with the Dataset |
+| `datasets.<id>.episodes` | episode | the episode's identity and facts (below) |
+| `datasets.<id>.topics` | stream | one recorded stream: a topic and the schema its messages use (below) |
+| `datasets.<id>.messages.<stream>` | message | the messages of one stream (below) |
+| `datasets.<id>.files` | MCAP episode | the episode's source MCAP file: `recording` (its key) and `source`, an `spql.io.Blob` holding its bytes inline, or pointing at its pinned Hugging Face URI. LeRobot datasets have none |
+| `datasets.<id>.answers` | episode | model answers about the episode, keyed by `episode_id` ([curation](curation.md#answers)) |
 
-A Dataset refresh reads every file and copies every topic into Spiral, so
-reads never reopen a source file. Adding an MCAP file rebuilds every copied
-topic, and Spiral keeps the earlier copies. A LeRobot refresh also decodes
-each camera's video and encodes it again as H.264 packets, in groups of one
-second, which `spql.mcap.read_video` reads like recorded MCAP cameras. The
-definition's `sourceRelation` records the association; ownership is never
-inferred from names. The files table declares no primary key. Studio's
-datasets made before October 2026 read their files through
-`dataset_source_<name>` views, which Spiral retired; their dead entries still
-hold those names. Curation's published views are not Spiral resources: Studio
-keeps them ([curation](curation.md#publishing)).
+A dataset exists when its `episodes` table does, and is an MCAP dataset when
+it also has `files`; the catalog alone says both, so listing datasets reads no
+rows. The catalog (`GET /api/data-catalog`) lists each dataset once, named
+`datasets.<id>`, with its format and its identity: its `episodes` table's
+resource and version. The version changes exactly when episodes are added, so
+what Studio keeps about a dataset version (its robot and joint roles) follows
+it.
 
-Publication creates or appends the MCAP files table, creates and refreshes the
-Dataset, and verifies its member count in one transaction. Publishing the same
-recording key with the same bytes (by SHA-256) again is an idempotent retry;
-different bytes at that key are refused. Both Hugging Face imports refuse
-existing target resources; Rollout recording appends to a validated matching
-MCAP Dataset, and its destination field offers only datasets made from their
-own files table, never a LeRobot dataset. Browser uploads carry bytes, never
-filesystem paths for the server to open. The committed Spiral project
-journal supplies resource kinds, identities, and versions; ADBC table
-listings are not the authority for Dataset membership. Studio does not write
-to an arbitrary external dataset. Project bundles carry MCAP datasets only; a
-LeRobot dataset stays in its project and is imported again from Hugging Face.
+### Episodes
 
-## Hugging Face import
+| Column | Type | |
+| --- | --- | --- |
+| `id` | UUID (`arrow.uuid`), not null | the episode's identity, a UUIDv7 Studio assigns when it first imports the episode and never changes |
+| `key` | text, not null | the episode's key in its source, unique in the dataset: an MCAP file's name (`<episode>.mcap`), or a LeRobot episode's `episode_<index>` with six digits |
+| `source_uri` | text | where it was read from: an MCAP file's pinned `hf://datasets/<org>/<repo>@<commit>/<path>`, or a LeRobot repository's root; null for a file Studio holds (`files`) |
+| `source_bytes` | uint64 | the MCAP file's size |
+| `sha256` | text | the MCAP file's SHA-256, which makes storing the same file again an idempotent retry |
+| `episode_index` | int64 | LeRobot's episode index |
+| `tasks` | list of text | LeRobot's task texts |
+| `message_count` | uint64, not null | messages across every stream |
+| `channel_count` | uint32, not null | streams it holds messages of |
+| `streams` | list of `{stream, messages}`, not null | each stream it holds messages of, and how many, so what an episode can show is read from its row alone |
+| `message_start_time` | uint64, not null | its first message's log time, in nanoseconds |
+| `message_end_time` | uint64, not null | its last message's log time |
+| `duration_ns` | uint64, not null | `message_end_time - message_start_time` |
 
-**Data → Import** takes a public Hugging Face repository (`org/repo`), a
-revision, and the dataset name, and what the repository holds: MCAP
-recordings or a LeRobot dataset. Inspect resolves the revision to its commit
-(a branch moves; a commit hash pins the import), lists the files it reads and
-their size, and names the relations it creates; the import reads that
-commit. No token is sent: the repository must be public.
+A LeRobot episode has no wall clock: its frames are timed from its start, so
+`message_start_time` is 0.
 
-- **MCAP recordings** import in one request: the files table of the `.mcap`
-  files' pinned Blob URIs, the Dataset, its refresh, and its answers table,
-  in one transaction.
-- **A LeRobot dataset** imports as a run the backend holds
-  (`POST /api/datasets/lerobot/imports`) and the browser polls every two
-  seconds (`GET /api/datasets/lerobot/imports/{id}`). The run, in one
-  transaction on a shared connection, creates the Location
-  `dataset_files_<name>` over `hf://datasets/<org>/<repo>@<commit>/`, refreshes
-  it, creates the Dataset with `spql.lerobot.dataset` over it, refreshes the
-  Dataset, and creates the answers table, reporting each phase: listing files,
-  creating the dataset, copying episodes (the long one: Spiral reads every
-  episode and encodes its cameras again, in the backend's process, so the
-  driver's FFmpeg must decode AV1 and encode H.264), creating the answers
-  table. Spiral's error ends the run as it said it, and nothing is committed;
-  a restarted backend loses the run and commits nothing either. The run
-  outlives the page; once it has ended, nobody reading it for 30 seconds drops
-  it. Creating and listing a Location needs the `locations:read` and
-  `locations:write` scopes Studio asks for at sign-in; a session signed in
-  before Studio asked for them must sign in again.
+### Topics
+
+| Column | Type | |
+| --- | --- | --- |
+| `stream` | text, not null | the stream's table under `messages`: the topic in lowercase letters, digits and `_`, then `_` and eight hex digits of the SHA-256 of the topic, the schema name and the value's Arrow type |
+| `topic` | text, not null | the topic, as recorded |
+| `schema_name` | text | the native schema name (`foxglove.CompressedVideo`, `studio.recording.JointSample`); null for a LeRobot feature |
+| `message_encoding` | text, not null | `protobuf` or `json` for MCAP; `parquet` for a LeRobot feature, `h264` for a LeRobot camera |
+| `episodes` | uint64, not null | episodes holding at least one of its messages |
+| `messages` | uint64, not null | its messages |
+
+A stream is camera video when its schema is `foxglove.CompressedVideo` or its
+encoding is `h264`. A topic recorded with two schemas, or one schema whose
+Arrow type changed, is two streams, never one coerced into the other.
+
+### Messages
+
+| Column | Type | |
+| --- | --- | --- |
+| `id` | UUID, not null | the episode |
+| `log_time` | uint64, not null | MCAP log time, or the LeRobot frame's time from the episode's start, in nanoseconds |
+| `publish_time` | uint64, not null | MCAP publish time (LeRobot: `log_time`) |
+| `sequence` | uint32, not null | MCAP sequence (LeRobot: the frame index) |
+| `ordinal` | uint64, not null | the message's place in its episode's stream, from 0: file order for MCAP, frame order for LeRobot. Video packets decode in `ordinal` order |
+| `value` | the stream's type, not null | the decoded message |
+| `keyframe` | bool, not null | video streams only: whether the access unit holds an IDR picture, so a read can start at the keyframe before an instant |
+
+A Protobuf message becomes a struct with a field per message field: a
+message-typed field or a field with explicit presence (`optional`, proto2,
+oneof members) is nullable; other scalars are not; a repeated field is a
+non-null list of non-null items; `string` is `Utf8View`, `bytes`
+`BinaryView`, enums their number (`int32`). A JSON message is its raw bytes
+(`BinaryView`). Other message encodings are refused. A LeRobot feature with
+`names` is a struct of one float field per name; one without is
+`{data: fixed_size_list<float>[n]}`; a camera is `{data: BinaryView, format:
+Utf8View}` holding one H.264 access unit, `format` `h264`.
+
+## Writing
+
+Imports write episodes in batches of up to 32, each batch in one Spiral
+transaction: every stream's message rows first, then the episodes' rows and an
+`answers` row per new episode, and last the `topics` table replaced with the
+updated counts, once per transaction, since Spiral refuses to replace a table
+the same transaction already wrote. A reader that finds an episode therefore
+finds all its messages. A
+failed batch commits nothing; the batches before it stay.
+
+- **Recording.** A Rollout episode is one batch of one episode: its file goes
+  to `files`, its messages to their streams. Storing the same key with the
+  same bytes (by SHA-256) again is an idempotent retry; different bytes at
+  that key are refused.
+- **Hugging Face MCAP import** takes a public repository's `.mcap` files at a
+  pinned commit, downloads and decodes them 32 at a time, and records each
+  file's pinned URI in `files` and `source_uri`.
+- **Hugging Face LeRobot import** reads `meta/info.json`, the episodes and
+  tasks tables and the frame tables, and makes every feature a stream and
+  every camera an `h264` stream. Each camera's video file is copied to local
+  disk once, while the episodes being read lie in it: a file holds hundreds
+  of episodes, and seeking into it over HTTPS fetched its index again for
+  each one (2.6 s against 0.04 s locally). FFmpeg (`SPIRAL_ROBOTICS_FFMPEG`,
+  default `ffmpeg` on `PATH`) cuts each episode's frames out of the copy, all
+  of an episode's cameras at once, and encodes them again as H.264 without
+  B-frames, one access unit per frame, a keyframe every 30 frames, the
+  parameter sets repeated at every keyframe, so every episode decodes from its
+  first frame whatever codec (H.264 or AV1) and keyframe spacing the
+  repository used.
+
+Both imports read the next batch while the one before it commits, so
+downloads and FFmpeg overlap Spiral's writes.
+
+Both Hugging Face imports refuse an existing dataset name and run as a held
+run the browser polls (`POST /api/datasets/imports` with the format and the
+source, then `GET /api/datasets/imports/{id}`), reporting the episodes
+written so far. The run outlives the page; once it has ended, nobody reading
+it for 30 seconds drops it. A restarted backend loses the run; the batches it
+committed stay, and a new import under the same name is refused, so delete
+the dataset first. Downloads send the deployment's `HF_TOKEN` when it is set,
+and the repository must be public. Rollout recording appends only to an
+MCAP dataset. Browser uploads carry bytes, never filesystem paths for the
+server to open. Deleting a dataset drops every table under `datasets.<id>`.
 
 ## LeRobot datasets
 
-Spiral lists a LeRobot episode in `spql.mcap.episodes` with its
-`episode_index`, `tasks` (the task text), `message_count`, and its span
-(`message_start_time`, `duration_ns`), its frames' times from the episode's
-start, so it has no wall clock. Its `source` is the frame table it shares with
-other episodes, so Studio lists no file, size or channel count for it, labels
-it `Episode <index>`, orders episodes by index, and a Select offers only the
-facts it records: duration and message count.
-
-Every feature is a topic of every episode, one message per frame, at the
-frame's time: a named vector (`observation.state`, `action`) is a struct with
-one field per name (`shoulder_pan.pos`, …, or `left_joint1`, …), another
-feature a `data` field, and a camera (`observation.images.*`) H.264 packets in
-`data` with their `format`. A topic records no native schema name; Studio
-knows a camera by the message encoding its producer recorded for it (`mp4`).
-Spiral keeps no channel summary of a LeRobot member, so an episode's topics
-are the dataset's topics it holds messages of, counted with
-`spql.mcap.read_topic` in one statement.
+A LeRobot episode is labeled `Episode <index>`, ordered by `episode_index`,
+and has no files, size or channel summary, so a Select offers only the facts
+it records: duration and message count. Every feature is a stream of every
+episode, one message per frame, at the frame's time, except the columns that
+place a frame (`timestamp`, `frame_index`, `episode_index`, `index`,
+`task_index`): they become each message's position and the episode's row.
+Image features and non-numeric features are refused.
 
 ## Recording
 
@@ -118,7 +170,7 @@ header and the stream metadata, last in the file; readers place messages by
 log time), saves it at `recordings/<dataset>/<episode-id>.mcap`, and uploads
 it to Studio part by part. Once Studio holds it whole, the connector keeps it
 only for review, until the next episode opens. Studio keeps the episode until a
-browser publishes it as above with its user's Spiral access: Rollout does so
+browser stores it as above with its user's Spiral access: Rollout does so
 as each episode arrives, and lists an episode whose store failed, to try again. A
 stop with `keep: false` marks the episode discarded; it is stored the same way.
 
@@ -138,7 +190,7 @@ the one open episode and its file: an operation that changes the episode
 (start, pause, stop, or closing an episode the control loop ended) holds it
 throughout, operations never interleave, and a cancelled one leaves the episode
 as it was. These routes live under `/recording/episodes/{id}`, whose IDs name
-session captures, not dataset members. Once the session is replaced or the
+session captures, not dataset episodes. Once the session is replaced or the
 robot connector restarts, the episode is read through Data like any other episode.
 
 Automated tests never move hardware; physical capture still needs a smoke
@@ -146,23 +198,24 @@ test with a real robot and camera.
 
 ## Reading episodes
 
-Readers use dataset identity and version, its producer, member UUID, topic
-and schema revision, timestamps, and values, and learn what a stream holds
-from its schema. They never read the source table, reconstruct filenames, or
-require Studio's own topics or capture types; the metadata Studio writes into
-its files is ordinary optional content. `spql.mcap.episodes('dataset_default')`
-reads a population and `spql.mcap.read_topic('dataset_default',
-'/studio/joints/leader')` reads a topic. [Episode playback](episode-playback.md)
-describes the inspection built on them.
+Readers use the dataset's tables, never a source file: `episodes` for a
+population and, through its `streams`, what an episode can show; `topics`
+for the dataset's streams; and `messages.<stream>` for a stream, filtered to
+the episode by `id`. `DatasetSelection` (in
+`common`) names every table, so no statement spells a table name itself.
+Episode-scoped reads bind the episode UUID as `$1`; no filename, timestamp,
+text-cast, or raw-storage filter substitutes for episode identity. They learn
+what a stream holds from its schema and never require Studio's own topics or
+capture types; the metadata Studio writes into its files is ordinary optional
+content. [Episode playback](episode-playback.md) describes the inspection
+built on them.
 
-Episode-scoped reads bind the member UUID as `$1`. The driver must compare the
-UUIDv7 in member metadata with the generic UUID that Arrow parameter binding
-restores (Spiral PR #7033, `ed42714c9`); no filename, timestamp, text-cast, or
-raw-storage filter substitutes for member identity.
-
-Project bundles carry the original MCAP bytes and Dataset names, including
-empty datasets; import validates ownership and rebuilds the views and
-populations in the same transaction as Studio state. See
+Project bundles carry each MCAP dataset's `files` rows and its name,
+including empty datasets; import drops the project's MCAP datasets and imports
+the bundle's files again in the same transaction as Studio state, so restored
+episodes get new identities. A bundle naming a dataset the project holds as a
+LeRobot dataset is refused before anything changes. A LeRobot dataset stays in its project and is
+imported again from Hugging Face. See
 [project transfer](studio-sqlite.md#project-transfer).
 
 ## Training and rollout

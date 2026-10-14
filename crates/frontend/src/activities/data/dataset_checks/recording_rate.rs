@@ -139,9 +139,7 @@ impl RecordingRate {
     /// Whether `topic` logs more than one message per episode, so it has a
     /// rate to measure.
     pub(super) fn repeats(topic: &DatasetTopic) -> bool {
-        topic
-            .samples()
-            .is_none_or(|samples| samples > topic.members())
+        topic.samples() > topic.members()
     }
 
     pub(super) fn row(&self) -> CheckRow {
@@ -211,6 +209,7 @@ impl StreamRate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::activities::data::dataset_checks::stream_reads::TwoArmDataset;
     use spiral_robotics_common::datasets::DatasetSelection;
 
     fn episode(ordinal: u32) -> EpisodeId {
@@ -240,10 +239,10 @@ mod tests {
 
     #[test]
     fn every_declared_stream_is_listed_as_judged_and_once_per_episode_streams_too() {
-        let dataset = DatasetSelection::new(vec!["dataset_folding".into()]).unwrap();
+        let dataset = DatasetSelection::new("folding").unwrap();
         let topics = [
-            DatasetTopic::new("/joints".into(), vec![]).with_coverage(2, Some(600)),
-            DatasetTopic::new("/instruction".into(), vec![]).with_coverage(2, Some(2)),
+            TwoArmDataset::stream("/joints", "JointState").with_coverage(2, 600),
+            TwoArmDataset::stream("/instruction", "Instruction").with_coverage(2, 2),
         ];
         let streams = CheckedStreams::new(&dataset, &topics);
         let column = RecordingRate::column(streams).unwrap().unwrap();

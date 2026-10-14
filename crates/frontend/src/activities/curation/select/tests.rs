@@ -32,7 +32,7 @@ fn sample() -> EpisodeSample {
 
 fn graph() -> CurationGraph {
     CurationGraph::new(Some(
-        crate::activities::episode::EpisodeListing::mcap_fixture("dataset_bottles"),
+        crate::activities::episode::EpisodeListing::mcap_fixture("bottles"),
     ))
 }
 

@@ -250,15 +250,11 @@ fn StreamRow(
         ),
         StreamKind::Data => (choices.plot_state(&key), format!("Plot {label}")),
     };
-    let count = stream
-        .samples()
-        .map(GroupedCountPresentation::grouped_label)
-        .unwrap_or_else(|| "—".into());
-    let about = format!(
-        "{} · {} · {count} messages",
-        stream.name(),
-        stream.schemas().join(", ")
-    );
+    let count = stream.samples().grouped_label();
+    let about = match stream.schema() {
+        Some(schema) => format!("{} · {schema} · {count} messages", stream.name()),
+        None => format!("{} · {count} messages", stream.name()),
+    };
     let preview = RowPreview::of(kind, state);
     let fields = choices.plotted_fields(&key);
     let mut wanting = reads;

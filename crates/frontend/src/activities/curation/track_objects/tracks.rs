@@ -43,10 +43,9 @@ impl StoredTracks {
         &self,
         episode: &Episode,
     ) -> Result<CameraBoxes, String> {
-        let table = AnswerTable::of(episode.dataset())?;
         let statement = format!(
             "SELECT a.{column}.value AS tracks FROM {} a WHERE a.episode_id = $1",
-            table.quoted(),
+            AnswerTable::of(episode.dataset()).table(),
             column = self.column
         );
         let answer = DatasetClient::current()

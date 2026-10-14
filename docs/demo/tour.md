@@ -85,10 +85,10 @@ Pacing follows the [demo guide](guide.md):
 
 | Line | What's true underneath | Source |
 | --- | --- | --- |
-| "it's all stored in SpiralDB" | `dataset_warp_sim_bottles_sample` is a native Spiral Dataset made from the MCAP files with `spql.mcap.dataset`. Every topic, the camera video included, is copied into Spiral. | [datasets.md](../datasets.md#catalog-layout) |
-| "Opening one is just a query" | Data reads every camera and joint stream with `spql.mcap.read_topic` SQL, bound to the episode. There are no video or joint endpoints. | [episode-playback.md](../episode-playback.md#one-message-transport) |
+| "it's all stored in SpiralDB" | `warp_sim_bottles_sample` is the Spiral tables under `datasets.warp_sim_bottles_sample`, written when its MCAP files were imported. Every topic, the camera video included, is a table of its messages. | [datasets.md](../datasets.md#catalog-layout) |
+| "Opening one is just a query" | Data reads every camera and joint stream with SQL over its `messages` table, bound to the episode. There are no video or joint endpoints. | [episode-playback.md](../episode-playback.md#one-message-transport) |
 | "Every step in this graph becomes SQL that SpiralDB runs" | `CurationPath` compiles each node's step. A preview runs the node's step, and the published view chains every step into one statement. | [curation.md](../curation.md#compiling-a-path) |
-| "The scores are saved back to SpiralDB, so nothing gets scored twice" | Each model call is a column of `dataset_answers_<id>`, a Spiral table. A preview fills its column first, then reads it, and identical calls share a column. | [curation.md](../curation.md#stored-answers) |
+| "The scores are saved back to SpiralDB, so nothing gets scored twice" | Each model call is a column of `datasets.<id>.answers`, a Spiral table. A preview fills its column first, then reads it, and identical calls share a column. | [curation.md](../curation.md#stored-answers) |
 | "the whole graph becomes one SQL view" | A published view is one read-only statement over every episode. Studio stores it, not the Spiral catalog. **The series line "publish this curation to the Spiral catalog" is no longer true; don't reuse it.** | [curation.md](../curation.md#publishing) |
 
 What the narration avoids claiming:

@@ -3,7 +3,7 @@ use super::inspections::{DatasetInspections, Inspecting};
 use crate::client::project::ProjectClient;
 use crate::client::transport::{CommandError, HttpRequest};
 use spiral_robotics_common::datasets::{
-    DatasetInspection, DatasetSelection, DatasetSummary, ProjectResource,
+    DatasetImportRequest, DatasetImportStatus, DatasetInspection, DatasetSelection, DatasetSummary,
 };
 use spiral_robotics_common::relations::{
     EpisodeQueryRequest, EpisodesQueryRequest, QueryRequest, SpiralQuerySnapshot,
@@ -38,18 +38,6 @@ impl DatasetClient {
         self.project
             .request(HttpRequest::new("POST", "/api/datasets/hugging-face/inspect").json(&source))
     }
-    pub(super) fn import_dataset(
-        &self,
-        source: spiral_robotics_common::datasets::HuggingFaceDatasetSource,
-    ) -> impl Future<
-        Output = Result<
-            spiral_robotics_common::datasets::HuggingFaceDatasetImportSummary,
-            CommandError,
-        >,
-    > + use<> {
-        self.project
-            .request(HttpRequest::new("POST", "/api/datasets/hugging-face/import").json(&source))
-    }
 
     /// What importing the LeRobot dataset `source` names would read, at the
     /// commit its revision resolves to now.
@@ -65,27 +53,23 @@ impl DatasetClient {
         self.project
             .request(HttpRequest::new("POST", "/api/datasets/lerobot/inspect").json(source))
     }
-    /// Start importing the LeRobot dataset `source` names; the backend holds
-    /// the run, which answers its status at once.
-    pub(super) fn start_lerobot_import(
+    /// Start the import `request` asks for; the backend holds the run, which
+    /// answers its status at once.
+    pub(super) fn start_import(
         &self,
-        source: &spiral_robotics_common::datasets::HuggingFaceDatasetSource,
-    ) -> impl Future<
-        Output = Result<spiral_robotics_common::datasets::LeRobotImportStatus, CommandError>,
-    > + use<> {
+        request: &DatasetImportRequest,
+    ) -> impl Future<Output = Result<DatasetImportStatus, CommandError>> + use<> {
         self.project
-            .request(HttpRequest::new("POST", "/api/datasets/lerobot/imports").json(source))
+            .request(HttpRequest::new("POST", "/api/datasets/imports").json(request))
     }
     /// Where the import run `id` has got.
-    pub(super) fn lerobot_import(
+    pub(super) fn import_status(
         &self,
         id: &str,
-    ) -> impl Future<
-        Output = Result<spiral_robotics_common::datasets::LeRobotImportStatus, CommandError>,
-    > + use<> {
+    ) -> impl Future<Output = Result<DatasetImportStatus, CommandError>> + use<> {
         self.project.request(HttpRequest::new(
             "GET",
-            format!("/api/datasets/lerobot/imports/{id}"),
+            format!("/api/datasets/imports/{id}"),
         ))
     }
 
@@ -140,9 +124,10 @@ impl DatasetClient {
             .await
     }
 
-    pub(crate) fn project_resources(
+    /// Every dataset of the project, each at the version it is at now.
+    pub(crate) fn datasets(
         &self,
-    ) -> impl Future<Output = Result<Vec<ProjectResource>, CommandError>> + use<> {
+    ) -> impl Future<Output = Result<Vec<DatasetSummary>, CommandError>> + use<> {
         self.project
             .request(HttpRequest::new("GET", "/api/data-catalog"))
     }

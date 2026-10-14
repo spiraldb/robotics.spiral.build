@@ -56,7 +56,7 @@ async fn a_save_may_exceed_the_default_json_bound_but_not_its_own() {
 async fn publishing_is_a_command_that_refuses_a_name_that_is_not_an_identifier() {
     let fixture = ProjectFixture::new().await;
     fixture.workspace("curation_project").await;
-    let dataset = DatasetSelection::new(vec!["dataset_folding".into()]).unwrap();
+    let dataset = DatasetSelection::new("folding").unwrap();
     let publishing = FillRequest::new(dataset, Vec::new())
         .publishing(vec![PublishedView::new("2folds", "SELECT 1")]);
     for (uri, body) in [

@@ -1,7 +1,7 @@
 use super::*;
 use crate::curation::video_service::tests::MockService;
 use spiral_robotics_common::curation::{AnswerColumn, PublishedView};
-use spiral_robotics_common::datasets::DatasetSelection;
+use spiral_robotics_common::datasets::{DatasetSelection, DatasetStreams};
 use spiral_robotics_storage::{ProjectStore, StudioStore};
 use std::collections::HashMap;
 
@@ -25,7 +25,7 @@ fn storage() -> Arc<StorageManager> {
 }
 
 fn dataset(name: &str) -> DatasetSelection {
-    DatasetSelection::new(vec![name.to_owned()]).unwrap()
+    DatasetSelection::new(name).unwrap()
 }
 
 fn column(node: &str, episodes: FillEpisodes, source: AnswerSource) -> ColumnFill {
@@ -57,7 +57,7 @@ async fn a_run_is_admitted_only_with_read_only_statements_and_the_services_it_ne
     let score = column("Score progress", listed(), scoring("/top"));
     assert!(refused(
         &unset,
-        FillRequest::new(dataset("dataset_folding"), vec![score.clone()])
+        FillRequest::new(dataset("folding"), vec![score.clone()])
     ));
     let fills = FillRuns::new(
         storage,
@@ -65,48 +65,44 @@ async fn a_run_is_admitted_only_with_read_only_statements_and_the_services_it_ne
     );
     assert!(
         fills
-            .admit(FillRequest::new(
-                dataset("dataset_folding"),
-                vec![score.clone()]
-            ))
+            .admit(FillRequest::new(dataset("folding"), vec![score]))
             .is_ok()
     );
-    // Only a dataset Studio imported keeps answers.
     assert!(refused(
         &fills,
-        FillRequest::new(dataset("folding"), vec![score])
+        FillRequest::new(dataset("folding"), Vec::new())
     ));
-    assert!(refused(
-        &fills,
-        FillRequest::new(dataset("dataset_folding"), Vec::new())
-    ));
-    // A run that only publishes stores nothing, so any dataset will do.
+    // A run may only publish.
     let selected = FillRequest::new(dataset("folding"), Vec::new())
         .publishing(vec![PublishedView::new("long", "SELECT 1")]);
     assert!(fills.admit(selected).is_ok());
+    let deleting = format!(
+        "DELETE FROM {}",
+        AnswerTable::of(&dataset("folding")).table()
+    );
     let writing = column(
         "Break down subtasks",
-        FillEpisodes::Reaching("DELETE FROM dataset_answers_folding".into()),
+        FillEpisodes::Reaching(deleting.clone()),
         AnswerSource::Statement {
             statement: "SELECT $1 AS episode_id, 1 AS answer".into(),
         },
     );
     assert!(refused(
         &fills,
-        FillRequest::new(dataset("dataset_folding"), vec![writing])
+        FillRequest::new(dataset("folding"), vec![writing])
     ));
     let writing_at_once = column(
         "Health check",
         FillEpisodes::Listed(Vec::new()),
         AnswerSource::DatasetStatement {
-            statement: "DELETE FROM dataset_answers_folding".into(),
+            statement: deleting,
         },
     );
     assert!(refused(
         &fills,
-        FillRequest::new(dataset("dataset_folding"), vec![writing_at_once])
+        FillRequest::new(dataset("folding"), vec![writing_at_once])
     ));
-    let published = FillRequest::new(dataset("dataset_folding"), Vec::new())
+    let published = FillRequest::new(dataset("folding"), Vec::new())
         .publishing(vec![PublishedView::new("folds", "SELECT 1; SELECT 2")]);
     assert!(refused(&fills, published));
 }
@@ -126,7 +122,7 @@ async fn object_tracking_is_admitted_only_with_its_own_service() {
             FillEpisodes::Listed(Vec::new()),
             tracking.clone(),
         );
-        FillRequest::new(dataset("dataset_folding"), vec![track])
+        FillRequest::new(dataset("folding"), vec![track])
     };
     let progress_only = FillRuns::new(
         storage(),
@@ -215,57 +211,54 @@ async fn a_run_fills_each_column_once_and_then_publishes_its_view() {
     let mock = MockService::scoring();
     let base = mock.clone().serve().await;
     let fills = FillRuns::new(storage.clone(), keys(&[("WARP_PROGRESS_URL", &base)]));
-    let dataset = dataset(&format!("dataset_{name}"));
-    let answers = AnswerTable::of(&dataset).unwrap();
-    let episodes = format!("SELECT id AS episode_id FROM spql.mcap.episodes('dataset_{name}')");
-    let scores = column(
-        "Score progress",
-        FillEpisodes::Reaching(episodes),
-        scoring("/camera/top/video"),
-    );
-    let score_column = scores.column().clone();
-    // A later column reads the one before it: each episode's velocities.
-    let velocities = column(
-        "Find similar subtasks",
-        FillEpisodes::Reaching(format!(
-            "SELECT episode_id FROM {} WHERE {score_column} IS NOT NULL",
-            answers.quoted()
-        )),
-        AnswerSource::Statement {
-            statement: format!(
-                "WITH stored AS (SELECT a.episode_id, a.{score_column}.value AS scores FROM {} a WHERE a.episode_id = $1), \
-                 listed AS (SELECT s.episode_id, g._ AS position, spql.list.get(s.scores, g._) AS score \
-                 FROM stored s CROSS JOIN LATERAL spql.range(CAST(spql.list.len(s.scores) AS BIGINT)) g) \
-                 SELECT l.episode_id, l.position, CAST(l.score.velocity AS DOUBLE) AS answer FROM listed l",
-                answers.quoted()
-            ),
-        },
-    );
-    // A dataset statement answers every episode in one read.
-    let frames = column(
-        "Health check",
-        FillEpisodes::Reaching(format!(
-            "SELECT id AS episode_id FROM spql.mcap.episodes('dataset_{name}')"
-        )),
-        AnswerSource::DatasetStatement {
-            statement: format!(
-                "SELECT id AS episode_id, count(*) AS answer \
-                 FROM spql.mcap.read_topic('dataset_{name}', '/camera/top/video') GROUP BY id"
-            ),
-        },
-    );
-    let frames_column = frames.column().clone();
-    let statement = format!(
-        "SELECT a.episode_id, p.frame_index, p.velocity FROM {} a CROSS JOIN LATERAL UNNEST(a.{score_column}.value) p",
-        answers.quoted()
-    );
-    let request = FillRequest::new(dataset.clone(), vec![scores, velocities, frames])
-        .publishing(vec![PublishedView::new(view.clone(), statement)]);
+    let dataset = dataset(&name);
+    let answers = AnswerTable::of(&dataset).table();
+    let episodes = format!("SELECT id AS episode_id FROM {}", dataset.episodes());
     // An assertion that fails still lets the probe be dropped.
     let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
         for episode in ["one", "two", "three"] {
             storage.record_probe_episode(&name, episode).await?;
         }
+        let scores = column(
+            "Score progress",
+            FillEpisodes::Reaching(episodes.clone()),
+            scoring("/camera/top/video"),
+        );
+        let score_column = scores.column().clone();
+        // A later column reads the one before it: each episode's velocities.
+        let velocities = column(
+            "Find similar subtasks",
+            FillEpisodes::Reaching(format!(
+                "SELECT episode_id FROM {answers} WHERE {score_column} IS NOT NULL"
+            )),
+            AnswerSource::Statement {
+                statement: format!(
+                    "WITH stored AS (SELECT a.episode_id, a.{score_column}.value AS scores FROM {answers} a WHERE a.episode_id = $1), \
+                     listed AS (SELECT s.episode_id, g._ AS position, spql.list.get(s.scores, g._) AS score \
+                     FROM stored s CROSS JOIN LATERAL spql.range(CAST(spql.list.len(s.scores) AS BIGINT)) g) \
+                     SELECT l.episode_id, l.position, CAST(l.score.velocity AS DOUBLE) AS answer FROM listed l"
+                ),
+            },
+        );
+        // A dataset statement answers every episode in one read.
+        let inspection = storage.inspect_dataset(dataset.clone()).await?;
+        let camera = DatasetStreams::new(inspection.topics()).camera("/camera/top/video")?;
+        let frames = column(
+            "Health check",
+            FillEpisodes::Reaching(episodes.clone()),
+            AnswerSource::DatasetStatement {
+                statement: format!(
+                    "SELECT id AS episode_id, count(*) AS answer FROM {} GROUP BY id",
+                    dataset.messages(camera.revision())
+                ),
+            },
+        );
+        let frames_column = frames.column().clone();
+        let statement = format!(
+            "SELECT a.episode_id, p.frame_index, p.velocity FROM {answers} a CROSS JOIN LATERAL UNNEST(a.{score_column}.value) p"
+        );
+        let request = FillRequest::new(dataset.clone(), vec![scores, velocities, frames])
+            .publishing(vec![PublishedView::new(view.clone(), statement)]);
         let started = fills.start(fills.admit(request.clone()).map_err(|e| e.to_string())?);
         assert_eq!(started.views(), std::slice::from_ref(&view));
         let status = settled(&fills, started.id()).await;
@@ -279,7 +272,7 @@ async fn a_run_fills_each_column_once_and_then_publishes_its_view() {
             .await?;
         assert_eq!(read.rows()[0]["frames"].as_u64(), Some(24));
         let counted = storage
-            .dataset_answers(answers.clone())
+            .dataset_answers(AnswerTable::of(&dataset))
             .filled(&frames_column)
             .await?;
         assert_eq!(counted.len(), 3, "every episode answered by one read");

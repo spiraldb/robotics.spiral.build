@@ -39,7 +39,7 @@ impl RobotDiscoveryAgent {
         &self,
         import: &HuggingFaceDatasetInspection,
     ) -> Result<(), String> {
-        let selection = DatasetSelection::new(vec![format!("dataset_{}", import.dataset_id())])?;
+        let selection = DatasetSelection::new(import.dataset_id())?;
         let episode = DiscoveryEpisode::open(self.data.clone(), selection).await?;
         let mut request =
             DiscoveryEpisode::documentation_at(import.repository(), import.resolved_revision());

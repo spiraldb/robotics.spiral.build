@@ -217,7 +217,7 @@ impl CheckTable {
         dataset: &DatasetSelection,
         columns: &[CheckColumn],
     ) -> Result<Self, String> {
-        let table = AnswerTable::of(dataset)?.quoted();
+        let table = AnswerTable::of(dataset).table().to_string();
         let text = |error: crate::client::CommandError| error.to_string();
         let stored = client
             .run_spiral_query(format!("SELECT * FROM {table} LIMIT 0"), 1)
@@ -359,10 +359,10 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(
-            column.parts_in("\"dataset_answers_folding\""),
+            column.parts_in("\"datasets\".\"folding\".\"answers\""),
             format!(
                 "(SELECT a.episode_id AS episode_id, p.part AS part, p.messages AS messages, p.first_ns AS first_ns \
-                 FROM \"dataset_answers_folding\" a CROSS JOIN LATERAL UNNEST(a.{}.value) p)",
+                 FROM \"datasets\".\"folding\".\"answers\" a CROSS JOIN LATERAL UNNEST(a.{}.value) p)",
                 column.column
             )
         );

@@ -1,9 +1,10 @@
 # Spiral data schema version
 
 [`version.json`](version.json) is the machine-readable source for the
-relational schema Studio writes to Spiral: the managed MCAP source relation
-and its dataset views. Rust producers and consumers generate their
-schema-version constant from this file. SQLite control-plane
+relational schema Studio writes to Spiral: each dataset's tables under
+`datasets.<id>` ([datasets](../../../../docs/datasets.md#catalog-layout)).
+Rust producers and consumers generate their schema-version constant from
+this file. SQLite control-plane
 migrations ([`../src/studio/migrations`](../src/studio/migrations)) and the
 project bundle format have their own versions.
 

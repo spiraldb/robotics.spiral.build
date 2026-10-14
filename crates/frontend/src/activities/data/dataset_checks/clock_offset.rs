@@ -328,6 +328,7 @@ impl Milliseconds {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::activities::data::dataset_checks::stream_reads::TwoArmDataset;
     use serde_json::json;
     use spiral_robotics_common::curation::AnswerSource;
     use spiral_robotics_common::datasets::DatasetSelection;
@@ -369,15 +370,15 @@ mod tests {
 
     #[test]
     fn each_repeated_stream_pairs_with_the_overview_camera_and_pairings_read_in_declared_order() {
-        let dataset = DatasetSelection::new(vec!["dataset_folding".into()]).unwrap();
-        let video = || vec!["foxglove.CompressedVideo".to_owned()];
+        let dataset = DatasetSelection::new("folding").unwrap();
         let topics = [
-            DatasetTopic::new("/left-wrist-camera".into(), video()).with_coverage(2, Some(7)),
-            DatasetTopic::new("/top-camera".into(), video()).with_coverage(2, Some(7)),
-            DatasetTopic::new("/left-arm-state".into(), vec![]).with_coverage(2, Some(7)),
-            DatasetTopic::new("/left-arm-action".into(), vec![]).with_coverage(2, Some(7)),
-            DatasetTopic::new("/right-arm-state".into(), vec![]).with_coverage(2, Some(7)),
-            DatasetTopic::new("/instruction".into(), vec![]).with_coverage(2, Some(2)),
+            TwoArmDataset::stream("/left-wrist-camera", "foxglove.CompressedVideo")
+                .with_coverage(2, 7),
+            TwoArmDataset::stream("/top-camera", "foxglove.CompressedVideo").with_coverage(2, 7),
+            TwoArmDataset::stream("/left-arm-state", "JointState").with_coverage(2, 7),
+            TwoArmDataset::stream("/left-arm-action", "JointState").with_coverage(2, 7),
+            TwoArmDataset::stream("/right-arm-state", "JointState").with_coverage(2, 7),
+            TwoArmDataset::stream("/instruction", "Instruction").with_coverage(2, 2),
         ];
         let streams = CheckedStreams::new(&dataset, &topics);
         let column = ClockOffset::column(streams).unwrap().unwrap();
@@ -390,8 +391,8 @@ mod tests {
         assert!(statement.contains("'/left-arm-state' AS part"));
         assert!(statement.contains("'/left-arm-action' AS part"));
         assert!(!statement.contains("'/instruction'"));
-        assert!(statement.contains("'/top-camera'"));
-        assert!(!statement.contains("'/left-wrist-camera'"));
+        assert!(statement.contains("\"messages\".\"top_camera_00000000\""));
+        assert!(!statement.contains("left_wrist_camera"));
         assert!(
             ClockOffset::column(CheckedStreams::new(&dataset, &topics[2..]))
                 .unwrap()

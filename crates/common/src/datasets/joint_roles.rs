@@ -177,9 +177,9 @@ impl ArmRoles {
     }
 }
 
-/// A gripper's measured and commanded opening, and the recorded values of a
-/// fully open and a fully closed gripper, so every dataset's gripper reads
-/// on one scale.
+/// A gripper's measured and commanded opening, and, when the dataset
+/// establishes them, the recorded values of a fully open and a fully closed
+/// gripper, so every dataset's gripper reads on one scale.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GripperRoles {
@@ -187,8 +187,11 @@ pub struct GripperRoles {
     state: RecordedValues,
     /// The commanded opening, in the same units.
     action: RecordedValues,
-    open: f64,
-    closed: f64,
+    /// The recorded value of a fully open gripper; null with `closed` when
+    /// the dataset does not establish which end is open.
+    open: Option<f64>,
+    /// The recorded value of a fully closed gripper; null with `open`.
+    closed: Option<f64>,
 }
 
 impl GripperRoles {
@@ -198,9 +201,10 @@ impl GripperRoles {
     pub fn action(&self) -> &RecordedValues {
         &self.action
     }
-    /// The recorded values of a fully open and a fully closed gripper.
-    pub fn range(&self) -> (f64, f64) {
-        (self.open, self.closed)
+    /// The recorded values of a fully open and a fully closed gripper, when
+    /// the dataset establishes them.
+    pub fn range(&self) -> Option<(f64, f64)> {
+        self.open.zip(self.closed)
     }
     fn validate(&self, arm: &str) -> Result<(), String> {
         self.state.validate()?;
@@ -208,12 +212,20 @@ impl GripperRoles {
         if self.state.count() > 1 || self.action.count() > 1 {
             return Err(format!("The {arm} gripper is one number, not several"));
         }
-        if !self.open.is_finite() || !self.closed.is_finite() || self.open == self.closed {
-            return Err(format!(
+        match (self.open, self.closed) {
+            (None, None) => Ok(()),
+            (Some(open), Some(closed))
+                if open.is_finite() && closed.is_finite() && open != closed =>
+            {
+                Ok(())
+            }
+            (Some(_), Some(_)) => Err(format!(
                 "The {arm} gripper's open and closed values must differ"
-            ));
+            )),
+            _ => Err(format!(
+                "The {arm} gripper names both its open and closed values, or neither"
+            )),
         }
-        Ok(())
     }
 }
 
@@ -447,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn an_arm_commands_the_joints_it_measures_and_a_gripper_has_a_direction() {
+    fn an_arm_commands_the_joints_it_measures_and_a_gripper_names_both_ends_or_neither() {
         let values = |indices: serde_json::Value| json!({"topic": "/frame", "schema": "Frame", "field": ["state"], "element": [], "indices": indices});
         let arm = |action: serde_json::Value, gripper: serde_json::Value| {
             roles(
@@ -456,9 +468,26 @@ mod tests {
         };
         assert!(arm(values(json!([7, 8])), json!(null)).validate().is_ok());
         assert!(arm(values(json!([7])), json!(null)).validate().is_err());
-        let gripper = |open: f64| json!({"state": values(json!([6])), "action": values(json!([13])), "open": open, "closed": 0.0});
-        assert!(arm(json!(null), gripper(1.0)).validate().is_ok());
-        assert!(arm(json!(null), gripper(0.0)).validate().is_err());
+        let gripper = |open: serde_json::Value, closed: serde_json::Value| json!({"state": values(json!([6])), "action": values(json!([13])), "open": open, "closed": closed});
+        assert!(
+            arm(json!(null), gripper(json!(1.0), json!(0.0)))
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            arm(json!(null), gripper(json!(0.0), json!(0.0)))
+                .validate()
+                .is_err()
+        );
+        // A gripper whose ends the dataset does not establish is still named.
+        let unknown = arm(json!(null), gripper(json!(null), json!(null)));
+        assert!(unknown.validate().is_ok());
+        assert_eq!(unknown.arms()[0].gripper().unwrap().range(), None);
+        assert!(
+            arm(json!(null), gripper(json!(1.0), json!(null)))
+                .validate()
+                .is_err()
+        );
         let twins = roles(json!({"arms": [
             {"name": "arm", "state": values(json!([0])), "action": null, "gripper": null},
             {"name": "arm", "state": values(json!([1])), "action": null, "gripper": null}

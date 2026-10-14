@@ -17,9 +17,9 @@ use super::{CategoryId, CurationGraph, CurationNode, CurationNodeKind};
 use crate::activities::episode::{Episode, EpisodeListing};
 use crate::format::{ClockPresentation as _, GroupedCountPresentation as _};
 use serde::{Deserialize, Serialize};
-use spiral_robotics_common::datasets::DatasetProducer;
+use spiral_robotics_common::datasets::DatasetFormat;
 
-/// One statistic Spiral records for every episode.
+/// One statistic a dataset's `episodes` table records for every episode.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum EpisodeFact {
@@ -37,13 +37,13 @@ impl EpisodeFact {
         Self::SizeMegabytes,
     ];
     /// The facts `listing`'s dataset records for every episode: its
-    /// producer's. A LeRobot episode has no file or channels of its own.
+    /// format's. A LeRobot episode has no file or channels of its own.
     pub(crate) fn listed_by(listing: &EpisodeListing) -> Vec<Self> {
         Self::ALL
             .into_iter()
-            .filter(|fact| match listing.producer() {
-                DatasetProducer::Mcap => true,
-                DatasetProducer::LeRobot => {
+            .filter(|fact| match listing.format() {
+                DatasetFormat::Mcap => true,
+                DatasetFormat::LeRobot => {
                     matches!(fact, Self::DurationSeconds | Self::Messages)
                 }
             })
@@ -95,7 +95,7 @@ impl EpisodeFact {
             Self::SizeMegabytes => "CAST(source_bytes AS DOUBLE) / 1e6",
         }
     }
-    /// The fact's value for one episode, when Spiral listed it.
+    /// The fact's value for one episode, when its dataset listed it.
     pub(in crate::activities::curation) fn of(self, episode: &Episode) -> Option<f64> {
         let facts = episode.facts();
         match self {

@@ -102,9 +102,10 @@ The Cargo profile's `debug = 0` does not disable DX's separate bundling option.
 
 ### Hosted
 
-[`deploy/hosted`](deploy/hosted/README.md) runs Studio for Spiral colleagues at
-`robotics.spiraldb.com`, on one Compute Engine VM behind Cloudflare Access.
-Each release, a pushed `v*` tag, publishes its Linux image, the flake's
+Studio runs at `robotics.spiraldb.com` on one Compute Engine VM, defined by
+`robotics.tf` and `config/robotics-studio/` in `spiraldb/infra`. A Cloudflare
+Tunnel carries its traffic, and Studio's own Spiral sign-in gates every API
+request. Each release, a pushed `v*` tag, publishes its Linux image, the flake's
 `hosted-image`, through `.github/workflows/hosted-image.yml`.
 
 Interface primitives (buttons, fields, facts, disclosures, trees, notices)

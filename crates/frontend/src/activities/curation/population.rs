@@ -12,16 +12,18 @@ use super::document::{CurationGraph, CurationNodeKind};
 use super::measured_timeline::MeasuredTimeline;
 use super::path::CurationPath;
 use super::preview::PreviewReads;
+use crate::activities::data::DatasetClient;
 use crate::activities::episode::{Episode, EpisodeListing};
 use spiral_robotics_common::curation::AnswerColumn;
-use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
+use spiral_robotics_common::datasets::{DatasetSelection, DatasetStreams, DatasetTopic, EpisodeId};
 use std::collections::BTreeMap;
 
 /// How many of a dataset's episodes interpretive execution reads.
 pub(super) const INTERPRETED_EPISODES: usize = 100;
 
 /// The episodes a curation is shaped against: the first the dataset lists,
-/// in recording order.
+/// in recording order, and the streams the dataset records, which a fill
+/// reads from.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct EpisodeSample {
     /// Which dataset's episodes these are, so a sample still held from the
@@ -30,19 +32,29 @@ pub(crate) struct EpisodeSample {
     episodes: Vec<Episode>,
     /// Whether the dataset lists more episodes than the sample holds.
     partial: bool,
+    topics: Vec<DatasetTopic>,
 }
 
 impl EpisodeSample {
     pub(super) async fn load(listing: &EpisodeListing) -> Result<Self, String> {
+        let inspection = DatasetClient::current()
+            .inspect_dataset(listing.dataset().clone())
+            .await
+            .map_err(|error| error.to_string())?;
         let page = listing.page(0, INTERPRETED_EPISODES).await?;
         Ok(Self {
             dataset: listing.dataset().clone(),
             partial: page.has_more(),
             episodes: page.into_episodes(),
+            topics: inspection.topics().to_vec(),
         })
     }
     pub(super) fn dataset(&self) -> &DatasetSelection {
         &self.dataset
+    }
+    /// The streams the dataset records.
+    pub(super) fn streams(&self) -> DatasetStreams<'_> {
+        DatasetStreams::new(&self.topics)
     }
     pub(super) fn episodes(&self) -> &[Episode] {
         &self.episodes
@@ -67,12 +79,19 @@ impl EpisodeSample {
     pub(super) fn fixture(episodes: Vec<Episode>) -> Self {
         Self {
             dataset: episodes.first().map_or_else(
-                || DatasetSelection::new(vec!["fixture".to_owned()]).expect("a dataset name"),
+                || DatasetSelection::new("fixture").expect("a dataset name"),
                 |episode| episode.dataset().clone(),
             ),
             episodes,
             partial: false,
+            topics: Vec::new(),
         }
+    }
+    /// The same, its dataset recording `topics`.
+    #[cfg(test)]
+    pub(super) fn with_topics(mut self, topics: Vec<DatasetTopic>) -> Self {
+        self.topics = topics;
+        self
     }
 }
 

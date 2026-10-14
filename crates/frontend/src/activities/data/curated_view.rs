@@ -511,7 +511,7 @@ mod tests {
     use spiral_robotics_common::relations::QueryColumn;
 
     fn dataset() -> EpisodeListing {
-        EpisodeListing::mcap_fixture("dataset_bottles")
+        EpisodeListing::mcap_fixture("bottles")
     }
 
     /// A row of the view on episode `id`, recorded from `start`, with the

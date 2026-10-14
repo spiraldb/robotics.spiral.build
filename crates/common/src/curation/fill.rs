@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn a_run_travels_as_the_columns_it_fills_and_the_views_it_publishes() {
-        let dataset = DatasetSelection::new(vec!["dataset_folding".into()]).unwrap();
+        let dataset = DatasetSelection::new("folding").unwrap();
         let column = AnswerColumn::of("similarity", &["q"]).unwrap();
         let request = FillRequest::new(
             dataset,

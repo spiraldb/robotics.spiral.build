@@ -192,10 +192,7 @@ mod tests {
     fn config(kind: TrainingModelKind) -> TrainingConfig {
         let mut config = TrainingConfig::new(
             " act-run-001 ",
-            TrainingSource::new(
-                DatasetSelection::new(vec!["dataset_abc".into()]).unwrap(),
-                "kept",
-            ),
+            TrainingSource::new(DatasetSelection::new("abc").unwrap(), "kept"),
             kind,
         );
         match config.model_mut() {
@@ -262,7 +259,7 @@ mod tests {
     fn a_view_must_be_a_plain_name() {
         let mut config = config(TrainingModelKind::Act);
         config.set_source(TrainingSource::new(
-            DatasetSelection::new(vec!["dataset_abc".into()]).unwrap(),
+            DatasetSelection::new("abc").unwrap(),
             "kept; DROP",
         ));
         assert!(config.validated().is_err());

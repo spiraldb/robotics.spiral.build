@@ -65,10 +65,7 @@ async fn manager(url: String) -> TrainingManager {
         ("progress-run", TrainingModelKind::Progress),
         ("act-run", TrainingModelKind::Act),
     ] {
-        let source = TrainingSource::new(
-            DatasetSelection::new(vec!["dataset_bottles".to_owned()]).unwrap(),
-            "expert_demos",
-        );
+        let source = TrainingSource::new(DatasetSelection::new("bottles").unwrap(), "expert_demos");
         let run = TrainingRunIdentity::new(
             id,
             TrainingConfig::new(id, source, kind),

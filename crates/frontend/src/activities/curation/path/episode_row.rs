@@ -5,8 +5,9 @@ use super::{PathError, PathSource};
 use crate::activities::curation::graph::DatasetStep;
 use crate::activities::episode::EpisodeTask;
 use spiral_robotics_common::curation::{AnswerColumn, AnswerTable};
-use spiral_robotics_common::datasets::{CameraVideo, DatasetSelection};
-use spiral_robotics_common::sql::SqlLiteral;
+use spiral_robotics_common::datasets::{
+    CameraVideo, DatasetSelection, DatasetStreams, TopicRevision,
+};
 
 /// How a row comes by one answer: read from the dataset's answers table, or
 /// asked of the model by a call on the row itself.
@@ -19,19 +20,22 @@ enum RowAnswer {
 /// Each episode's row: every answer the nodes ask a model about the whole
 /// episode, one column each, named for the answers table column that stores
 /// it. A stored answer is read from the answers table; one asked on the row
-/// reads the camera videos and the instructions its call names, a camera two
-/// models watch read once, and no video leaves the row. Published, the row is
-/// built on the dataset's listing, one per episode; previewed, it is the
-/// listed episodes'; filled, the bound episode's alone.
-pub(in crate::activities::curation) struct EpisodeRow {
+/// reads the camera videos and the instructions its call names, each from
+/// its stream among the dataset's, a camera two models watch read once, and
+/// no video leaves the row. Published, the row is built on the dataset's
+/// listing, one per episode; previewed, it is the listed episodes'; filled,
+/// the bound episode's alone.
+pub(in crate::activities::curation) struct EpisodeRow<'a> {
     dataset: DatasetSelection,
     source: PathSource,
-    cameras: Vec<String>,
-    instructions: Vec<String>,
+    /// The dataset's streams, among which a fill finds what its call reads.
+    streams: Option<DatasetStreams<'a>>,
+    cameras: Vec<TopicRevision>,
+    instructions: Vec<TopicRevision>,
     answers: Vec<(AnswerColumn, RowAnswer)>,
 }
 
-impl EpisodeRow {
+impl<'a> EpisodeRow<'a> {
     /// The column the episode's first message rides in, in log time.
     pub(in crate::activities::curation) const ORIGIN: &'static str = "origin_ns";
     /// The entry holding each episode's row.
@@ -45,6 +49,7 @@ impl EpisodeRow {
     /// What the dataset's listing of the bound episode is read as.
     const LISTED: &'static str = "e";
 
+    /// The row a published view or a preview reads, of stored answers.
     pub(in crate::activities::curation) fn new(
         dataset: &DatasetSelection,
         source: PathSource,
@@ -52,9 +57,21 @@ impl EpisodeRow {
         Self {
             dataset: dataset.clone(),
             source,
+            streams: None,
             cameras: Vec::new(),
             instructions: Vec::new(),
             answers: Vec::new(),
+        }
+    }
+    /// The row a fill asks its call on, reading what the call names among
+    /// `streams`, the dataset's.
+    pub(in crate::activities::curation) fn filling(
+        dataset: &DatasetSelection,
+        streams: DatasetStreams<'a>,
+    ) -> Self {
+        Self {
+            streams: Some(streams),
+            ..Self::new(dataset, PathSource::Fill)
         }
     }
 
@@ -62,24 +79,40 @@ impl EpisodeRow {
     pub(in crate::activities::curation) fn source(&self) -> PathSource {
         self.source
     }
-    /// The episode's packet video of `camera`.
-    pub(in crate::activities::curation) fn video(&mut self, camera: &str) -> String {
-        let entry = Self::entry(Self::VIDEOS, Self::read_once(&mut self.cameras, camera));
-        format!("{entry}.source")
+    /// The episode's packet video of the camera topic `camera`.
+    pub(in crate::activities::curation) fn video(
+        &mut self,
+        camera: &str,
+    ) -> Result<String, PathError> {
+        let stream = self.recorded()?.camera(camera).map_err(PathError::new)?;
+        let entry = Self::entry(
+            Self::VIDEOS,
+            Self::read_once(&mut self.cameras, stream.revision()),
+        );
+        Ok(format!("{entry}.source"))
     }
     /// The episode's task, where its dataset records it: the first message
     /// on an instruction topic, or the first task its dataset lists.
-    pub(in crate::activities::curation) fn task(&mut self, task: &EpisodeTask) -> String {
+    pub(in crate::activities::curation) fn task(
+        &mut self,
+        task: &EpisodeTask,
+    ) -> Result<String, PathError> {
         match task {
             EpisodeTask::Recorded(topic) => {
+                let stream = self.recorded()?.topic(topic).map_err(PathError::new)?;
                 let entry = Self::entry(
                     Self::INSTRUCTIONS,
-                    Self::read_once(&mut self.instructions, topic),
+                    Self::read_once(&mut self.instructions, stream.revision()),
                 );
-                format!("{entry}.task")
+                Ok(format!("{entry}.task"))
             }
-            EpisodeTask::Listed => format!("spql.list.get({}.tasks, 0)", Self::LISTED),
+            EpisodeTask::Listed => Ok(format!("spql.list.get({}.tasks, 0)", Self::LISTED)),
         }
+    }
+    /// The streams a fill reads from: only a fill reads recordings.
+    fn recorded(&self) -> Result<DatasetStreams<'a>, PathError> {
+        self.streams
+            .ok_or_else(|| PathError::new("Only a fill reads an episode's recordings."))
     }
     /// Read each episode's answers in `column` from the answers table.
     pub(in crate::activities::curation) fn stored(
@@ -100,9 +133,9 @@ impl EpisodeRow {
     /// The row's entries, the last of them [`Self::EPISODES`]; nothing when
     /// no node asks anything. Published, each episode's first message is the
     /// start of its listed span.
-    pub(in crate::activities::curation) fn entries(self) -> Result<Vec<String>, PathError> {
+    pub(in crate::activities::curation) fn entries(self) -> Vec<String> {
         if self.answers.is_empty() {
-            return Ok(Vec::new());
+            return Vec::new();
         }
         let mut entries = self.reads();
         entries.push(match self.source {
@@ -111,12 +144,12 @@ impl EpisodeRow {
                 Self::EPISODES,
                 self.answer_columns(),
                 DatasetStep::NAME,
-                self.joins("d.episode_id")?,
+                self.joins("d.episode_id"),
                 origin = Self::ORIGIN,
             ),
-            PathSource::Preview { .. } | PathSource::Fill => self.bound_episodes()?,
+            PathSource::Preview { .. } | PathSource::Fill => self.bound_episodes(),
         });
-        Ok(entries)
+        entries
     }
 
     /// The one statement filling the one answer the row asks for, for the
@@ -127,7 +160,7 @@ impl EpisodeRow {
             return Err(PathError::new("A fill asks each episode one thing."));
         };
         let column = column.clone();
-        let entries = self.entries()?;
+        let entries = self.entries();
         Ok(format!(
             "WITH\n  {}\nSELECT episode_id, {column} AS answer FROM {}",
             entries.join(",\n  "),
@@ -152,7 +185,7 @@ impl EpisodeRow {
 
     /// The bound episodes' rows, read from the dataset's listing: the one a
     /// fill binds as `$1`, or every one a preview lists, `$1` through `$N`.
-    fn bound_episodes(&self) -> Result<String, PathError> {
+    fn bound_episodes(&self) -> String {
         let listed = Self::LISTED;
         let members = match self.source {
             PathSource::Preview { episodes } => {
@@ -164,15 +197,15 @@ impl EpisodeRow {
             }
             PathSource::Published | PathSource::Fill => format!("{listed}.id = $1"),
         };
-        Ok(format!(
+        format!(
             "{} AS (SELECT {listed}.id AS episode_id, CAST({listed}.message_start_time AS BIGINT) AS {}{} \
-             FROM spql.mcap.episodes({}) {listed}{} WHERE {members})",
+             FROM {} {listed}{} WHERE {members})",
             Self::EPISODES,
             Self::ORIGIN,
             self.answer_columns(),
-            SqlLiteral::text(&self.dataset.sql_name()),
-            self.joins(&format!("{listed}.id"))?
-        ))
+            self.dataset.episodes(),
+            self.joins(&format!("{listed}.id"))
+        )
     }
 
     /// Every answer as a column of the row, led by a comma.
@@ -189,20 +222,17 @@ impl EpisodeRow {
     /// The entries reading every camera video and instruction the row asks
     /// with, of the episode bound as `$1`: only a fill asks on the row.
     fn reads(&self) -> Vec<String> {
-        let dataset = self.dataset.sql_name();
-        let members = "r.id = $1";
         let videos = self.cameras.iter().enumerate().map(|(index, camera)| {
             let videos = Self::entry(Self::VIDEOS, index);
-            CameraVideo::new(&dataset, camera).videos((&format!("{videos}_packets"), &videos))
+            CameraVideo::new(&self.dataset, camera).videos((&format!("{videos}_packets"), &videos))
         });
-        let instructions = self.instructions.iter().enumerate().map(|(index, topic)| {
+        let instructions = self.instructions.iter().enumerate().map(|(index, stream)| {
             format!(
                 "{} AS (SELECT id, task FROM (SELECT r.id, r.value.data AS task, \
-                 ROW_NUMBER() OVER (PARTITION BY r.id ORDER BY r.log_time) AS position \
-                 FROM spql.mcap.read_topic({}, {}) r WHERE {members}) instructions WHERE position = 1)",
+                 ROW_NUMBER() OVER (PARTITION BY r.id ORDER BY r.log_time, r.ordinal) AS position \
+                 FROM {} r WHERE r.id = $1) instructions WHERE position = 1)",
                 Self::entry(Self::INSTRUCTIONS, index),
-                SqlLiteral::text(&dataset),
-                SqlLiteral::text(topic)
+                self.dataset.messages(stream)
             )
         });
         videos.chain(instructions).collect()
@@ -212,17 +242,16 @@ impl EpisodeRow {
     /// stored, every video the row reads, and every instruction beside it:
     /// an episode without the camera has no answer, and one without an
     /// instruction is asked without a task.
-    fn joins(&self, id: &str) -> Result<String, PathError> {
+    fn joins(&self, id: &str) -> String {
         let stored = self
             .answers
             .iter()
             .any(|(_, answer)| matches!(answer, RowAnswer::Stored));
         let answers = if stored {
-            let table = AnswerTable::of(&self.dataset).map_err(PathError::new)?;
             let alias = Self::STORED;
             format!(
                 " JOIN {} {alias} ON {alias}.episode_id = {id}",
-                table.quoted()
+                AnswerTable::of(&self.dataset).table()
             )
         } else {
             String::new()
@@ -235,10 +264,10 @@ impl EpisodeRow {
             let entry = Self::entry(Self::INSTRUCTIONS, index);
             format!(" LEFT JOIN {entry} ON {entry}.id = {id}")
         });
-        Ok(std::iter::once(answers)
+        std::iter::once(answers)
             .chain(videos)
             .chain(instructions)
-            .collect())
+            .collect()
     }
 
     fn entry(kind: &str, index: usize) -> String {
@@ -246,11 +275,11 @@ impl EpisodeRow {
     }
 
     /// Where `read` is among `reads`, added the first time it is asked for.
-    fn read_once(reads: &mut Vec<String>, read: &str) -> usize {
+    fn read_once(reads: &mut Vec<TopicRevision>, read: &TopicRevision) -> usize {
         match reads.iter().position(|existing| existing == read) {
             Some(index) => index,
             None => {
-                reads.push(read.to_owned());
+                reads.push(read.clone());
                 reads.len() - 1
             }
         }

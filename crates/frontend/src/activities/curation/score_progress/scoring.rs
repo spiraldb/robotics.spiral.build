@@ -13,7 +13,7 @@ use crate::activities::curation::path::{
     ColumnMeaning, EpisodeRow, ModelEntries, ModelNode, ModelStep, PathError, TableColumn,
 };
 use spiral_robotics_common::curation::{AnswerColumn, AnswerSource};
-use spiral_robotics_common::datasets::DatasetSelection;
+use spiral_robotics_common::datasets::{DatasetSelection, DatasetStreams};
 use spiral_robotics_common::training::PublishedModel;
 
 /// The progress model a node scores with. Its velocity is progress per unit
@@ -113,6 +113,7 @@ impl ModelNode for ProgressScoring {
     fn answer_source(
         &self,
         _dataset: &DatasetSelection,
+        _streams: DatasetStreams<'_>,
         _step: &ModelStep<'_>,
     ) -> Result<AnswerSource, PathError> {
         let scorer = ProgressScorer::from(self);
@@ -172,7 +173,7 @@ mod tests {
     /// Score progress node.
     fn scored(scoring: ProgressScoring) -> (CurationGraph, String) {
         let mut graph = CurationGraph::new(Some(
-            crate::activities::episode::EpisodeListing::mcap_fixture("dataset_bottles"),
+            crate::activities::episode::EpisodeListing::mcap_fixture("bottles"),
         ));
         let node = graph
             .add_child(DATASET_NODE_ID, CurationNodeKind::ScoreProgress(scoring))
@@ -231,7 +232,10 @@ mod tests {
 
         let fills = |scoring: ProgressScoring| {
             let (graph, node) = scored(scoring);
-            CurationPath::to(&graph, &node).unwrap().fills().unwrap()
+            CurationPath::to(&graph, &node)
+                .unwrap()
+                .fills(DatasetStreams::new(&[]))
+                .unwrap()
         };
         let [by_released, by_experts, by_others] = [
             ProgressScoring::default(),

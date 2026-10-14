@@ -1,11 +1,11 @@
 //! Which recording an episode is, what is known about it, and what every
 //! surface calls it.
 //!
-//! Each native member is one recording — an MCAP file, or one episode of a
-//! LeRobot dataset — identified by the id Spiral gave it when it joined the
-//! dataset. That id is also its name — "Episode …2635e3d1" is the same
-//! recording in Data's rail and a Curation index, and stays that recording
-//! however many are imported around it. A list labels each episode by the
+//! Each episode is one recording — an MCAP file, or one episode of a LeRobot
+//! dataset — identified by the id Studio gave it when it first imported it.
+//! That id is also its name — "Episode …2635e3d1" is the same recording in
+//! Data's rail and a Curation index, and stays that recording however many
+//! are imported around it. A list labels each episode by the
 //! part of its source path that differs from its neighbours, or a LeRobot
 //! episode by its index, so an operator recognizes their own recordings at a
 //! glance.
@@ -18,10 +18,9 @@ use crate::format::{
 };
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId, EpisodeSelection};
-use spiral_robotics_common::sql::SqlLiteral;
 
-/// The statistics Spiral lists for every episode of a dataset: the span
-/// and message count every producer records, and what its producer records
+/// The statistics a dataset's `episodes` table lists for every episode: the
+/// span and message count every format records, and what its format records
 /// beside them.
 #[derive(Clone, Debug, serde::Deserialize, PartialEq)]
 pub(in crate::activities) struct EpisodeFacts {
@@ -38,7 +37,7 @@ pub(in crate::activities) struct EpisodeFacts {
     source_episode: SourceEpisode,
 }
 
-/// What an MCAP member records of the file it is: where it is, how big,
+/// What an MCAP episode records of the file it is: where it is, how big,
 /// and how many channels it holds.
 #[derive(Clone, Debug, Default, serde::Deserialize, PartialEq)]
 struct RecordedFile {
@@ -50,7 +49,7 @@ struct RecordedFile {
     channel_count: Option<u64>,
 }
 
-/// What a LeRobot member records of the episode it is: its index in the
+/// What a LeRobot episode records of the episode it is: its index in the
 /// dataset, and the tasks it was recorded doing.
 #[derive(Clone, Debug, Default, serde::Deserialize, PartialEq)]
 struct SourceEpisode {
@@ -137,12 +136,9 @@ impl Episode {
         Self { listing, facts }
     }
 
-    /// How many episodes `dataset` holds, whichever producer made it.
+    /// How many episodes `dataset` holds, whatever its format.
     pub(in crate::activities) async fn count(dataset: &DatasetSelection) -> Result<u64, String> {
-        let sql = format!(
-            "SELECT count(*) AS episodes FROM spql.mcap.episodes({})",
-            SqlLiteral::text(&dataset.sql_name())
-        );
+        let sql = format!("SELECT count(*) AS episodes FROM {}", dataset.episodes());
         DatasetClient::current()
             .run_spiral_query(sql, 1)
             .await
@@ -308,7 +304,7 @@ impl EpisodeLabels {
         }
     }
     /// The source path below the directory every listed episode shares; a
-    /// LeRobot episode, whose source is a frame table it shares with others,
+    /// LeRobot episode, whose source is the repository it shares with others,
     /// goes by its index in the dataset.
     pub(in crate::activities) fn label(&self, facts: &EpisodeFacts) -> SourceLabel {
         if let Some(index) = facts.episode_index() {
@@ -495,8 +491,8 @@ mod tests {
     #[test]
     fn a_lerobot_episode_is_labelled_by_its_index() {
         let listing = EpisodeListing::new(
-            DatasetSelection::new(vec!["so101".into()]).unwrap(),
-            spiral_robotics_common::datasets::DatasetProducer::LeRobot,
+            DatasetSelection::new("so101").unwrap(),
+            spiral_robotics_common::datasets::DatasetFormat::LeRobot,
         );
         let row = serde_json::json!({"id": EpisodeId::fixture(1), "episode_index": 12, "tasks": ["fold"]});
         let episode = listing.episode(row.as_object().unwrap().clone()).unwrap();

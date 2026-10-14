@@ -103,7 +103,7 @@ impl PreviewPlan {
         let path = CurationPath::to(graph, node)?;
         Ok(Self {
             node: (node.to_owned(), path.answer_column()?),
-            fill: path.fill_for(episodes.to_vec())?,
+            fill: path.fill_for(episodes.to_vec(), reader.sample().streams())?,
             statement: path.preview(episodes.len())?,
             episodes: episodes.to_vec(),
             reading,

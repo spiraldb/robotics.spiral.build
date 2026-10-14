@@ -21,7 +21,7 @@ use spiral_robotics_storage::{
 use crate::OperationError;
 use crate::account::SpiralSession;
 use crate::curation::manager::CurationManager;
-use crate::data::lerobot_import::LeRobotImports;
+use crate::data::dataset_import::DatasetImports;
 use crate::sync::MutexRecovery;
 use crate::training::manager::TrainingManager;
 
@@ -30,7 +30,7 @@ pub(crate) struct OpenProject {
     storage: Arc<StorageManager>,
     training: Arc<TrainingManager>,
     curation: Arc<CurationManager>,
-    lerobot_imports: Arc<LeRobotImports>,
+    dataset_imports: Arc<DatasetImports>,
 }
 
 /// How every project reaches its data: Studio's local store and the provider
@@ -101,7 +101,7 @@ impl ProjectFactory {
                 storage.clone(),
                 self.data.keys.clone(),
             )),
-            lerobot_imports: Arc::new(LeRobotImports::new(storage.clone())),
+            dataset_imports: Arc::new(DatasetImports::new(storage.clone(), self.data.keys.clone())),
             storage,
         })
     }
@@ -129,8 +129,8 @@ impl OpenProject {
     fn curation(&self) -> &Arc<CurationManager> {
         &self.curation
     }
-    fn lerobot_imports(&self) -> &Arc<LeRobotImports> {
-        &self.lerobot_imports
+    fn dataset_imports(&self) -> &Arc<DatasetImports> {
+        &self.dataset_imports
     }
 
     /// Whether training is active.
@@ -140,7 +140,7 @@ impl OpenProject {
 
     pub(crate) async fn shutdown(&self) {
         self.curation().shutdown();
-        self.lerobot_imports().shutdown();
+        self.dataset_imports().shutdown();
     }
 }
 

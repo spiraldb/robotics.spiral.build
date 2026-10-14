@@ -1,230 +1,351 @@
-//! The topics one episode records, and how many messages each holds, read
-//! the way the dataset's producer allows: an MCAP member's channel summary,
-//! or, for a LeRobot member, its messages of each of the dataset's topics.
-use std::collections::{BTreeMap, BTreeSet};
-
+//! A dataset's `topics` table, one row per recorded stream
+//! ([datasets](../../../../../docs/datasets.md#topics)), and what reading it
+//! reports: the dataset's inspection, and the topics one episode holds.
 use super::EpisodeTopicQuery;
-use crate::{
-    StorageManager,
-    db::{ArrowColumns, DatabaseSession},
-};
+use super::writer::DecodedEpisode;
+use crate::db::{ArrowColumns, DatabaseSession as _};
+use crate::{ProjectConnection, StorageManager};
+use arrow_array::{ArrayRef, RecordBatch, StringArray, UInt64Array};
+use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use futures::StreamExt as _;
 use spiral_robotics_common::datasets::{
-    DatasetInspection, DatasetProducer, DatasetTopic, EpisodeSelection,
+    DatasetInspection, DatasetSelection, DatasetTopic, EpisodeSelection, TopicRevision,
 };
-use spiral_robotics_common::sql::SqlLiteral;
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+/// What the table says of one stream.
+#[derive(Clone, Debug, PartialEq)]
+struct TopicRow {
+    topic: String,
+    schema: Option<String>,
+    encoding: String,
+    episodes: u64,
+    messages: u64,
+}
+
+impl TopicRow {
+    /// Row `row` of a read of the table's columns; none where `stream` is
+    /// NULL, as a dataset without streams reads.
+    fn read(
+        columns: &ArrowColumns<'_>,
+        row: usize,
+    ) -> Result<Option<(TopicRevision, Self)>, String> {
+        let Some(stream) = columns.optional_text("stream", row)? else {
+            return Ok(None);
+        };
+        let count = |name: &str| {
+            columns
+                .optional_unsigned(name, row)?
+                .ok_or_else(|| format!("stored topics row has a null {name}"))
+        };
+        Ok(Some((
+            TopicRevision::new(stream)?,
+            Self {
+                topic: columns.text("topic", row)?.to_owned(),
+                schema: columns
+                    .optional_text("schema_name", row)?
+                    .map(str::to_owned),
+                encoding: columns.text("message_encoding", row)?.to_owned(),
+                episodes: count("episodes")?,
+                messages: count("messages")?,
+            },
+        )))
+    }
+
+    fn topic(&self, stream: &TopicRevision) -> DatasetTopic {
+        DatasetTopic::new(self.topic.clone(), stream.clone(), self.encoding.clone())
+            .with_schema(self.schema.clone())
+            .with_coverage(self.episodes, self.messages)
+    }
+}
+
+/// The table's rows: each stream the dataset records, with how many
+/// episodes and messages hold it.
+#[derive(Default)]
+pub(crate) struct TopicCounts {
+    rows: BTreeMap<TopicRevision, TopicRow>,
+}
+
+impl TopicCounts {
+    /// The rows `dataset`'s table holds now.
+    pub(crate) async fn read(
+        connection: &mut ProjectConnection,
+        dataset: &DatasetSelection,
+    ) -> Result<Self, String> {
+        let batches = connection
+            .read_batches(&format!(
+                "SELECT stream, topic, schema_name, message_encoding, episodes, messages FROM {}",
+                dataset.topics()
+            ))
+            .await?;
+        let mut rows = BTreeMap::new();
+        for batch in &batches {
+            let columns = ArrowColumns::new(batch, "topics");
+            for row in 0..batch.num_rows() {
+                rows.extend(TopicRow::read(&columns, row)?);
+            }
+        }
+        Ok(Self { rows })
+    }
+
+    /// Count `episode`'s messages of each stream it holds.
+    pub(crate) fn count(&mut self, episode: &DecodedEpisode) -> Result<(), String> {
+        for messages in episode.streams() {
+            let stream = messages.stream();
+            let row = self
+                .rows
+                .entry(stream.name().clone())
+                .or_insert_with(|| TopicRow {
+                    topic: stream.topic().to_owned(),
+                    schema: stream.schema().map(str::to_owned),
+                    encoding: stream.encoding().to_owned(),
+                    episodes: 0,
+                    messages: 0,
+                });
+            if row.topic != stream.topic()
+                || row.schema.as_deref() != stream.schema()
+                || row.encoding != stream.encoding()
+            {
+                return Err(format!(
+                    "{} and {} share the stream name {}",
+                    row.topic,
+                    stream.topic(),
+                    stream.name().stream()
+                ));
+            }
+            row.episodes += 1;
+            row.messages += messages.len() as u64;
+        }
+        Ok(())
+    }
+
+    /// Replace `dataset`'s table with these rows.
+    pub(crate) async fn replace(
+        &self,
+        connection: &mut ProjectConnection,
+        dataset: &DatasetSelection,
+    ) -> Result<(), String> {
+        connection
+            .replace_or_create_batches(&dataset.topics().target(), vec![self.batch()?])
+            .await
+    }
+
+    fn schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("stream", DataType::Utf8, false),
+            Field::new("topic", DataType::Utf8, false),
+            Field::new("schema_name", DataType::Utf8, true),
+            Field::new("message_encoding", DataType::Utf8, false),
+            Field::new("episodes", DataType::UInt64, false),
+            Field::new("messages", DataType::UInt64, false),
+        ]))
+    }
+
+    fn batch(&self) -> Result<RecordBatch, String> {
+        let rows = || self.rows.iter();
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from_iter_values(
+                rows().map(|(stream, _)| stream.stream()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows().map(|(_, row)| row.topic.as_str()),
+            )),
+            Arc::new(StringArray::from_iter(
+                rows().map(|(_, row)| row.schema.as_deref()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows().map(|(_, row)| row.encoding.as_str()),
+            )),
+            Arc::new(UInt64Array::from_iter_values(
+                rows().map(|(_, row)| row.episodes),
+            )),
+            Arc::new(UInt64Array::from_iter_values(
+                rows().map(|(_, row)| row.messages),
+            )),
+        ];
+        RecordBatch::try_new(Self::schema(), columns)
+            .map_err(|error| format!("building topics rows: {error}"))
+    }
+
+    /// Every stream as the dataset's topics, by topic.
+    pub(super) fn topics(&self) -> Vec<DatasetTopic> {
+        let mut topics = self
+            .rows
+            .iter()
+            .map(|(stream, row)| row.topic(stream))
+            .collect::<Vec<_>>();
+        topics.sort_by(|left, right| left.name().cmp(right.name()));
+        topics
+    }
+}
 
 impl StorageManager {
+    /// `selection` as the catalog names it now, how many episodes it holds,
+    /// and every stream it records, read in one statement.
+    pub async fn inspect_dataset(
+        &self,
+        selection: DatasetSelection,
+    ) -> Result<DatasetInspection, String> {
+        let dataset = self
+            .project_store()
+            .dataset_catalog()
+            .datasets()
+            .await?
+            .summary(&selection)
+            .ok_or("Dataset no longer exists in this project; refresh the catalog")?;
+        let batches = self
+            .project_store()
+            .connect()
+            .await?
+            .read_batches(&format!(
+                "SELECT t.stream, t.topic, t.schema_name, t.message_encoding, t.episodes, t.messages, \
+                 e.episode_count FROM (SELECT count(*) AS episode_count FROM {}) e \
+                 LEFT JOIN {} t ON TRUE",
+                selection.episodes(),
+                selection.topics()
+            ))
+            .await?;
+        let mut episodes = 0;
+        let mut counts = TopicCounts::default();
+        for batch in &batches {
+            let columns = ArrowColumns::new(batch, "dataset inspection");
+            for row in 0..batch.num_rows() {
+                episodes = columns
+                    .optional_unsigned("episode_count", row)?
+                    .unwrap_or_default();
+                counts.rows.extend(TopicRow::read(&columns, row)?);
+            }
+        }
+        Ok(DatasetInspection::new(dataset, episodes, counts.topics()))
+    }
+
+    /// The dataset's topics `episode` holds messages of, each with how
+    /// many, read from its row of `episodes` in one statement. An episode
+    /// the dataset does not hold holds none.
     pub async fn episode_topics(
         &self,
         episode: EpisodeSelection,
     ) -> Result<Vec<DatasetTopic>, String> {
-        let catalog = self.inspect_dataset(episode.dataset().clone()).await?;
-        let statement = match catalog.producer() {
-            DatasetProducer::Mcap => EpisodeTopicQuery::channels(&episode)?,
-            DatasetProducer::LeRobot => EpisodeTopicQuery::messages(&episode, &catalog)?,
-        };
-        let topics = self.member_topics(statement).await?;
-        Ok(catalog
-            .topics()
-            .iter()
-            .filter(|topic| topics.contains_key(topic.name()))
-            .map(|topic| {
-                let coverage = &topics[topic.name()];
-                let variants = catalog
-                    .topics()
-                    .iter()
-                    .filter(|candidate| candidate.name() == topic.name())
-                    .count();
-                topic.clone().with_coverage(
-                    1,
-                    if variants == 1 {
-                        coverage.samples
-                    } else {
-                        None
-                    },
-                )
-            })
-            .collect())
-    }
-
-    /// The topics `statement` lists for its episode — `topic`, an optional
-    /// `schema_name`, and `message_count` per row — merged by topic. An
-    /// episode the statement lists no row for is not in the dataset.
-    async fn member_topics(
-        &self,
-        statement: EpisodeTopicQuery,
-    ) -> Result<BTreeMap<String, TopicChannels>, String> {
+        let dataset = episode.dataset();
+        let statement = EpisodeTopicQuery::for_episode(
+            episode.episode_id(),
+            format!(
+                "SELECT t.stream, t.topic, t.schema_name, t.message_encoding, s.messages \
+                 FROM (SELECT streams FROM {} WHERE id = $1) e \
+                 CROSS JOIN LATERAL UNNEST(e.streams) s \
+                 JOIN {} t ON t.stream = s.stream",
+                dataset.episodes(),
+                dataset.topics()
+            ),
+        )?;
         let mut connection = self.project_store().connect().await?;
-        let mut stream = connection
+        let mut rows = connection
             .query(statement.into_statement())
             .await
             .map_err(|error| error.to_string())?;
-        let mut found_episode = false;
-        let mut topics = BTreeMap::<String, TopicChannels>::new();
-        while let Some(batch) = stream.next().await {
+        let mut topics = Vec::new();
+        while let Some(batch) = rows.next().await {
             let batch = batch.map_err(|error| error.to_string())?;
-            found_episode |= batch.num_rows() > 0;
             let columns = ArrowColumns::new(&batch, "episode topics");
             for row in 0..batch.num_rows() {
-                let Some(topic) = columns.optional_text("topic", row)? else {
-                    continue;
-                };
-                topics.entry(topic.to_owned()).or_default().include(
-                    columns.optional_text("schema_name", row)?,
-                    columns.optional_unsigned("message_count", row)?,
-                )?;
+                let stream = TopicRevision::new(columns.text("stream", row)?)?;
+                let messages = columns
+                    .optional_unsigned("messages", row)?
+                    .ok_or("stored episode stream has a null message count")?;
+                topics.push(
+                    DatasetTopic::new(
+                        columns.text("topic", row)?.to_owned(),
+                        stream,
+                        columns.text("message_encoding", row)?.to_owned(),
+                    )
+                    .with_schema(
+                        columns
+                            .optional_text("schema_name", row)?
+                            .map(str::to_owned),
+                    )
+                    .with_coverage(1, messages),
+                );
             }
         }
-        if !found_episode {
-            return Err("This episode is no longer in the dataset".into());
-        }
+        topics.sort_by(|left, right| {
+            (left.name(), left.revision()).cmp(&(right.name(), right.revision()))
+        });
         Ok(topics)
-    }
-}
-
-struct TopicChannels {
-    schemas: BTreeSet<String>,
-    samples: Option<u64>,
-}
-
-impl Default for TopicChannels {
-    fn default() -> Self {
-        Self {
-            schemas: BTreeSet::new(),
-            samples: Some(0),
-        }
-    }
-}
-
-impl TopicChannels {
-    fn include(&mut self, schema: Option<&str>, samples: Option<u64>) -> Result<(), String> {
-        if let Some(schema) = schema {
-            self.schemas.insert(schema.to_owned());
-        }
-        self.samples = match (self.samples, samples) {
-            (Some(total), Some(count)) => Some(
-                total
-                    .checked_add(count)
-                    .ok_or("Episode topic message count exceeds u64")?,
-            ),
-            _ => None,
-        };
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn into_topic(self, name: String) -> DatasetTopic {
-        DatasetTopic::new(name, self.schemas.into_iter().collect()).with_coverage(1, self.samples)
-    }
-}
-
-impl EpisodeTopicQuery {
-    /// The MCAP member's channels, read from its file's summary.
-    fn channels(episode: &EpisodeSelection) -> Result<Self, String> {
-        Self::for_episode(
-            episode.dataset(),
-            episode.episode_id(),
-            format!(
-                "SELECT c.topic, c.schema_name, c.message_count \
-                 FROM (SELECT source FROM spql.mcap.episodes({}) WHERE id = $1) AS e \
-                 LEFT JOIN LATERAL spql.mcap.channels(e.source) AS c ON TRUE",
-                SqlLiteral::text(&episode.dataset().sql_name()),
-            ),
-        )
-    }
-
-    /// How many messages the member holds of each topic the dataset
-    /// records, the topics it holds none of left out. Spiral keeps no
-    /// channel summary of a LeRobot member, whose source is a frame table
-    /// shared with other episodes, so each topic's messages of the member
-    /// are counted, all in one statement.
-    fn messages(episode: &EpisodeSelection, catalog: &DatasetInspection) -> Result<Self, String> {
-        let dataset = SqlLiteral::text(&episode.dataset().sql_name());
-        let counts = catalog
-            .topics()
-            .iter()
-            .map(|topic| {
-                let variant = topic
-                    .revision()
-                    .map(|revision| format!(", {}", SqlLiteral::text(revision.variant())))
-                    .unwrap_or_default();
-                format!(
-                    "SELECT {topic} AS topic, CAST(NULL AS VARCHAR) AS schema_name, count(*) AS message_count \
-                     FROM spql.mcap.read_topic({dataset}, {topic}{variant}) WHERE id = $1",
-                    topic = SqlLiteral::text(topic.name()),
-                )
-            })
-            .collect::<Vec<_>>();
-        if counts.is_empty() {
-            return Err("This dataset records no topics".into());
-        }
-        Self::for_episode(
-            episode.dataset(),
-            episode.episode_id(),
-            format!(
-                "SELECT * FROM ({}) counted WHERE message_count > 0",
-                counts.join(" UNION ALL ")
-            ),
-        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_common::datasets::{
-        DatasetSelection, DatasetSummary, EpisodeId, TopicRevision,
-    };
+    use crate::datasets::fixtures::RolloutFixture;
+    use crate::datasets::{DatasetImport, EpisodeUuids, McapFile, TestJournal};
+    use crate::db::UnquotedMemory;
+    use spiral_robotics_common::datasets::{DatasetFormat, EpisodeId};
 
-    #[test]
-    fn channels_merge_schemas_and_preserve_unknown_and_zero_counts() {
-        let mut channels = TopicChannels::default();
-        channels.include(Some("camera"), Some(2)).unwrap();
-        channels.include(Some("camera"), Some(3)).unwrap();
-        channels.include(Some("other"), Some(0)).unwrap();
-        let topic = channels.into_topic("/camera".into());
-        assert_eq!(topic.schemas(), ["camera", "other"]);
-        assert_eq!(topic.samples(), Some(5));
-        assert_eq!(topic.members(), 1);
-
-        let mut channels = TopicChannels::default();
-        channels.include(None, Some(0)).unwrap();
-        assert_eq!(channels.samples, Some(0));
-        channels.include(None, None).unwrap();
-        channels.include(None, Some(2)).unwrap();
-        assert_eq!(channels.into_topic("/raw".into()).samples(), None);
-    }
-
-    #[test]
-    fn a_lerobot_member_counts_its_messages_of_every_topic_in_one_statement() {
-        let dataset = DatasetSelection::new(vec!["lerobot_svla_so101_pickplace".into()]).unwrap();
-        let catalog = DatasetInspection::new(
-            DatasetSummary::new(dataset.clone(), ("r".into(), "v".into())),
-            DatasetProducer::LeRobot,
-            Some(50),
-            ["action", "observation.images.up"]
-                .map(|name| {
-                    DatasetTopic::new(name.into(), vec![])
-                        .with_revision(TopicRevision::new(format!("{name}-variant")))
-                })
-                .to_vec(),
+    #[tokio::test]
+    async fn a_dataset_and_each_episode_list_the_streams_they_hold() {
+        let journal = TestJournal::start().await;
+        let (store, _) = UnquotedMemory::store_with_catalog(journal.endpoint()).await;
+        let store = Arc::new(store);
+        let storage = StorageManager::new(
+            store.clone(),
+            crate::StudioStore::in_memory().project(&store.connection_settings()),
         );
-        let episode = EpisodeSelection::new(
-            dataset,
-            EpisodeId::try_from("01a1181263837279a03b89d481c7ed9b").unwrap(),
-        );
-        let statement = EpisodeTopicQuery::messages(&episode, &catalog)
+        let dataset = DatasetSelection::new("demo").unwrap();
+        let episodes = [("filmed", true), ("blind", false)].map(|(key, filmed)| {
+            let bytes = RolloutFixture::mcap(key, filmed);
+            DecodedEpisode::of_mcap(McapFile::held(key, &bytes).unwrap(), &bytes).unwrap()
+        });
+        DatasetImport::new(&store, &dataset, DatasetFormat::Mcap)
+            .commit(episodes.into())
+            .await
+            .unwrap();
+        journal.name(&[dataset.episodes(), dataset.topics(), dataset.files()]);
+
+        let inspection = storage.inspect_dataset(dataset.clone()).await.unwrap();
+        assert_eq!(inspection.members(), 2);
+        assert_eq!(inspection.format(), DatasetFormat::Mcap);
+        let camera = inspection
+            .topics()
+            .iter()
+            .find(|topic| topic.is_video())
+            .unwrap();
+        assert_eq!((camera.name(), camera.members()), ("/camera/top/video", 1));
+
+        let batches = store
+            .connect()
+            .await
             .unwrap()
-            .into_statement();
+            .read_batches(&format!(
+                "SELECT id FROM {} WHERE key = 'filmed'",
+                dataset.episodes()
+            ))
+            .await
+            .unwrap();
+        let filmed = EpisodeUuids::read(batches[0].column(0).as_ref()).unwrap()[0].clone();
+        let topics = storage
+            .episode_topics(EpisodeSelection::new(dataset.clone(), filmed))
+            .await
+            .unwrap();
+        assert_eq!(topics.len(), inspection.topics().len());
+        let held = topics.iter().find(|topic| topic.is_video()).unwrap();
         assert_eq!(
-            statement.as_str(),
-            "SELECT * FROM (SELECT 'action' AS topic, CAST(NULL AS VARCHAR) AS schema_name, count(*) AS message_count \
-             FROM spql.mcap.read_topic('lerobot_svla_so101_pickplace', 'action', 'action-variant') WHERE id = $1 \
-             UNION ALL SELECT 'observation.images.up' AS topic, CAST(NULL AS VARCHAR) AS schema_name, count(*) AS message_count \
-             FROM spql.mcap.read_topic('lerobot_svla_so101_pickplace', 'observation.images.up', 'observation.images.up-variant') WHERE id = $1) \
-             counted WHERE message_count > 0"
+            (held.revision(), held.members(), held.samples()),
+            (camera.revision(), 1, 8)
         );
-        assert!(statement.parameters().is_some());
+        let stranger = EpisodeId::try_from("01900000000070008000000000000001").unwrap();
+        assert!(
+            storage
+                .episode_topics(EpisodeSelection::new(dataset.clone(), stranger))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let empty = DatasetSelection::new("empty").unwrap();
+        assert!(
+            storage.inspect_dataset(empty).await.is_err(),
+            "no such dataset"
+        );
     }
 }

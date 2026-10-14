@@ -1,6 +1,6 @@
-//! Each dataset's answers table, `dataset_answers_<id>`: made from the
-//! dataset's first refresh, given a row by every append that adds an episode,
-//! and dropped with it; and the columns fill runs write into it.
+//! Each dataset's answers table, `datasets.<id>.answers`: created with the
+//! dataset, given a row by every write that adds an episode, and dropped
+//! with it; and the columns fill runs write into it.
 //!
 //! A fill writes one column at a time, for the episodes it computed: their
 //! answers, held as Arrow, are ingested into a staging table, the column is
@@ -8,7 +8,7 @@
 //! dropped. Spiral adds a column only as nullable and spelled in SQL, with
 //! every nested field nullable, so an answer's Arrow type is spelled out for
 //! it and every answer cast to what the table stores.
-use super::{EpisodeUuids, StudioDataset};
+use super::EpisodeUuids;
 use crate::{ProjectConnection, ProjectStore, StorageManager};
 use arrow_array::{Array, ArrayRef, ListArray, RecordBatch, StructArray, make_array};
 use arrow_buffer::OffsetBuffer;
@@ -16,7 +16,7 @@ use arrow_data::transform::MutableArrayData;
 use arrow_schema::{DataType, Field, Fields, Schema};
 use spiral_robotics_common::curation::{AnswerColumn, AnswerTable};
 use spiral_robotics_common::datasets::EpisodeId;
-use spiral_robotics_common::sql::{SqlLiteral, UnquotedSqlIdentifier};
+use spiral_robotics_common::sql::UnquotedSqlIdentifier;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -25,58 +25,38 @@ use std::sync::Arc;
 const VALUE: &str = "value";
 /// The column of a fill statement's result holding its answer.
 const ANSWER: &str = "answer";
-impl StudioDataset {
-    /// Create the answers table with one row per episode the dataset holds
-    /// now, and no answer yet.
-    pub(crate) async fn create_answers(
-        &self,
-        connection: &mut ProjectConnection,
-    ) -> Result<(), String> {
-        connection
-            .execute_update_sql(&format!(
-                "CREATE TABLE {} AS SELECT id AS episode_id FROM spql.mcap.episodes({})",
-                self.answers().quoted(),
-                SqlLiteral::text(self.dataset())
-            ))
-            .await
-            .map_err(|error| format!("creating {}: {error}", self.answers().name()))
+
+/// The answers table's rows for episodes a write adds: each one's id, and
+/// no answer in any column yet.
+pub(crate) struct AnswerRows;
+
+impl AnswerRows {
+    /// A new dataset's table, which no fill has added a column to.
+    pub(crate) fn schema() -> Schema {
+        Schema::new(vec![EpisodeUuids::field("episode_id")])
     }
 
-    /// Give every episode the dataset holds now and the answers table does
-    /// not a row with no answer. Spiral inserts only rows that name every
-    /// column, so they are read first.
-    pub(crate) async fn add_answer_rows(
-        &self,
-        connection: &mut ProjectConnection,
-    ) -> Result<(), String> {
-        let table = self.answers();
-        let schema = connection
-            .relation_schema(&table.name())
-            .await?
-            .ok_or_else(|| format!("{} has no answers table.", self.dataset()))?;
-        let (columns, values): (Vec<_>, Vec<_>) = schema
+    /// The rows of `episodes` in a table of `columns`.
+    pub(crate) fn batch(
+        columns: &Arc<Schema>,
+        episodes: &[EpisodeId],
+    ) -> Result<RecordBatch, String> {
+        let arrays = columns
             .fields()
             .iter()
             .map(|field| {
-                let value = if field.name() == "episode_id" {
-                    "s.id"
+                if field.name() == "episode_id" {
+                    EpisodeUuids::array(episodes)
                 } else {
-                    "NULL"
-                };
-                (field.name().as_str(), value)
+                    Ok(arrow_array::new_null_array(
+                        field.data_type(),
+                        episodes.len(),
+                    ))
+                }
             })
-            .unzip();
-        connection
-            .execute_update_sql(&format!(
-                "MERGE INTO {} t USING (SELECT id FROM spql.mcap.episodes({})) s ON t.episode_id = s.id \
-                 WHEN NOT MATCHED THEN INSERT ({}) VALUES ({})",
-                table.quoted(),
-                SqlLiteral::text(self.dataset()),
-                columns.join(", "),
-                values.join(", ")
-            ))
-            .await
-            .map_err(|error| format!("adding episodes to {}: {error}", table.name()))
+            .collect::<Result<Vec<_>, _>>()?;
+        RecordBatch::try_new(columns.clone(), arrays)
+            .map_err(|error| format!("building answers rows: {error}"))
     }
 }
 
@@ -107,7 +87,7 @@ impl DatasetAnswers<'_> {
         let batches = connection
             .read_batches(&format!(
                 "SELECT episode_id FROM {} WHERE {column} IS NOT NULL",
-                self.table.quoted()
+                self.table.table()
             ))
             .await?;
         let mut filled = BTreeSet::new();
@@ -130,12 +110,11 @@ impl DatasetAnswers<'_> {
             Some(_) => None,
             None => Some(StoredType::sql(batch.schema().field(1).data_type())?),
         };
-        let staging = format!("{}_staging_{column}", self.table.name());
+        let staging = self.table.staging(column)?;
         connection
-            .replace_or_create_batches(&staging, vec![batch])
+            .replace_or_create_batches(&staging.target(), vec![batch])
             .await?;
-        let staging = format!("\"{}\"", staging.replace('"', "\"\""));
-        let table = self.table.quoted();
+        let table = self.table.table();
         let written = async {
             if let Some(spelled) = added {
                 connection
@@ -157,19 +136,15 @@ impl DatasetAnswers<'_> {
             .await;
         written
             .and(dropped)
-            .map_err(|error| format!("writing {column} to {}: {error}", self.table.name()))
+            .map_err(|error| format!("writing {column} to {}: {error}", table.target()))
     }
 
     async fn schema(&self, connection: &mut ProjectConnection) -> Result<Schema, String> {
+        let table = self.table.table();
         connection
-            .relation_schema(&self.table.name())
+            .relation_schema(&table.target())
             .await?
-            .ok_or_else(|| {
-                format!(
-                    "{} does not exist; only datasets Studio imported keep model answers.",
-                    self.table.name()
-                )
-            })
+            .ok_or_else(|| format!("{} does not exist.", table.target()))
     }
 
     /// The type of what `column` stores, when the table has it.
@@ -697,20 +672,19 @@ mod tests {
         use spiral_robotics_common::relations::EpisodeQueryRequest;
         let (store, storage) = HostedProject::storage();
         let name = format!("probe_answers_{}", uuid::Uuid::new_v4().simple());
-        let definition = StudioDataset::new(&name);
-        let table = definition.answers().clone();
-        let dataset = DatasetSelection::new(vec![definition.dataset().to_owned()]).unwrap();
+        let dataset = DatasetSelection::new(name.clone()).unwrap();
+        let table = AnswerTable::of(&dataset);
         let rows = async |store: &crate::ProjectStore| -> Result<usize, String> {
             let batches = store
                 .connect()
                 .await?
-                .read_batches(&format!("SELECT episode_id FROM {}", table.quoted()))
+                .read_batches(&format!("SELECT episode_id FROM {}", table.table()))
                 .await?;
             Ok(batches.iter().map(RecordBatch::num_rows).sum())
         };
         // An assertion that fails still lets the probe be dropped.
         let outcome = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
-            // The first file makes the Dataset and its answers table.
+            // The first file makes the dataset and its answers table.
             storage.record_probe_episode(&name, "one").await?;
             assert_eq!(rows(&store).await?, 1);
             storage.record_probe_episode(&name, "two").await?;
@@ -718,8 +692,8 @@ mod tests {
             let episodes = storage
                 .queries()
                 .episode_ids(&format!(
-                    "SELECT id AS episode_id FROM spql.mcap.episodes({}) ORDER BY id",
-                    SqlLiteral::text(definition.dataset())
+                    "SELECT id AS episode_id FROM {} ORDER BY id",
+                    dataset.episodes()
                 ))
                 .await?;
             assert_eq!(episodes.len(), 2);
@@ -732,7 +706,16 @@ mod tests {
             };
 
             // The progress service reads the bound episode's packets as recorded.
-            let packets = CameraVideo::new(definition.dataset(), "/camera/top/video").packets();
+            let camera = storage
+                .inspect_dataset(dataset.clone())
+                .await?
+                .topics()
+                .iter()
+                .find(|topic| topic.name() == "/camera/top/video")
+                .ok_or("the probe records its camera")?
+                .revision()
+                .clone();
+            let packets = CameraVideo::new(&dataset, &camera).packets();
             let (schema, batches) = storage
                 .queries()
                 .batches_for_episode(&bound(&episodes[0], packets))
@@ -755,9 +738,9 @@ mod tests {
             let similarity = AnswerColumn::of("similarity", &["probe"]).unwrap();
             assert!(answers.filled(&similarity).await?.is_empty());
             let listed = format!(
-                "WITH listed AS (SELECT e.id AS episode_id, [CAST(0.25 AS DOUBLE), CAST(0.5 AS DOUBLE)] AS scores FROM spql.mcap.episodes({}) e WHERE e.id = $1) \
+                "WITH listed AS (SELECT e.id AS episode_id, [CAST(0.25 AS DOUBLE), CAST(0.5 AS DOUBLE)] AS scores FROM {} e WHERE e.id = $1) \
                  SELECT l.episode_id, g._ AS position, spql.list.get(l.scores, g._) AS answer FROM listed l CROSS JOIN LATERAL spql.range(CAST(spql.list.len(l.scores) AS BIGINT)) g",
-                SqlLiteral::text(definition.dataset())
+                dataset.episodes()
             );
             let (schema, batches) = storage
                 .queries()
@@ -786,7 +769,7 @@ mod tests {
                 .await?
                 .read_batches(&format!(
                     "SELECT a.episode_id, spql.list.get(a.{similarity}.value, CAST(1 AS BIGINT)) AS second FROM {} a ORDER BY a.episode_id",
-                    table.quoted()
+                    table.table()
                 ))
                 .await?;
             let second = read[0].column(1).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -824,7 +807,7 @@ mod tests {
                 .await?
                 .read_batches(&format!(
                     "SELECT p.frame_index, p.timestamp_ns FROM {} a CROSS JOIN LATERAL UNNEST(a.{scores}.value) p",
-                    table.quoted()
+                    table.table()
                 ))
                 .await?;
             assert_eq!(read.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
@@ -843,7 +826,7 @@ mod tests {
                 .await?
                 .read_batches(&format!(
                     "SELECT p.timestamp_ns FROM {} a CROSS JOIN LATERAL UNNEST(a.{tracks}.value) p",
-                    table.quoted()
+                    table.table()
                 ))
                 .await?;
             assert_eq!(read.iter().map(RecordBatch::num_rows).sum::<usize>(), 4);
@@ -859,8 +842,11 @@ mod tests {
         storage.drop_probe_dataset(&name).await.unwrap();
         let mut connection = store.connect().await.unwrap();
         assert!(
-            !connection.table_exists(&table.name()).await.unwrap(),
-            "retiring drops the answers table"
+            !connection
+                .table_exists(&table.table().target())
+                .await
+                .unwrap(),
+            "dropping the dataset drops its answers table"
         );
         match outcome {
             Ok(outcome) => outcome.expect("answers lifecycle"),

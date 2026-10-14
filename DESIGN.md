@@ -721,10 +721,10 @@ visible span. Every surface names the episode above its inspection, so the
 transport leads with its controls, and Space, the arrows, and Home/End drive
 the clock whether focus rests inside the inspection or on the page itself.
 
-Data speaks the operator's language over storage's. A dataset is named
-without the `dataset_` prefix every native dataset carries in SQL
-(`display_name()`); the SQL name stays in the tooltip and the overview
-footer. The rail names an episode by its task label or the part of its source
+Data speaks the operator's language over storage's. A dataset is named by
+its id (`display_name()`), never by the `datasets.<id>` namespace its tables
+live under in SQL; that name (`label()`) stays in the tooltip and the
+overview footer. The rail names an episode by its task label or the part of its source
 path that differs between files; an identifier-shaped name gives way to the
 recorded time of day, and a recording whose clock started at the Unix epoch
 says "no wall clock" rather than a day in 1970. Plot readouts round to the
@@ -940,7 +940,7 @@ stop, or discard is rendered on the page, never only in a tooltip.
 state; it does not insert a sentence that pushes the panel below it.
 
 **The Storage-Name-Stays-Backstage Rule.** Datasets are named by their
-display name, without the `dataset_` prefix; the SQL name appears only where
+display name, the id alone; the `datasets.<id>` namespace appears only where
 SQL is the subject (tooltips, the overview footer, executed queries).
 
 ## Component Ownership & Data Flow
@@ -1563,7 +1563,7 @@ while work is in progress; reduced motion keeps fades and nothing else.
   ink at 560), and segment choices as raised paper in a recessed track.
 - **Do** keep the status line to the connection plus exceptions, sorted
   danger, caution, plain, and let narrow widths drop the lowest facts whole.
-- **Do** name datasets without the `dataset_` prefix and keep the SQL name in
+- **Do** name datasets by their id and keep the `datasets.<id>` namespace in
   the tooltip and footer.
 - **Do** lead catalog rows and tabs with a kind mark (D, E) and graph
   nodes with an outlined stage mark.
@@ -1602,7 +1602,7 @@ while work is in progress; reduced motion keeps fades and nothing else.
 - **Don't** draw an indicator on a strip that holds one tab.
 - **Don't** truncate status facts or announce a resting state in the status
   line.
-- **Don't** show the `dataset_` storage prefix in a dataset's display name.
+- **Don't** show the `datasets.` namespace in a dataset's display name.
 - **Don't** cast shadows from resting panels, rails, ledgers, strips, fields,
   or buttons, or use a hard zero-blur offset shadow.
 - **Don't** add a second easing curve or a loop that outlives the work it

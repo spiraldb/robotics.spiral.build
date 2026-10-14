@@ -59,8 +59,8 @@ impl CatalogServer {
             return Json(json!({"headCommitId":state.version.to_string()})).into_response();
         }
         Json(json!({"namespace":[{
-            "parent":{"kind":"projectRoot"}, "name":"dataset",
-            "resource":{"descriptor":{"resourceId":"resource","kind":"dataset"},"versionId":state.version.to_string()}
+            "parent":{"kind":"prefix", "path":["datasets", "default"]}, "name":"episodes",
+            "resource":{"descriptor":{"resourceId":"resource","kind":"table"},"versionId":state.version.to_string()}
         }],"nextPageToken":null})).into_response()
     }
 
@@ -86,15 +86,12 @@ async fn catalog_reads_observe_new_versions_and_isolate_projects() {
     let server = CatalogServer::start().await;
     let first = server.store("first", crate::SpiralAccess::fixed("token".into()));
     let catalog = first.dataset_catalog();
-    let (a, b) = tokio::join!(catalog.resources(), catalog.resources());
-    assert_eq!(a.unwrap()[0].dataset().unwrap().version_id(), "0");
+    let (a, b) = tokio::join!(catalog.datasets(), catalog.datasets());
+    assert_eq!(a.unwrap().summaries()[0].version_id(), "0");
     assert!(b.is_ok());
     server.state.lock().unwrap().version = 1;
     assert_eq!(
-        catalog.resources().await.unwrap()[0]
-            .dataset()
-            .unwrap()
-            .version_id(),
+        catalog.datasets().await.unwrap().summaries()[0].version_id(),
         "1"
     );
     assert_eq!(server.state.lock().unwrap().reads, 6);
@@ -115,13 +112,13 @@ async fn catalog_reads_as_the_currently_signed_in_user() {
     let (publisher, access) = crate::SpiralAccessPublisher::new();
     let store = server.store("first", access);
     let catalog = store.dataset_catalog();
-    let signed_out = catalog.resources().await.unwrap_err();
+    let signed_out = catalog.datasets().await.err().unwrap();
     assert!(signed_out.contains("Sign in to Spiral"));
     assert_eq!(server.state.lock().unwrap().reads, 0);
     publisher.publish(Some("first".into()));
-    catalog.resources().await.unwrap();
+    catalog.datasets().await.unwrap();
     publisher.publish(Some("refreshed".into()));
-    catalog.resources().await.unwrap();
+    catalog.datasets().await.unwrap();
     let tokens = server.state.lock().unwrap().tokens.clone();
     assert_eq!(tokens.first().map(String::as_str), Some("Bearer first"));
     assert_eq!(tokens.last().map(String::as_str), Some("Bearer refreshed"));

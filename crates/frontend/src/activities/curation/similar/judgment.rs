@@ -16,7 +16,7 @@ use crate::activities::curation::path::{
     ColumnMeaning, EpisodeRow, ModelEntries, ModelNode, ModelStep, PathError, TableColumn,
 };
 use spiral_robotics_common::curation::{AnswerColumn, AnswerSource, AnswerTable};
-use spiral_robotics_common::datasets::DatasetSelection;
+use spiral_robotics_common::datasets::{DatasetSelection, DatasetStreams};
 use spiral_robotics_common::sql::SqlLiteral;
 
 /// The decision model both judgments are asked of, pinned so every published
@@ -68,9 +68,10 @@ impl<J: SubtaskJudgment> ModelNode for J {
     fn answer_source(
         &self,
         dataset: &DatasetSelection,
+        _streams: DatasetStreams<'_>,
         step: &ModelStep<'_>,
     ) -> Result<AnswerSource, PathError> {
-        let table = AnswerTable::of(dataset).map_err(PathError::new)?;
+        let table = AnswerTable::of(dataset).table();
         let call = self.call("s.listed.description")?;
         Ok(AnswerSource::Statement {
             statement: format!(
@@ -79,12 +80,16 @@ impl<J: SubtaskJudgment> ModelNode for J {
                  FROM e CROSS JOIN LATERAL spql.range(CAST(spql.list.len(e.subtasks) AS BIGINT)) g) \
                  SELECT s.episode_id, spql.list.collect({call}) AS answer FROM s GROUP BY s.episode_id",
                 step.subtasks()?,
-                table.quoted()
+                table
             ),
         })
     }
 
-    fn episode_columns(&self, row: &mut EpisodeRow, step: &ModelStep<'_>) -> Result<(), PathError> {
+    fn episode_columns(
+        &self,
+        row: &mut EpisodeRow<'_>,
+        step: &ModelStep<'_>,
+    ) -> Result<(), PathError> {
         row.stored(step.subtasks()?)?;
         row.stored(step.column())
     }

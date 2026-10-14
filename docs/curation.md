@@ -20,15 +20,15 @@ behind this model.
 Every edge carries one table with **one row per episode**, never more
 (upstream SpiralDB is moving to one episode as one row, and Curation follows
 it). The Dataset node starts it: `episode_id`, the facts the dataset's
-producer records for each episode (`duration_seconds`, `messages`, and for
+format records for each episode (`duration_seconds`, `messages`, and for
 MCAP recordings `channels` and `size_megabytes`; a LeRobot episode has no file
 of its own), and `kept`, the episode's kept time ranges as a list of
 `{start_ns, end_ns}`, starting as the whole episode. Times are the
 recording's log time in nanoseconds everywhere in the table (a LeRobot
 episode's count from its start), so a reader can join the recording's streams
-without converting them. The document keeps the dataset with its producer
-(`dataset: {path, producer}`), read from the catalog when the dataset is
-chosen; one saved without a producer names MCAP recordings.
+without converting them. The document keeps the dataset with its format
+(`dataset: {id, format}`, `format` `mcap` or `lerobot`), as the catalog lists
+it when the dataset is chosen.
 
 **Model nodes only add columns.** They never drop a row or narrow `kept`, and
 they have no rule. Each reads whole episodes, and only the episodes that
@@ -123,7 +123,7 @@ read each other's rows:
 
 | Node | What it writes | Where |
 | --- | --- | --- |
-| Dataset | `dataset`: every episode of `spql.mcap.episodes` with its facts and `kept` of one range, through the listing `Episode` uses everywhere | `graph/dataset.rs` |
+| Dataset | `dataset`: every episode of `datasets.<id>.episodes` with its facts and `kept` of one range, through the listing `Episode` uses everywhere | `graph/dataset.rs` |
 | Select | its conditions: `select_N_numbers` and `_ranked` for episode conditions, `_within_K` the ranges a range condition keeps, `_kept_K` the intersection, `_islands` merging ranges that overlap or touch, then `select_N` folding them back into `kept` | `select/step.rs` |
 | Score progress | entries: the scores unnested, one per frame, with its log time and progress rate (`CASE WHEN support > 0 AND NOT isnan(velocity)`) | `score_progress/scoring.rs` |
 | Track objects | entries: the tracks unnested, one per picture, with its log time and objects | `track_objects/tracking.rs` |
@@ -155,9 +155,9 @@ subtask is named before its fields are read.
 
 ### Stored answers
 
-Each dataset has an answers table, `dataset_answers_<id>` beside
-`dataset_<id>`: one row per episode keyed by `episode_id`, created at import
-from the Dataset's first refresh and given a row by each append. Every model
+Each dataset has an answers table, `datasets.<id>.answers` beside its
+`episodes`: one row per episode keyed by `episode_id`, written in the same
+transaction as each batch of episodes ([datasets](datasets.md#writing)). Every model
 call a node makes is one column, named for what it measures and six hex
 digits of a SHA-256 of the exact call (`score_progress_3f9a2c`): the function
 or service, the model revision, the Modal service revision, the arguments
@@ -181,7 +181,10 @@ without asking any model. Unpublishing drops only the view.
 order, its column, the episodes that reach it (the reach chain above it,
 compiled over the columns already filled, `SELECT episode_id`), and how one
 episode's answer is computed: a statement over the episode bound as `$1`,
-or, for Score progress and Track objects, their Modal service. Break down's
+or, for Score progress and Track objects, their Modal service. A node names
+its camera and instruction by topic; Break down's statement reads each from
+its stream's `messages` table, found among the streams the dataset records
+(`DatasetStreams`), which the curation reads with its sample. Break down's
 statement asks its model once per episode, and a judgment's judges the
 episode's whole stored list of subtasks in one call (the list forms of
 `spql.ai.similarity` and `spql.ai.classify`), which answers with a list
@@ -346,9 +349,9 @@ stay unsaved. Any saved curation can be deleted from its row in the switcher, op
 Studio reads its stored copy, drops every view that copy publishes, and then
 deletes it at the revision just read. A view that fails to drop stops
 the delete. Deleting the open one opens a blank graph. The payload is
-opaque to the backend and versioned by the frontend. Encoding 6 keeps only the
-recipe: nodes, edges, each node's configuration, and the published nodes,
-each with its view's name and statement digest.
+opaque to the backend and versioned by the frontend. Encoding 7 keeps only the
+recipe: the dataset (`{id, format}`), nodes, edges, each node's configuration,
+and the published nodes, each with its view's name and statement digest.
 Break down keeps its camera, sample interval, and where it reads each
 episode's task: the topic (`task_topic`), or the task the dataset lists
 (`listed_task`); Find similar its query; Group similar its categories,
@@ -358,7 +361,9 @@ read is saved. A document in an earlier encoding is refused. Each encoding
 replaced every earlier one: the Studio migration that brought it in
 (`m20261008_000001_curations_encoding_5`, then
 `m20261011_000001_curations_encoding_6`) dropped each older curation and the
-views its payload lists as published.
+views its payload lists as published; encoding 7
+(`m20261014_000001_studio_datasets`) dropped every curation and every
+published view, since each read Spiral's retired Datasets.
 
 ## Why
 

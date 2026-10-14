@@ -18,7 +18,7 @@ use crate::activities::curation::path::{
 };
 use crate::activities::episode::EpisodeTask;
 use spiral_robotics_common::curation::{AnswerColumn, AnswerSource};
-use spiral_robotics_common::datasets::DatasetSelection;
+use spiral_robotics_common::datasets::{DatasetSelection, DatasetStreams};
 use spiral_robotics_common::sql::SqlLiteral;
 
 impl SubtaskAnnotation {
@@ -28,14 +28,14 @@ impl SubtaskAnnotation {
             .ok_or_else(|| PathError::new("Choose the camera Break down reads."))
     }
     /// The model's call over the episode's row.
-    fn call(&self, row: &mut EpisodeRow) -> Result<String, PathError> {
+    fn call(&self, row: &mut EpisodeRow<'_>) -> Result<String, PathError> {
         let interval = SqlLiteral::number(self.sample_interval_seconds())
             .ok_or_else(|| PathError::new("The sample interval must be a number."))?;
-        let video = row.video(self.watched()?);
-        let task = self
-            .task()
-            .map(|task| format!(", task => {}", row.task(&task)))
-            .unwrap_or_default();
+        let video = row.video(self.watched()?)?;
+        let task = match self.task() {
+            Some(task) => format!(", task => {}", row.task(&task)?),
+            None => String::new(),
+        };
         Ok(format!(
             "spql.ai.breakdown_task({video}, sample_interval => {interval}, model => {}{task})",
             SqlLiteral::text(DEFAULT_ANNOTATION_MODEL)
@@ -66,9 +66,10 @@ impl ModelNode for SubtaskAnnotation {
     fn answer_source(
         &self,
         dataset: &DatasetSelection,
+        streams: DatasetStreams<'_>,
         step: &ModelStep<'_>,
     ) -> Result<AnswerSource, PathError> {
-        let mut row = EpisodeRow::new(dataset, PathSource::Fill);
+        let mut row = EpisodeRow::filling(dataset, streams);
         self.episode_columns(&mut row, step)?;
         Ok(AnswerSource::Statement {
             statement: row.answering()?,
@@ -77,7 +78,11 @@ impl ModelNode for SubtaskAnnotation {
 
     /// A fill asks the model on the row; every other reading reads what it
     /// stored.
-    fn episode_columns(&self, row: &mut EpisodeRow, step: &ModelStep<'_>) -> Result<(), PathError> {
+    fn episode_columns(
+        &self,
+        row: &mut EpisodeRow<'_>,
+        step: &ModelStep<'_>,
+    ) -> Result<(), PathError> {
         match row.source() {
             PathSource::Published | PathSource::Preview { .. } => row.stored(step.column()),
             PathSource::Fill => {

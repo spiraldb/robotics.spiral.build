@@ -322,9 +322,10 @@ async fn projects_with_records_become_workspaces_named_by_their_id() {
 }
 
 /// Encoding 5 dropped every curation before it, and encoding 6 every one
-/// before it; each took the views its curations published.
+/// before it, each with the views its curations published; encoding 7 drops
+/// the rest and every view, since each read Spiral's retired Datasets.
 #[tokio::test]
-async fn curations_before_encoding_6_are_dropped_with_the_views_they_published() {
+async fn every_curation_before_encoding_7_is_dropped_with_every_view() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("before-encoding-6.sqlite3");
     let raw = migrated_until(&path, "m20261008_000001_curations_encoding_5").await;
@@ -358,10 +359,51 @@ async fn curations_before_encoding_6_are_dropped_with_the_views_they_published()
                 .collect::<Vec<_>>(),
         );
     }
-    // A view of the same name in another project is not the dropped one.
+    assert_eq!(left, [Vec::<String>::new(), Vec::new()]);
+}
+
+/// A training run keeps its record and names its dataset by the id its
+/// tables live under; what Studio kept about the retired Dataset resources
+/// goes.
+#[tokio::test]
+async fn training_runs_name_their_dataset_by_id() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("before-studio-datasets.sqlite3");
+    let raw = migrated_until(&path, "m20261012_000001_drop_dataset_check_reports").await;
+    raw.execute_unprepared(
+        r#"INSERT INTO curations VALUES ('p', 'mcap', 'Bottles', 1, 6, '{"dataset":{"path":["dataset_warp_sim_bottles"]},"nodes":[]}', 1);
+           INSERT INTO curations VALUES ('p', 'lerobot', 'Pick', 1, 6, '{"dataset":{"path":["lerobot_pick"],"producer":"spql.lerobot.dataset"},"nodes":[]}', 1);
+           INSERT INTO training_runs VALUES ('p', 'train-1', '{"id":"train-1","config":{"source":{"dataset":{"path":["dataset_default"]},"view":"v"}}}');
+           INSERT INTO dataset_robots VALUES ('p', 'resource', 'version', '{}');
+           INSERT INTO dataset_joint_roles VALUES ('p', 'resource', 'version', '{}');"#,
+    )
+    .await
+    .unwrap();
+    let store = StudioStore::at(path);
+    store.initialize().await.unwrap();
+    let connection = store.connection().await.unwrap();
+    let mut read = Vec::new();
+    for sql in [
+        "SELECT CAST(count(*) AS TEXT) FROM curations",
+        "SELECT json_extract(document, '$.config.source.dataset') FROM training_runs",
+        "SELECT CAST((SELECT count(*) FROM dataset_robots) + (SELECT count(*) FROM dataset_joint_roles) AS TEXT)",
+    ] {
+        let rows = connection
+            .query_all(Statement::from_string(DbBackend::Sqlite, sql))
+            .await
+            .unwrap();
+        read.extend(
+            rows.iter()
+                .map(|row| row.try_get_by_index::<String>(0).unwrap()),
+        );
+    }
     assert_eq!(
-        left,
-        [vec!["new"], vec!["p:bottle_experts", "q:steady_drops"]]
+        read,
+        [
+            "0",
+            r#"{"id":"default"}"#,
+            "0",
+        ]
     );
 }
 
@@ -424,7 +466,7 @@ async fn runs_recorded_before_model_families_become_act_runs() {
         document["config"],
         serde_json::json!({
             "run_name": "fixture-run",
-            "source": source,
+            "source": {"dataset": {"id": "fixture"}, "view": "fixture_view"},
             "model": {
                 "kind": "act",
                 "observation": observation,

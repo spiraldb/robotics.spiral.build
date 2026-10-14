@@ -761,8 +761,7 @@ impl Default for TrainingConfig {
         Self::new(
             "act-run-001",
             TrainingSource::new(
-                DatasetSelection::new(vec!["dataset_default".to_owned()])
-                    .expect("one nonempty name is a dataset path"),
+                DatasetSelection::new("default").expect("a plain name is a dataset name"),
                 "",
             ),
             TrainingModelKind::Act,

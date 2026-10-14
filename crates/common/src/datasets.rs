@@ -2,27 +2,29 @@
 
 mod camera_video;
 mod catalog;
+mod dataset_import;
 mod episode_id;
 mod h264;
 mod joint_roles;
-mod lerobot_import;
 mod messages;
 mod robot;
+mod streams;
 mod value_columns;
 pub use camera_video::CameraVideo;
 pub use catalog::{
-    DatasetInspection, DatasetProducer, DatasetSelection, DatasetSummary, DatasetTopic,
-    EpisodeSelection, EpisodeTopicRequest, EpisodeVideo, ProjectResource, VideoPacket,
+    DatasetFormat, DatasetInspection, DatasetSelection, DatasetSummary, DatasetTable, DatasetTopic,
+    EpisodeSelection, EpisodeTopicRequest, EpisodeVideo, TopicRevision, VideoPacket,
 };
+pub use dataset_import::{DatasetImportPhase, DatasetImportRequest, DatasetImportStatus};
 pub use episode_id::EpisodeId;
 pub use h264::H264AccessUnit;
 pub use joint_roles::{
     ArmRoles, DatasetJointRoles, DatasetJointRolesSave, GripperRoles, NamedValues, PolicyJoints,
     RecordedValues,
 };
-pub use lerobot_import::{LeRobotImportPhase, LeRobotImportStatus};
-pub use messages::{MessageCursor, MessageRead, MessageWindow, TopicRevision, ValueSchemaRead};
+pub use messages::{MessageCursor, MessageRead, MessageWindow, ValueSchemaRead};
 pub use robot::{DatasetRobot, DatasetRobotSave, JointBinding, JointSelector};
+pub use streams::DatasetStreams;
 pub use value_columns::ValueColumns;
 
 use serde::{Deserialize, Serialize};

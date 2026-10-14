@@ -301,7 +301,7 @@ fn a_select_chooses_the_same_categories_through_every_edit_of_them() {
 
 #[test]
 fn a_select_reads_only_nodes_above_it_of_the_kind_each_condition_reads() {
-    let mut payload = CurationGraph::new(Some(EpisodeListing::mcap_fixture("dataset_bottles")));
+    let mut payload = CurationGraph::new(Some(EpisodeListing::mcap_fixture("bottles")));
     let mut tracking = ObjectTracking::default();
     tracking.set_prompt("bottle");
     let track = payload
@@ -394,12 +394,12 @@ fn a_select_reads_only_nodes_above_it_of_the_kind_each_condition_reads() {
 }
 
 /// A LeRobot episode has no file or channels of its own, so a Select over a
-/// LeRobot dataset offers only the facts its producer records.
+/// LeRobot dataset offers only the facts its format records.
 #[test]
 fn a_select_offers_only_the_facts_its_dataset_records() {
     let lerobot = EpisodeListing::new(
-        DatasetSelection::new(vec!["dataset_so101".into()]).unwrap(),
-        spiral_robotics_common::datasets::DatasetProducer::LeRobot,
+        DatasetSelection::new("so101").unwrap(),
+        spiral_robotics_common::datasets::DatasetFormat::LeRobot,
     );
     let mut payload = CurationGraph::new(Some(lerobot));
     let keep = payload.add_child(DATASET_NODE_ID, select()).unwrap();
@@ -579,7 +579,7 @@ fn every_node_saves_its_recipe_and_nothing_it_read() {
 /// A graph over a dataset with two Selects over whole episodes: longer and
 /// shorter ones.
 fn two_outputs() -> (CurationGraph, String, String) {
-    let mut payload = CurationGraph::new(Some(EpisodeListing::mcap_fixture("dataset_abc130k")));
+    let mut payload = CurationGraph::new(Some(EpisodeListing::mcap_fixture("abc130k")));
     let mut add = |comparison| {
         let id = payload.add_child(DATASET_NODE_ID, select()).unwrap();
         payload
@@ -648,7 +648,7 @@ fn a_view_is_current_while_its_node_compiles_to_it() {
 
 #[test]
 fn an_edit_above_a_node_on_its_path_puts_its_view_out_of_date() {
-    let mut payload = CurationGraph::new(Some(EpisodeListing::mcap_fixture("dataset_abc130k")));
+    let mut payload = CurationGraph::new(Some(EpisodeListing::mcap_fixture("abc130k")));
     let mut tracking = ObjectTracking::default();
     tracking.set_camera(Some("/top-camera".to_owned()));
     tracking.set_prompt("bottle");

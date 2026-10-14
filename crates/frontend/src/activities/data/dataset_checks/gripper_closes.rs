@@ -10,7 +10,7 @@ use super::state_action_lag::Pairing;
 use super::stream_reads::{CheckedStreams, PairedColumns};
 use dioxus::prelude::*;
 use serde::Deserialize;
-use spiral_robotics_common::datasets::{ArmRoles, EpisodeId};
+use spiral_robotics_common::datasets::{ArmRoles, EpisodeId, GripperRoles};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -68,7 +68,7 @@ impl GripperCloses {
     const MOST_SHUT: usize = 3;
 
     /// The column keeping every gripper's closes in each episode, by its
-    /// arm; `None` when no arm records a gripper.
+    /// arm; `None` when no arm records a gripper whose ends are known.
     pub(super) fn column(
         streams: CheckedStreams<'_>,
         arms: &[ArmRoles],
@@ -82,13 +82,20 @@ impl GripperCloses {
             "first_shut_at",
         ]);
         for arm in arms {
-            let Some(gripper) = arm.gripper() else {
+            let Some((gripper, range)) = Self::judged_gripper(arm) else {
                 continue;
             };
             let paired = PairedColumns::new(gripper.state(), gripper.action());
-            parts = parts.part(arm.name(), Self::sql(streams, &paired, gripper.range())?);
+            parts = parts.part(arm.name(), Self::sql(streams, &paired, range)?);
         }
         CheckColumn::of(CheckKind::Grippers, parts)
+    }
+
+    /// `arm`'s gripper and its open and closed values, when it has a gripper
+    /// whose ends are known: a close is judged on that scale.
+    fn judged_gripper(arm: &ArmRoles) -> Option<(&GripperRoles, (f64, f64))> {
+        let gripper = arm.gripper()?;
+        Some((gripper, gripper.range()?))
     }
 
     /// Each gripper's closes, totalled in Spiral over the column among
@@ -132,7 +139,7 @@ impl GripperCloses {
         Self {
             arms: arms
                 .iter()
-                .filter(|arm| arm.gripper().is_some())
+                .filter(|arm| Self::judged_gripper(arm).is_some())
                 .map(|arm| ArmCloses::of(arm.name(), judged.remove(arm.name())))
                 .collect(),
         }

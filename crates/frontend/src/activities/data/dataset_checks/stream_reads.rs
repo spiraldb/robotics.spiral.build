@@ -3,9 +3,8 @@
 //! moment is measured from. Every check composes its statement from these,
 //! so a topic, a field path or a clock is spelled one way.
 use spiral_robotics_common::datasets::{
-    DatasetSelection, DatasetTopic, RecordedValues, ValueColumns,
+    DatasetSelection, DatasetStreams, DatasetTopic, RecordedValues, ValueColumns,
 };
-use spiral_robotics_common::sql::SqlLiteral;
 
 /// The dataset a check reads and the streams it declares.
 #[derive(Clone, Copy)]
@@ -21,32 +20,19 @@ impl<'a> CheckedStreams<'a> {
     pub(super) fn topics(&self) -> &'a [DatasetTopic] {
         self.topics
     }
-    /// The statement reading one declared topic.
+    /// The table holding one declared stream's messages.
     pub(super) fn read(&self, topic: &DatasetTopic) -> String {
-        let dataset = SqlLiteral::text(&self.dataset.sql_name());
-        let name = SqlLiteral::text(topic.name());
-        match topic.revision() {
-            Some(revision) => format!(
-                "spql.mcap.read_topic({dataset}, {name}, {})",
-                SqlLiteral::text(revision.variant())
-            ),
-            None => format!("spql.mcap.read_topic({dataset}, {name})"),
-        }
+        self.dataset.messages(topic.revision()).to_string()
     }
-    /// The statement reading the stream `values` names.
+    /// The table holding the messages of the stream `values` names.
     pub(super) fn read_values(&self, values: &RecordedValues) -> Result<String, String> {
-        self.topics
-            .iter()
-            .find(|topic| topic.is_recorded_as(values.topic(), values.schema()))
+        DatasetStreams::new(self.topics)
+            .recorded(values.topic(), values.schema())
             .map(|topic| self.read(topic))
-            .ok_or_else(|| format!("The dataset no longer records {}", values.topic()))
     }
     /// Every episode, joined as `e`, which a moment is measured from.
     pub(super) fn episodes(&self) -> String {
-        format!(
-            "spql.mcap.episodes({})",
-            SqlLiteral::text(&self.dataset.sql_name())
-        )
+        self.dataset.episodes().to_string()
     }
     /// Seconds from the start of episode `e` to the nanosecond `time`: the
     /// instant an episode's player seeks to.
@@ -160,9 +146,8 @@ impl Greatest {
 
 /// A dataset recording two arms, as the joint checks' tests read it: the
 /// left arm's six joints, its commands and its gripper, and the right
-/// arm's six joints alone. The streams are named as
-/// `dataset_abc130k_sample` records them, so a statement printed in a test
-/// reads that dataset.
+/// arm's six joints alone. The topics are named as `abc130k_sample` records
+/// them, each stream after its topic.
 #[cfg(test)]
 pub(super) struct TwoArmDataset {
     dataset: DatasetSelection,
@@ -199,13 +184,27 @@ impl TwoArmDataset {
             "/left-ee-action",
             "/right-arm-state",
         ]
-        .map(|topic| DatasetTopic::new(topic.into(), vec!["JointState".into()]))
+        .map(|topic| Self::stream(topic, "JointState"))
         .into();
         Self {
-            dataset: DatasetSelection::new(vec!["dataset_abc130k_sample".into()]).unwrap(),
+            dataset: DatasetSelection::new("abc130k_sample").unwrap(),
             topics,
             roles,
         }
+    }
+    /// The stream of `topic` recorded as `schema`, named after the topic:
+    /// `/left-arm-state` is `left_arm_state_00000000`.
+    pub(super) fn stream(topic: &str, schema: &str) -> DatasetTopic {
+        let stream = format!(
+            "{}_00000000",
+            topic.trim_start_matches('/').replace(['/', '-', '.'], "_")
+        );
+        DatasetTopic::new(
+            topic.into(),
+            spiral_robotics_common::datasets::TopicRevision::new(stream).unwrap(),
+            "protobuf".into(),
+        )
+        .with_schema(Some(schema.into()))
     }
     pub(super) fn streams(&self) -> CheckedStreams<'_> {
         CheckedStreams::new(&self.dataset, &self.topics)

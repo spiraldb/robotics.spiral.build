@@ -1,14 +1,13 @@
 //! Where the model answers curations ask for are kept: one answers table per
-//! dataset, `dataset_answers_<id>` beside `dataset_<id>` and
-//! `dataset_files_<id>`, holding one row per episode keyed by
-//! `episode_id`, and one column per exact call a node makes.
+//! dataset, `datasets.<id>.answers` beside its `episodes`, holding one row per
+//! episode keyed by `episode_id`, and one column per exact call a node makes.
 //!
 //! A column is named for what it measures and a short hash of the call, so
 //! identical calls across curations share it. Each value is wrapped as
 //! `STRUCT(value <answer>)`: a NULL struct is an episode not asked yet, and a
 //! struct whose value is NULL one the model could not answer, which is never
 //! asked again.
-use crate::datasets::DatasetSelection;
+use crate::datasets::{DatasetSelection, DatasetTable};
 use crate::sql::UnquotedSqlIdentifier;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -17,40 +16,26 @@ use std::fmt::{self, Display, Formatter};
 /// One dataset's answers table.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnswerTable {
-    dataset_id: String,
+    dataset: DatasetSelection,
 }
 
 impl AnswerTable {
-    /// The answers table of the dataset Studio imported as `dataset_<id>` at
-    /// the catalog root; no other dataset keeps answers.
-    pub fn of(dataset: &DatasetSelection) -> Result<Self, String> {
-        match dataset.path() {
-            [name] => name
-                .strip_prefix("dataset_")
-                .filter(|id| !id.is_empty())
-                .map(Self::for_dataset_id),
-            _ => None,
-        }
-        .ok_or_else(|| {
-            format!(
-                "{} keeps no model answers; only datasets Studio imported do.",
-                dataset.display_name()
-            )
-        })
-    }
-    /// The answers table of the dataset Studio names `dataset_<dataset_id>`.
-    pub fn for_dataset_id(dataset_id: &str) -> Self {
+    /// The answers table of `dataset`: every dataset has one.
+    pub fn of(dataset: &DatasetSelection) -> Self {
         Self {
-            dataset_id: dataset_id.to_owned(),
+            dataset: dataset.clone(),
         }
     }
-    pub fn name(&self) -> String {
-        format!("dataset_answers_{}", self.dataset_id)
+    pub fn dataset(&self) -> &DatasetSelection {
+        &self.dataset
     }
-    /// The name as a statement spells it: quoted, since a dataset id may
-    /// hold a hyphen.
-    pub fn quoted(&self) -> String {
-        format!("\"{}\"", self.name().replace('"', "\"\""))
+    /// The table, which displays as a statement spells it.
+    pub fn table(&self) -> DatasetTable {
+        self.dataset.answers()
+    }
+    /// The table one fill stages `column`'s answers in before merging them.
+    pub fn staging(&self, column: &AnswerColumn) -> Result<DatasetTable, String> {
+        self.dataset.scratch(&format!("answers_staging_{column}"))
     }
 }
 
@@ -163,19 +148,18 @@ mod tests {
     }
 
     #[test]
-    fn only_a_dataset_studio_imported_keeps_answers() {
-        let imported = DatasetSelection::new(vec!["dataset_pick-place".into()]).unwrap();
-        let table = AnswerTable::of(&imported).unwrap();
-        assert_eq!(table.name(), "dataset_answers_pick-place");
-        assert_eq!(table.quoted(), "\"dataset_answers_pick-place\"");
-        for foreign in [
-            vec!["recordings"],
-            vec!["dataset_"],
-            vec!["lab", "dataset_x"],
-        ] {
-            let dataset =
-                DatasetSelection::new(foreign.into_iter().map(String::from).collect()).unwrap();
-            assert!(AnswerTable::of(&dataset).is_err());
-        }
+    fn a_datasets_answers_live_under_its_namespace() {
+        let dataset = DatasetSelection::new("pick-place").unwrap();
+        let table = AnswerTable::of(&dataset);
+        assert_eq!(table.table().target(), "datasets.pick-place.answers");
+        assert_eq!(
+            table.table().to_string(),
+            "\"datasets\".\"pick-place\".\"answers\""
+        );
+        let column = AnswerColumn::try_from("score_progress_3f9a2c".to_owned()).unwrap();
+        assert_eq!(
+            table.staging(&column).unwrap().target(),
+            "datasets.pick-place.answers_staging_score_progress_3f9a2c"
+        );
     }
 }

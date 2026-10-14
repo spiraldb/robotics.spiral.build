@@ -36,7 +36,7 @@ pub(crate) use selection::{
 
 /// The payload's encoding. A payload of any other encoding is refused, not
 /// converted.
-pub(crate) const CURATION_ENCODING_VERSION: u32 = 6;
+pub(crate) const CURATION_ENCODING_VERSION: u32 = 7;
 /// The root node every curation starts with.
 pub(crate) const DATASET_NODE_ID: &str = "dataset";
 /// OpenRouter id of the newest Gemini Flash as of 2026-09-21; it accepts image
@@ -49,8 +49,8 @@ const MAX_NODE_ID_LEN: usize = 64;
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CurationGraph {
-    /// The dataset it reads, and the producer that made it, which decide
-    /// how its episodes are listed.
+    /// The dataset it reads, and its format, which decide how its episodes
+    /// are listed.
     #[serde(default)]
     dataset: Option<EpisodeListing>,
     nodes: Vec<CurationNode>,

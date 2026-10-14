@@ -147,7 +147,7 @@ async fn a_browser_signs_in_on_spirals_page_and_reaches_the_api_with_its_cookie(
     assert_eq!(query["response_type"], "code");
     assert_eq!(
         query["scope"],
-        "openid email projects:read catalog:read catalog:write tables:read tables:write locations:read locations:write"
+        "openid email projects:read catalog:read catalog:write tables:read tables:write"
     );
     assert_eq!(query["redirect_uri"], "http://localhost:3000/callback");
     assert_eq!(query["code_challenge_method"], "S256");

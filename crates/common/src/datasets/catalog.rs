@@ -1,47 +1,157 @@
-//! Spiral dataset discovery and bounded topic inspection.
+//! Studio's datasets: each one the tables under `datasets.<id>` that Studio
+//! writes itself ([datasets](../../../../docs/datasets.md)), and what reading
+//! them reports.
 use super::EpisodeId;
 use serde::{Deserialize, Serialize};
+use std::fmt::{self, Display, Formatter};
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// One Studio dataset, named by its id: the tables under `datasets.<id>`.
+/// Every statement names a dataset's tables through it, so none spells a
+/// table name itself.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(try_from = "DatasetName")]
 pub struct DatasetSelection {
+    id: String,
+}
+
+/// A dataset's id as it travels, checked before it names any table.
+#[derive(Deserialize)]
+struct DatasetName {
+    id: String,
+}
+
+impl TryFrom<DatasetName> for DatasetSelection {
+    type Error = String;
+
+    fn try_from(name: DatasetName) -> Result<Self, Self::Error> {
+        Self::new(name.id)
+    }
+}
+
+impl DatasetSelection {
+    /// The namespace every dataset's tables live under.
+    const NAMESPACE: &str = "datasets";
+    const MAX_BYTES: usize = 96;
+
+    /// The dataset named `id`: 1–96 letters, numbers, `_` or `-`.
+    pub fn new(id: impl Into<String>) -> Result<Self, String> {
+        let id = id.into();
+        if id.is_empty()
+            || id.len() > Self::MAX_BYTES
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err(format!(
+                "{id:?} is not a dataset name: use 1–96 letters, numbers, '_' or '-'"
+            ));
+        }
+        Ok(Self { id })
+    }
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    /// What an operator calls the dataset.
+    pub fn display_name(&self) -> &str {
+        &self.id
+    }
+    /// Its namespace as SQL names it, `datasets.<id>`: what tooltips and
+    /// footers show where SQL is the subject.
+    pub fn label(&self) -> String {
+        format!("{}.{}", Self::NAMESPACE, self.id)
+    }
+
+    /// One row per episode.
+    pub fn episodes(&self) -> DatasetTable {
+        self.table(&["episodes"])
+    }
+    /// One row per recorded stream.
+    pub fn topics(&self) -> DatasetTable {
+        self.table(&["topics"])
+    }
+    /// An MCAP dataset's source files, one per episode.
+    pub fn files(&self) -> DatasetTable {
+        self.table(&["files"])
+    }
+    /// One row per episode of model answers.
+    pub fn answers(&self) -> DatasetTable {
+        self.table(&["answers"])
+    }
+    /// The messages of one stream.
+    pub fn messages(&self, stream: &TopicRevision) -> DatasetTable {
+        self.table(&["messages", stream.stream()])
+    }
+    /// A table under the dataset's namespace that Studio derives for a
+    /// moment, such as a staged answers column: `name` must be a plain
+    /// identifier no other table of the convention uses.
+    pub fn scratch(&self, name: &str) -> Result<DatasetTable, String> {
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            || matches!(
+                name,
+                "episodes" | "topics" | "files" | "answers" | "messages"
+            )
+        {
+            return Err(format!("{name:?} cannot name a scratch table"));
+        }
+        Ok(self.table(&[name]))
+    }
+
+    /// The dataset a catalog path belongs to, and the path's part under the
+    /// dataset's namespace: `["datasets", <id>, "episodes"]` is `episodes` of
+    /// `<id>`. A path outside the convention belongs to none.
+    pub fn of_catalog_path(path: &[String]) -> Option<(Self, &[String])> {
+        match path {
+            [namespace, id, rest @ ..] if namespace == Self::NAMESPACE && !rest.is_empty() => {
+                Some((Self::new(id.clone()).ok()?, rest))
+            }
+            _ => None,
+        }
+    }
+
+    fn table(&self, parts: &[&str]) -> DatasetTable {
+        DatasetTable {
+            path: [Self::NAMESPACE, self.id.as_str()]
+                .into_iter()
+                .chain(parts.iter().copied())
+                .map(str::to_owned)
+                .collect(),
+        }
+    }
+}
+
+/// One table of a dataset. It displays as a statement spells it, each part
+/// quoted; ingestion names it by [`Self::target`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DatasetTable {
     path: Vec<String>,
 }
-impl DatasetSelection {
-    pub fn new(path: Vec<String>) -> Result<Self, String> {
-        if path.is_empty()
-            || path.len() > 32
-            || path.iter().any(|part| {
-                part.is_empty() || part.len() > 256 || part.chars().any(char::is_control)
-            })
-        {
-            return Err("Dataset path must contain 1–32 nonempty names".to_owned());
-        }
-        Ok(Self { path })
-    }
+
+impl DatasetTable {
+    /// Its parts in the catalog.
     pub fn path(&self) -> &[String] {
         &self.path
     }
-    pub fn label(&self) -> String {
+    /// Its dotted name, as ingestion addresses a table: no part holds a dot.
+    pub fn target(&self) -> String {
         self.path.join(".")
-    }
-    pub fn sql_name(&self) -> String {
-        self.label()
-    }
-    /// What an operator calls the dataset: its own name, without the
-    /// `dataset_` prefix every native Studio Dataset carries in SQL.
-    pub fn display_name(&self) -> String {
-        let name = self.path.last().map_or("", String::as_str);
-        name.strip_prefix("dataset_")
-            .filter(|rest| !rest.is_empty())
-            .unwrap_or(name)
-            .to_owned()
-    }
-    pub fn can_preview(&self) -> bool {
-        self.path.iter().all(|part| !part.contains('.'))
     }
 }
 
-/// One native recording within a dataset.
+impl Display for DatasetTable {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        let quoted = self
+            .path
+            .iter()
+            .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
+            .collect::<Vec<_>>();
+        formatter.write_str(&quoted.join("."))
+    }
+}
+
+/// One recording within a dataset.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EpisodeSelection {
@@ -63,7 +173,7 @@ impl EpisodeSelection {
     }
 }
 
-/// One topic scoped to a native recording ID.
+/// One topic of one episode.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EpisodeTopicRequest {
@@ -90,25 +200,45 @@ impl EpisodeTopicRequest {
     }
 }
 
+/// How a dataset's episodes were made, fixed when it is created.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DatasetFormat {
+    /// One episode per MCAP file, each topic the file's channels.
+    Mcap,
+    /// One episode per episode of a LeRobot v3 dataset, each feature a topic.
+    LeRobot,
+}
+
 /// A dataset at one version: what Studio keeps about a dataset, such as its
 /// robot and joint roles, is filed under this identity, as the browser read
-/// it.
+/// it. The identity is the dataset's `episodes` table's resource and version,
+/// which changes exactly when episodes are added.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DatasetSummary {
     selection: DatasetSelection,
+    format: DatasetFormat,
     resource_id: String,
     version_id: String,
 }
 impl DatasetSummary {
-    pub fn new(selection: DatasetSelection, identity: (String, String)) -> Self {
+    pub fn new(
+        selection: DatasetSelection,
+        format: DatasetFormat,
+        identity: (String, String),
+    ) -> Self {
         Self {
             selection,
+            format,
             resource_id: identity.0,
             version_id: identity.1,
         }
     }
     pub fn selection(&self) -> &DatasetSelection {
         &self.selection
+    }
+    pub fn format(&self) -> DatasetFormat {
+        self.format
     }
     pub fn resource_id(&self) -> &str {
         &self.resource_id
@@ -123,132 +253,126 @@ impl DatasetSummary {
     }
 }
 
-/// The Spiral producer that made a Dataset's members from its source files,
-/// which decides what `spql.mcap.episodes` lists for each episode and what
-/// its topics record. Spiral's `spql.mcap` functions read these two.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-pub enum DatasetProducer {
-    /// One member per MCAP file, each topic the file's channels.
-    #[serde(rename = "spql.mcap.dataset")]
-    Mcap,
-    /// One member per episode of a LeRobot v3 dataset, each feature a topic.
-    #[serde(rename = "spql.lerobot.dataset")]
-    LeRobot,
+/// One stream's table under `messages`: a topic in one schema and Arrow
+/// type, as the `topics` table names it.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(try_from = "StreamName")]
+pub struct TopicRevision {
+    stream: String,
 }
 
-impl DatasetProducer {
-    /// The producer Spiral registered under `id`, or why Studio cannot read
-    /// a Dataset it made.
-    pub fn from_id(id: &str) -> Result<Self, String> {
-        match id {
-            "spql.mcap.dataset" => Ok(Self::Mcap),
-            "spql.lerobot.dataset" => Ok(Self::LeRobot),
-            other => Err(format!(
-                "Studio reads datasets made by spql.mcap.dataset or spql.lerobot.dataset, not {other}"
-            )),
-        }
-    }
-    /// The id Spiral registers it under.
-    pub const fn id(self) -> &'static str {
-        match self {
-            Self::Mcap => "spql.mcap.dataset",
-            Self::LeRobot => "spql.lerobot.dataset",
-        }
+#[derive(Deserialize)]
+struct StreamName {
+    stream: String,
+}
+
+impl TryFrom<StreamName> for TopicRevision {
+    type Error = String;
+
+    fn try_from(name: StreamName) -> Result<Self, Self::Error> {
+        Self::new(name.stream)
     }
 }
 
+impl TopicRevision {
+    const MAX_BYTES: usize = 96;
+
+    /// The stream named `stream`: lowercase letters, digits and `_`.
+    pub fn new(stream: impl Into<String>) -> Result<Self, String> {
+        let stream = stream.into();
+        if stream.is_empty()
+            || stream.len() > Self::MAX_BYTES
+            || !stream
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(format!("{stream:?} is not a stream name"));
+        }
+        Ok(Self { stream })
+    }
+    pub fn stream(&self) -> &str {
+        &self.stream
+    }
+}
+
+/// One recorded stream of a dataset: a row of its `topics` table.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DatasetTopic {
     name: String,
-    schemas: Vec<String>,
-    /// How the producer recorded the topic's messages: `protobuf` for an
-    /// MCAP channel, `mp4` for a LeRobot camera, `parquet` for a LeRobot
-    /// feature.
-    #[serde(default)]
-    encodings: Vec<String>,
+    revision: TopicRevision,
+    schema: Option<String>,
+    /// How its messages were recorded: `protobuf` or `json` for an MCAP
+    /// channel, `parquet` for a LeRobot feature, `h264` for a LeRobot camera.
+    encoding: String,
     members: u64,
-    samples: Option<u64>,
-    revision: Option<super::TopicRevision>,
+    samples: u64,
 }
 impl DatasetTopic {
-    pub fn new(name: String, schemas: Vec<String>) -> Self {
+    pub fn new(name: String, revision: TopicRevision, encoding: String) -> Self {
         Self {
             name,
-            schemas,
-            encodings: Vec::new(),
+            revision,
+            schema: None,
+            encoding,
             members: 0,
-            samples: None,
-            revision: None,
+            samples: 0,
         }
     }
-    pub fn with_coverage(mut self, members: u64, samples: Option<u64>) -> Self {
+    /// The native schema its messages were recorded with.
+    pub fn with_schema(mut self, schema: Option<String>) -> Self {
+        self.schema = schema;
+        self
+    }
+    /// How many episodes hold its messages, and how many messages.
+    pub fn with_coverage(mut self, members: u64, samples: u64) -> Self {
         self.members = members;
         self.samples = samples;
         self
     }
-    pub fn with_revision(mut self, revision: super::TopicRevision) -> Self {
-        self.revision = Some(revision);
-        self
-    }
-    /// The message encodings its producer recorded.
-    pub fn with_encodings(mut self, encodings: Vec<String>) -> Self {
-        self.encodings = encodings;
-        self
-    }
-    pub fn revision(&self) -> Option<&super::TopicRevision> {
-        self.revision.as_ref()
-    }
     pub fn name(&self) -> &str {
         &self.name
     }
-    /// The native schema names its messages were recorded with; a LeRobot
+    pub fn revision(&self) -> &TopicRevision {
+        &self.revision
+    }
+    /// The native schema name its messages were recorded with; a LeRobot
     /// feature has none.
-    pub fn schemas(&self) -> &[String] {
-        &self.schemas
+    pub fn schema(&self) -> Option<&str> {
+        self.schema.as_deref()
+    }
+    pub fn encoding(&self) -> &str {
+        &self.encoding
     }
     /// Whether the stream carries camera video rather than data messages:
-    /// recorded as `foxglove.CompressedVideo`, or a LeRobot video feature,
-    /// which Spiral keeps as the same H.264 packets.
+    /// recorded as `foxglove.CompressedVideo`, or a LeRobot camera, which
+    /// Studio keeps as the same H.264 access units.
     pub fn is_video(&self) -> bool {
-        self.schemas
-            .iter()
-            .any(|schema| schema == "foxglove.CompressedVideo")
-            || self.encodings.iter().any(|encoding| encoding == "mp4")
+        self.schema() == Some("foxglove.CompressedVideo") || self.encoding == "h264"
     }
     /// Whether it is the stream `schema` names on its topic: the one of that
-    /// schema, or, with no schema, the topic's only recording.
+    /// schema, or, with no schema, the topic's stream without one.
     pub fn is_recorded_as(&self, topic: &str, schema: Option<&str>) -> bool {
-        self.name == topic
-            && match schema {
-                Some(schema) => self.schemas.iter().any(|recorded| recorded == schema),
-                None => self.schemas.is_empty(),
-            }
+        self.name == topic && self.schema() == schema
     }
     pub fn members(&self) -> u64 {
         self.members
     }
-    pub fn samples(&self) -> Option<u64> {
+    pub fn samples(&self) -> u64 {
         self.samples
     }
 }
 
+/// A dataset at one version and every stream it records.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DatasetInspection {
     dataset: DatasetSummary,
-    producer: DatasetProducer,
-    members: Option<u64>,
+    members: u64,
     topics: Vec<DatasetTopic>,
 }
 impl DatasetInspection {
-    pub fn new(
-        dataset: DatasetSummary,
-        producer: DatasetProducer,
-        members: Option<u64>,
-        topics: Vec<DatasetTopic>,
-    ) -> Self {
+    pub fn new(dataset: DatasetSummary, members: u64, topics: Vec<DatasetTopic>) -> Self {
         Self {
             dataset,
-            producer,
             members,
             topics,
         }
@@ -256,104 +380,15 @@ impl DatasetInspection {
     pub fn dataset(&self) -> &DatasetSummary {
         &self.dataset
     }
-    /// Which producer made its members.
-    pub fn producer(&self) -> DatasetProducer {
-        self.producer
+    pub fn format(&self) -> DatasetFormat {
+        self.dataset.format()
     }
-    pub fn members(&self) -> Option<u64> {
+    /// How many episodes it holds.
+    pub fn members(&self) -> u64 {
         self.members
     }
     pub fn topics(&self) -> &[DatasetTopic] {
         &self.topics
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn dataset_paths_validate_names_and_preview_support() {
-        let selection =
-            DatasetSelection::new(vec!["a.b".into(), "owner's \"data\"".into()]).unwrap();
-        assert!(!selection.can_preview());
-        assert!(DatasetSelection::new(vec![]).is_err());
-        assert!(DatasetSelection::new(vec!["\n".into()]).is_err());
-    }
-
-    #[test]
-    fn a_dataset_is_called_by_its_own_name() {
-        let named = |name: &str| {
-            DatasetSelection::new(vec![name.into()])
-                .unwrap()
-                .display_name()
-        };
-        assert_eq!(named("dataset_abc130k_sample"), "abc130k_sample");
-        assert_eq!(named("recordings"), "recordings");
-        assert_eq!(named("dataset_"), "dataset_");
-    }
-
-    #[test]
-    fn a_producer_is_named_by_its_spiral_id() {
-        for producer in [DatasetProducer::Mcap, DatasetProducer::LeRobot] {
-            assert_eq!(DatasetProducer::from_id(producer.id()), Ok(producer));
-            assert_eq!(
-                serde_json::to_value(producer).unwrap(),
-                serde_json::json!(producer.id())
-            );
-        }
-        assert!(
-            DatasetProducer::from_id("spql.parquet.dataset")
-                .unwrap_err()
-                .contains("spql.parquet.dataset")
-        );
-    }
-
-    #[test]
-    fn a_camera_is_compressed_video_or_a_lerobot_video_feature() {
-        let mcap = DatasetTopic::new("/top".into(), vec!["foxglove.CompressedVideo".into()]);
-        assert!(mcap.is_video());
-        let feature = |encoding: &str| {
-            DatasetTopic::new("observation.images.up".into(), vec![])
-                .with_encodings(vec![encoding.into()])
-        };
-        assert!(feature("mp4").is_video());
-        assert!(!feature("parquet").is_video());
-        // A stream is named by its schema, or by its topic alone when it has
-        // none.
-        assert!(mcap.is_recorded_as("/top", Some("foxglove.CompressedVideo")));
-        assert!(!mcap.is_recorded_as("/top", None));
-        assert!(feature("parquet").is_recorded_as("observation.images.up", None));
-        assert!(!feature("parquet").is_recorded_as("observation.images.up", Some("x")));
-    }
-}
-
-/// A real resource at its catalog path; parentage comes from Spiral's namespace.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ProjectResource {
-    selection: DatasetSelection,
-    kind: String,
-    identity: (String, String),
-}
-impl ProjectResource {
-    pub fn new(selection: DatasetSelection, kind: String, identity: (String, String)) -> Self {
-        Self {
-            selection,
-            kind,
-            identity,
-        }
-    }
-    pub fn selection(&self) -> &DatasetSelection {
-        &self.selection
-    }
-    pub fn kind(&self) -> &str {
-        &self.kind
-    }
-    pub fn resource_id(&self) -> &str {
-        &self.identity.0
-    }
-    pub fn dataset(&self) -> Option<DatasetSummary> {
-        (self.kind == "dataset")
-            .then(|| DatasetSummary::new(self.selection.clone(), self.identity.clone()))
     }
 }
 
@@ -397,5 +432,90 @@ impl VideoPacket {
             data,
             keyframe,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_dataset_names_every_table_under_its_namespace() {
+        let dataset = DatasetSelection::new("pick-place").unwrap();
+        assert_eq!(dataset.label(), "datasets.pick-place");
+        assert_eq!(
+            dataset.episodes().to_string(),
+            "\"datasets\".\"pick-place\".\"episodes\""
+        );
+        assert_eq!(dataset.answers().target(), "datasets.pick-place.answers");
+        let stream = TopicRevision::new("studio_joints_leader_3fa2c1d0").unwrap();
+        assert_eq!(
+            dataset.messages(&stream).to_string(),
+            "\"datasets\".\"pick-place\".\"messages\".\"studio_joints_leader_3fa2c1d0\""
+        );
+        assert!(dataset.scratch("answers").is_err());
+        assert!(dataset.scratch("answers_staging_x").is_ok());
+    }
+
+    #[test]
+    fn a_dataset_name_cannot_reach_outside_its_namespace() {
+        for name in ["", "a.b", "a\"b", "a b", &"x".repeat(97)] {
+            assert!(DatasetSelection::new(name).is_err(), "{name:?}");
+        }
+        let parsed: Result<DatasetSelection, _> = serde_json::from_str(r#"{"id":"a.b"}"#);
+        assert!(parsed.is_err());
+        assert!(TopicRevision::new("Upper").is_err());
+        assert!(TopicRevision::new("a.b").is_err());
+    }
+
+    #[test]
+    fn a_catalog_path_belongs_to_the_dataset_it_names() {
+        let path = |parts: &[&str]| {
+            parts
+                .iter()
+                .map(|part| (*part).to_owned())
+                .collect::<Vec<_>>()
+        };
+        let episodes = path(&["datasets", "default", "episodes"]);
+        let (dataset, rest) = DatasetSelection::of_catalog_path(&episodes).unwrap();
+        assert_eq!(dataset.id(), "default");
+        assert_eq!(rest, ["episodes"]);
+        assert!(DatasetSelection::of_catalog_path(&path(&["datasets", "default"])).is_none());
+        assert!(DatasetSelection::of_catalog_path(&path(&["dataset_default"])).is_none());
+    }
+
+    #[test]
+    fn a_format_and_a_selection_travel_as_plain_json() {
+        assert_eq!(
+            serde_json::to_value(DatasetFormat::LeRobot).unwrap(),
+            serde_json::json!("lerobot")
+        );
+        assert_eq!(
+            serde_json::to_value(DatasetSelection::new("default").unwrap()).unwrap(),
+            serde_json::json!({"id": "default"})
+        );
+    }
+
+    #[test]
+    fn a_camera_is_compressed_video_or_an_h264_stream() {
+        let stream = TopicRevision::new("top_00000000").unwrap();
+        let mcap = DatasetTopic::new("/top".into(), stream.clone(), "protobuf".into())
+            .with_schema(Some("foxglove.CompressedVideo".into()));
+        assert!(mcap.is_video());
+        let feature = |encoding: &str| {
+            DatasetTopic::new(
+                "observation.images.up".into(),
+                stream.clone(),
+                encoding.into(),
+            )
+        };
+        assert!(feature("h264").is_video());
+        assert!(!feature("parquet").is_video());
+        // A stream is named by its schema, or by its topic alone when it has
+        // none.
+        assert!(mcap.is_recorded_as("/top", Some("foxglove.CompressedVideo")));
+        assert!(!mcap.is_recorded_as("/top", None));
+        assert!(feature("parquet").is_recorded_as("observation.images.up", None));
+        assert!(!feature("parquet").is_recorded_as("observation.images.up", Some("x")));
     }
 }

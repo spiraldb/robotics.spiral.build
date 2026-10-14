@@ -24,7 +24,10 @@ use spiral_robotics_common::curation::{
     AnswerColumn, AnswerSource, AnswerTable, ColumnFill, EpisodeFailure, FillEpisodes, FillRequest,
     FillState, FillStatus, FillStep, ViewName,
 };
-use spiral_robotics_common::datasets::{CameraVideo, EpisodeId, EpisodeSelection};
+use spiral_robotics_common::datasets::{
+    CameraVideo, DatasetInspection, DatasetSelection, DatasetStreams, EpisodeId, EpisodeSelection,
+    TopicRevision,
+};
 use spiral_robotics_common::relations::EpisodeQueryRequest;
 use spiral_robotics_common::sql::{ReadOnlyQuery, ReadOnlyQueryMode};
 use spiral_robotics_storage::answers::{
@@ -33,7 +36,7 @@ use spiral_robotics_storage::answers::{
 use spiral_robotics_storage::{ProviderKeys, StorageManager};
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{OnceCell, Semaphore, mpsc};
 use tokio::time::Instant;
 
 /// How many episodes a statement column asks Spiral about at once.
@@ -79,11 +82,6 @@ impl FillRuns {
         if request.columns().is_empty() && request.views().is_empty() {
             return Err(invalid("A fill run needs a column or a view.".into()));
         }
-        // A run that only publishes stores nothing, whatever its dataset.
-        let answers = match request.columns() {
-            [] => None,
-            _ => Some(AnswerTable::of(request.dataset()).map_err(invalid)?),
-        };
         let mut progress = None;
         let mut tracking = None;
         for column in request.columns() {
@@ -117,9 +115,9 @@ impl FillRuns {
             run: FillRun::new(request),
             work: FillWork {
                 storage: self.storage.clone(),
-                answers,
                 progress,
                 tracking,
+                inspection: OnceCell::new(),
             },
         })
     }
@@ -185,13 +183,15 @@ pub(super) struct AdmittedFill {
     work: FillWork,
 }
 
-/// What a run works with: the project's storage, the answers table it
-/// writes when it fills a column, and each Modal service when one needs it.
+/// What a run works with: the project's storage, each Modal service when one
+/// needs it, and the dataset's streams once a camera's video is asked about.
 struct FillWork {
     storage: Arc<StorageManager>,
-    answers: Option<AnswerTable>,
     progress: Option<ProgressService>,
     tracking: Option<ObjectTrackingService>,
+    /// The dataset as the run first read it for a camera: the streams the
+    /// browser's camera topics are found in.
+    inspection: OnceCell<DatasetInspection>,
 }
 
 /// One episode's answer, and why it failed when it did.
@@ -317,7 +317,8 @@ impl FillWork {
         camera: &str,
         question: VideoQuestion<'_>,
     ) -> Result<Answered, String> {
-        let video = CameraVideo::new(&selected.dataset().sql_name(), camera).packets();
+        let stream = self.camera_stream(selected.dataset(), camera).await?;
+        let video = CameraVideo::new(selected.dataset(), &stream).packets();
         let bound = EpisodeQueryRequest::new(selected, video, 1);
         let (schema, batches) = self.storage.queries().batches_for_episode(&bound).await?;
         let packets = arrow_select::concat::concat_batches(&schema, &batches)
@@ -337,6 +338,21 @@ impl FillWork {
                 failure: Some(reason),
             },
         })
+    }
+
+    /// The stream `dataset` records the camera topic `camera`'s video in,
+    /// found among the dataset's streams, which a run reads once.
+    async fn camera_stream(
+        &self,
+        dataset: &DatasetSelection,
+        camera: &str,
+    ) -> Result<TopicRevision, String> {
+        let inspection = self
+            .inspection
+            .get_or_try_init(|| self.storage.inspect_dataset(dataset.clone()))
+            .await?;
+        let stream = DatasetStreams::new(inspection.topics()).camera(camera)?;
+        Ok(stream.revision().clone())
     }
 }
 
@@ -411,11 +427,9 @@ impl FillRun {
             }
             FillEpisodes::Listed(episodes) => episodes.clone(),
         };
-        let table = work
-            .answers
-            .clone()
-            .ok_or("This dataset keeps no model answers.")?;
-        let answers = work.storage.dataset_answers(table);
+        let answers = work
+            .storage
+            .dataset_answers(AnswerTable::of(self.request.dataset()));
         let mut skipped = answers.filled(column.column()).await?;
         let needed = listed
             .into_iter()

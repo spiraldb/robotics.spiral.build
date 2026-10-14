@@ -379,7 +379,6 @@ impl<'a> ProjectQueries<'a> {
     fn bound(request: &EpisodeQueryRequest) -> Result<SqlStatement, String> {
         SpiralSql::ensure_read_only(request.statement())?;
         Ok(crate::datasets::EpisodeTopicQuery::for_episode(
-            request.episode().dataset(),
             request.episode().episode_id(),
             request.statement().trim().to_owned(),
         )?
@@ -389,7 +388,6 @@ impl<'a> ProjectQueries<'a> {
     fn bound_listed(request: &EpisodesQueryRequest) -> Result<SqlStatement, String> {
         SpiralSql::ensure_read_only(request.statement())?;
         Ok(crate::datasets::EpisodeTopicQuery::for_episodes(
-            request.dataset(),
             request.episodes(),
             request.statement().trim().to_owned(),
         )?

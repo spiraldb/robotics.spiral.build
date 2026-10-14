@@ -7,11 +7,12 @@ use crate::activities::curation::document::{
 use crate::activities::curation::score_progress::ProgressScorer;
 use crate::activities::episode::EpisodeTask;
 use spiral_robotics_common::curation::{AnswerSource, FillEpisodes};
+use spiral_robotics_common::datasets::{DatasetTopic, TopicRevision};
 use spiral_robotics_common::sql::{ReadOnlyQuery, ReadOnlyQueryMode};
 
 fn graph() -> CurationGraph {
     CurationGraph::new(Some(
-        crate::activities::episode::EpisodeListing::mcap_fixture("dataset_abc130k"),
+        crate::activities::episode::EpisodeListing::mcap_fixture("abc130k"),
     ))
 }
 
@@ -107,7 +108,32 @@ fn column(graph: &CurationGraph, node: &str) -> String {
         .to_string()
 }
 
-const ANSWERS: &str = "\"dataset_answers_abc130k\"";
+const ANSWERS: &str = "\"datasets\".\"abc130k\".\"answers\"";
+
+/// The streams the fixture dataset records: its top camera and the
+/// operator's instruction.
+fn recorded() -> Vec<DatasetTopic> {
+    let stream = |topic: &str, stream: &str, schema: &str| {
+        DatasetTopic::new(
+            topic.into(),
+            TopicRevision::new(stream).unwrap(),
+            "protobuf".into(),
+        )
+        .with_schema(Some(schema.into()))
+    };
+    vec![
+        stream(
+            "/top-camera",
+            "top_camera_0a1b2c3d",
+            "foxglove.CompressedVideo",
+        ),
+        stream(
+            "/instruction",
+            "instruction_4e5f6071",
+            "studio.recording.Instruction",
+        ),
+    ]
+}
 
 #[test]
 fn a_select_on_duration_keeps_whole_episodes_and_publishes_the_dataset_table() {
@@ -121,13 +147,18 @@ fn a_select_on_duration_keeps_whole_episodes_and_publishes_the_dataset_table() {
     assert_eq!(
         published(&graph, &long),
         "WITH
-  dataset AS (SELECT episode_id, start_ns AS origin_ns, [STRUCT_PACK(start_ns := start_ns, end_ns := end_ns)] AS kept, duration_seconds, messages, channels, size_megabytes FROM (SELECT id AS episode_id, CAST(message_start_time AS BIGINT) AS start_ns, CAST(message_start_time + duration_ns AS BIGINT) AS end_ns, CAST(duration_ns AS DOUBLE) / 1e9 AS duration_seconds, message_count AS messages, channel_count AS channels, CAST(source_bytes AS DOUBLE) / 1e6 AS size_megabytes FROM (SELECT id, source.uri AS source_uri, source.size AS source_bytes, message_count, message_start_time, duration_ns, channel_count FROM spql.mcap.episodes('dataset_abc130k')) listed) spans),
+  dataset AS (SELECT episode_id, start_ns AS origin_ns, [STRUCT_PACK(start_ns := start_ns, end_ns := end_ns)] AS kept, duration_seconds, messages, channels, size_megabytes FROM (SELECT id AS episode_id, CAST(message_start_time AS BIGINT) AS start_ns, CAST(message_start_time + duration_ns AS BIGINT) AS end_ns, CAST(duration_ns AS DOUBLE) / 1e9 AS duration_seconds, message_count AS messages, channel_count AS channels, CAST(source_bytes AS DOUBLE) / 1e6 AS size_megabytes FROM (SELECT id, source_uri, source_bytes, message_count, message_start_time, duration_ns, channel_count FROM \"datasets\".\"abc130k\".\"episodes\") listed) spans),
   select_1_numbers AS (SELECT r.episode_id, r.kept, d.duration_seconds AS number_0 FROM dataset r JOIN dataset d ON d.episode_id = r.episode_id),
   select_1 AS (SELECT episode_id, kept FROM select_1_numbers WHERE number_0 >= CAST(10 AS DOUBLE))
 SELECT r.episode_id, r.kept, d.duration_seconds, d.messages, d.channels, d.size_megabytes FROM select_1 r JOIN dataset d ON d.episode_id = r.episode_id"
     );
     let path = CurationPath::to(&graph, &long).unwrap();
-    assert!(path.fills().unwrap().is_empty(), "nothing to store");
+    assert!(
+        path.fills(DatasetStreams::new(&recorded()))
+            .unwrap()
+            .is_empty(),
+        "nothing to store"
+    );
     let names = path
         .table()
         .unwrap()
@@ -179,7 +210,10 @@ fn the_fastest_quarter_by_duration_per_bottle_ranks_every_reaching_episode() {
     ));
     // The tracks are filled for every episode, at the node's rate, on the
     // Modal service; the Select asks nothing.
-    let fills = CurationPath::to(&graph, &fastest).unwrap().fills().unwrap();
+    let fills = CurationPath::to(&graph, &fastest)
+        .unwrap()
+        .fills(DatasetStreams::new(&recorded()))
+        .unwrap();
     assert_eq!(fills.len(), 1);
     assert_eq!(
         fills[0].source(),
@@ -202,7 +236,7 @@ fn the_fastest_quarter_by_duration_per_bottle_ranks_every_reaching_episode() {
     // episodes held, never the boxes.
     let counting = preview(&graph, &track);
     assert!(counting.contains(&format!(
-        "episodes AS (SELECT e.id AS episode_id, CAST(e.message_start_time AS BIGINT) AS origin_ns, a.{tracks}.value AS {tracks} FROM spql.mcap.episodes('dataset_abc130k') e JOIN {ANSWERS} a ON a.episode_id = e.id WHERE e.id IN ($1, $2))"
+        "episodes AS (SELECT e.id AS episode_id, CAST(e.message_start_time AS BIGINT) AS origin_ns, a.{tracks}.value AS {tracks} FROM \"datasets\".\"abc130k\".\"episodes\" e JOIN {ANSWERS} a ON a.episode_id = e.id WHERE e.id IN ($1, $2))"
     )));
     assert!(counting.ends_with(
         "\nSELECT episode_id, timestamp_ns, spql.list.len(objects) AS value FROM track_objects_1_entries"
@@ -257,9 +291,12 @@ fn a_progress_rate_narrows_kept_to_the_stretches_progressing_fast_enough() {
     assert!(scoring.ends_with(
         "\nSELECT episode_id, timestamp_ns, progress_rate AS value FROM score_progress_1_entries"
     ));
-    assert!(!scoring.contains("spql.ai.") && !scoring.contains("read_topic"));
+    assert!(!scoring.contains("spql.ai.") && !scoring.contains("\"messages\""));
     admitted(&published, &scoring);
-    let fills = CurationPath::to(&graph, &moving).unwrap().fills().unwrap();
+    let fills = CurationPath::to(&graph, &moving)
+        .unwrap()
+        .fills(DatasetStreams::new(&recorded()))
+        .unwrap();
     assert_eq!(
         fills[0].source(),
         &AnswerSource::ProgressService {
@@ -318,18 +355,23 @@ fn a_breakdown_reads_each_episode_whole_and_lists_its_subtasks_in_log_time() {
     }
     // A model node keeps nothing, so its view is what reaches it.
     assert!(published.contains(" FROM select_1 r JOIN dataset d"));
-    assert!(!published.contains("spql.ai.") && !published.contains("read_topic"));
+    assert!(!published.contains("spql.ai.") && !published.contains("\"messages\""));
     // Its fill asks the model about the episode bound as `$1` whole, from
     // the chosen camera, with its first instruction as the task, of the
     // episodes the Select keeps.
     let fills = CurationPath::to(&graph, &annotate)
         .unwrap()
-        .fills()
+        .fills(DatasetStreams::new(&recorded()))
         .unwrap();
     let AnswerSource::Statement { statement } = fills[0].source() else {
         panic!("Break down is filled by a statement")
     };
-    assert!(statement.contains("spql.mcap.read_topic('dataset_abc130k', '/top-camera')"));
+    assert!(statement.contains(
+        "FROM \"datasets\".\"abc130k\".\"messages\".\"top_camera_0a1b2c3d\" r WHERE r.id = $1"
+    ));
+    assert!(statement.contains(
+        "FROM \"datasets\".\"abc130k\".\"messages\".\"instruction_4e5f6071\" r WHERE r.id = $1"
+    ));
     assert!(statement.contains(
         "spql.ai.breakdown_task(camera_video_1.source, sample_interval => 0.5, model => 'google/gemini-3.8-flash', task => instruction_1.task)"
     ));
@@ -392,7 +434,10 @@ fn a_search_lists_every_subtask_with_its_similarity_and_a_select_keeps_the_close
     ));
     // Its fill judges each subtask the Break down stored for the episode
     // bound as `$1`, collected in their order.
-    let fills = CurationPath::to(&graph, &close).unwrap().fills().unwrap();
+    let fills = CurationPath::to(&graph, &close)
+        .unwrap()
+        .fills(DatasetStreams::new(&recorded()))
+        .unwrap();
     let AnswerSource::Statement { statement } = fills[1].source() else {
         panic!("a judgment is filled by a statement")
     };
@@ -441,7 +486,10 @@ fn a_grouping_writes_a_column_per_category_and_a_select_keeps_the_chosen_ones() 
     }
     assert!(!published.contains("spql.ai."));
     // Its fill classifies each subtask the Break down stored.
-    let fills = CurationPath::to(&graph, &folds).unwrap().fills().unwrap();
+    let fills = CurationPath::to(&graph, &folds)
+        .unwrap()
+        .fills(DatasetStreams::new(&recorded()))
+        .unwrap();
     let AnswerSource::Statement { statement } = fills[1].source() else {
         panic!("a judgment is filled by a statement")
     };
@@ -500,32 +548,6 @@ fn one_call_shares_its_column_across_curations_and_another_call_does_not() {
     }
     assert_ne!(column(&one, &annotated[0]), column(&other, &annotated[1]));
     assert_ne!(column(&one, &searches[0]), column(&other, &searches[1]));
-}
-
-#[test]
-fn only_a_dataset_studio_imported_keeps_the_answers_a_model_node_publishes() {
-    let mut graph = CurationGraph::new(Some(
-        crate::activities::episode::EpisodeListing::mcap_fixture("recordings"),
-    ));
-    let long = selecting(
-        &mut graph,
-        DATASET_NODE_ID,
-        vec![lasting(Comparison::AtLeast, 10.0)],
-    );
-    let score = child(
-        &mut graph,
-        &long,
-        CurationNodeKind::ScoreProgress(ProgressScoring::default()),
-    );
-    assert!(CurationPath::to(&graph, &long).unwrap().statement().is_ok());
-    assert_eq!(
-        CurationPath::to(&graph, &score)
-            .unwrap()
-            .statement()
-            .unwrap_err()
-            .message(),
-        "recordings keeps no model answers; only datasets Studio imported do."
-    );
 }
 
 #[test]
@@ -738,7 +760,7 @@ fn no_published_path_asks_a_model_and_each_fill_reads_only_what_is_filled_before
         let statement = published(graph, node);
         assert!(!statement.contains("spql.ai."), "{statement}");
         let path = CurationPath::to(graph, node).unwrap();
-        let fills = path.fills().unwrap();
+        let fills = path.fills(DatasetStreams::new(&recorded())).unwrap();
         assert!(statement.matches(ANSWERS).count() <= 1, "{statement}");
         let compiled = CompiledEntries::of(&statement);
         // The reach chain: every Select reads the reach above it once.

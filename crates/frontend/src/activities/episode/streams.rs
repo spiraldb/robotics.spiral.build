@@ -1,9 +1,9 @@
 //! The recorded streams of one episode: what each one is and how to read it.
 //!
-//! A stream is one topic/schema revision inside one member: an MCAP file's
-//! channel, or a LeRobot episode's feature. Its kind is decided from what its
-//! producer recorded — a `foxglove.CompressedVideo` schema, or a LeRobot
-//! video feature — never from topic or field names.
+//! A stream is one topic in one schema inside one episode: an MCAP file's
+//! channel, or a LeRobot episode's feature. Its kind is decided from what was
+//! recorded — a `foxglove.CompressedVideo` schema, or a LeRobot camera's
+//! `h264` — never from topic or field names.
 use crate::activities::data::DatasetClient;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{
@@ -27,17 +27,14 @@ pub(in crate::activities) struct RecordedStream {
 }
 
 impl RecordedStream {
-    fn new(topic: DatasetTopic, episode: &EpisodeSelection, duplicated: bool) -> Option<Self> {
-        let revision = topic.revision()?.clone();
-        let key = format!("{}#{}", topic.name(), revision.variant());
-        let label = if duplicated {
-            format!(
-                "{} · {}",
-                topic.name(),
-                revision.variant().chars().take(8).collect::<String>()
-            )
-        } else {
-            topic.name().to_owned()
+    fn new(topic: DatasetTopic, episode: &EpisodeSelection, duplicated: bool) -> Self {
+        let revision = topic.revision().clone();
+        let key = revision.stream().to_owned();
+        // A topic recorded as two streams is told apart by the hash its
+        // stream's name ends with.
+        let label = match key.rsplit_once('_') {
+            Some((_, hash)) if duplicated => format!("{} · {hash}", topic.name()),
+            _ => topic.name().to_owned(),
         };
         let read = MessageRead::schema(
             EpisodeTopicRequest::new(
@@ -47,14 +44,15 @@ impl RecordedStream {
             ),
             revision,
         );
-        Some(Self {
+        Self {
             key,
             label,
             topic,
             read,
-        })
+        }
     }
-    /// Stable within the episode; distinct schema variants of one topic differ.
+    /// Its stream: stable within the dataset, and distinct for each schema
+    /// of one topic.
     pub(in crate::activities) fn key(&self) -> &str {
         &self.key
     }
@@ -71,10 +69,12 @@ impl RecordedStream {
             StreamKind::Data
         }
     }
-    pub(in crate::activities) fn schemas(&self) -> &[String] {
-        self.topic.schemas()
+    /// The native schema its messages were recorded with; a LeRobot
+    /// feature has none.
+    pub(in crate::activities) fn schema(&self) -> Option<&str> {
+        self.topic.schema()
     }
-    pub(in crate::activities) fn samples(&self) -> Option<u64> {
+    pub(in crate::activities) fn samples(&self) -> u64 {
         self.topic.samples()
     }
     pub(in crate::activities) fn read(&self) -> &MessageRead {
@@ -82,7 +82,7 @@ impl RecordedStream {
     }
 }
 
-/// Every readable stream of one episode, in topic order.
+/// Every stream of one episode, in topic order.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub(in crate::activities) struct StreamCatalog {
     streams: Vec<RecordedStream>,
@@ -119,11 +119,9 @@ impl StreamCatalog {
     }
     fn new(mut topics: Vec<DatasetTopic>, episode: &EpisodeSelection) -> Self {
         topics.sort_by(|left, right| {
-            left.name().cmp(right.name()).then_with(|| {
-                left.revision()
-                    .map(|revision| revision.variant())
-                    .cmp(&right.revision().map(|revision| revision.variant()))
-            })
+            left.name()
+                .cmp(right.name())
+                .then_with(|| left.revision().cmp(right.revision()))
         });
         let mut names = BTreeMap::<String, usize>::new();
         for topic in &topics {
@@ -131,14 +129,14 @@ impl StreamCatalog {
         }
         let streams = topics
             .into_iter()
-            .filter_map(|topic| {
+            .map(|topic| {
                 let duplicated = names.get(topic.name()).is_some_and(|count| *count > 1);
                 RecordedStream::new(topic, episode, duplicated)
             })
             .collect();
         Self { streams }
     }
-    /// Every readable stream the episode recorded.
+    /// Every stream the episode recorded.
     pub(in crate::activities) async fn load(episode: EpisodeSelection) -> Result<Self, String> {
         let topics = DatasetClient::current()
             .episode_topics(episode.clone())
@@ -230,7 +228,7 @@ impl StreamCatalog {
             .filter(|stream| stream.kind() == StreamKind::Data)
             .cloned()
             .collect::<Vec<_>>();
-        ranked.sort_by_key(|stream| std::cmp::Reverse(stream.samples().unwrap_or(0)));
+        ranked.sort_by_key(|stream| std::cmp::Reverse(stream.samples()));
         ranked
     }
     pub(in crate::activities) fn get(&self, key: &str) -> Option<&RecordedStream> {
@@ -289,9 +287,20 @@ mod tests {
     use super::*;
     use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId, TopicRevision};
 
+    /// A dataset's stream of `name` in `schema`, as its `topics` table
+    /// names it.
+    fn topic(name: &str, stream: &str, schema: &str) -> DatasetTopic {
+        DatasetTopic::new(
+            name.into(),
+            TopicRevision::new(stream).unwrap(),
+            "protobuf".into(),
+        )
+        .with_schema(Some(schema.into()))
+    }
+
     fn episode() -> EpisodeSelection {
         EpisodeSelection::new(
-            DatasetSelection::new(vec!["dataset_default".into()]).unwrap(),
+            DatasetSelection::new("default").unwrap(),
             EpisodeId::try_from("01a0989fb65870a7a5459902f9e3e090").unwrap(),
         )
     }
@@ -303,8 +312,11 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(index, name)| {
-                    DatasetTopic::new((*name).into(), vec!["foxglove.CompressedVideo".into()])
-                        .with_revision(TopicRevision::new(format!("{index:09}")))
+                    topic(
+                        name,
+                        &format!("camera_{index:08}"),
+                        "foxglove.CompressedVideo",
+                    )
                 })
                 .collect();
             let catalog = StreamCatalog::new(topics, &episode());
@@ -343,18 +355,10 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn data_streams_rank_busiest_first_with_ties_in_topic_order() {
         let topics = vec![
-            DatasetTopic::new("/a".into(), vec!["Sensor".into()])
-                .with_revision(TopicRevision::new("111111111".into()))
-                .with_coverage(1, Some(600)),
-            DatasetTopic::new("/b".into(), vec!["Sensor".into()])
-                .with_revision(TopicRevision::new("222222222".into()))
-                .with_coverage(1, Some(9_000)),
-            DatasetTopic::new("/c".into(), vec!["Sensor".into()])
-                .with_revision(TopicRevision::new("333333333".into()))
-                .with_coverage(1, Some(600)),
-            DatasetTopic::new("/cam".into(), vec!["foxglove.CompressedVideo".into()])
-                .with_revision(TopicRevision::new("444444444".into()))
-                .with_coverage(1, Some(90_000)),
+            topic("/a", "a_11111111", "Sensor").with_coverage(1, 600),
+            topic("/b", "b_22222222", "Sensor").with_coverage(1, 9_000),
+            topic("/c", "c_33333333", "Sensor").with_coverage(1, 600),
+            topic("/cam", "cam_44444444", "foxglove.CompressedVideo").with_coverage(1, 90_000),
         ];
         let ranked = StreamCatalog::new(topics, &episode())
             .data_by_traffic()
@@ -365,15 +369,11 @@ mod tests {
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn streams_are_keyed_by_revision_and_typed_by_schema_name() {
+    fn streams_are_keyed_by_stream_and_typed_by_schema_name() {
         let topics = vec![
-            DatasetTopic::new("/b".into(), vec!["Sensor".into()])
-                .with_revision(TopicRevision::new("222222222".into())),
-            DatasetTopic::new("/a".into(), vec!["foxglove.CompressedVideo".into()])
-                .with_revision(TopicRevision::new("111111111".into())),
-            DatasetTopic::new("/b".into(), vec!["Sensor2".into()])
-                .with_revision(TopicRevision::new("333333333".into())),
-            DatasetTopic::new("/unreadable".into(), vec![]),
+            topic("/b", "b_22222222", "Sensor"),
+            topic("/a", "a_11111111", "foxglove.CompressedVideo"),
+            topic("/b", "b_33333333", "Sensor2"),
         ];
         let catalog = StreamCatalog::new(topics, &episode());
         let labels = catalog
@@ -385,7 +385,7 @@ mod tests {
         assert_eq!(catalog.streams()[0].kind(), StreamKind::Video);
         assert_eq!(catalog.streams()[1].kind(), StreamKind::Data);
         assert_eq!(catalog.videos().count(), 1);
-        assert!(catalog.get("/b#333333333").is_some());
+        assert!(catalog.get("b_33333333").is_some());
     }
 }
 

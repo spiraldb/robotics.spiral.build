@@ -128,9 +128,8 @@ impl CurationManager {
         &self,
         request: FilledEpisodesRequest,
     ) -> Result<BTreeSet<EpisodeId>, OperationError> {
-        let table = AnswerTable::of(request.dataset()).map_err(OperationError::InvalidInput)?;
         self.storage
-            .dataset_answers(table)
+            .dataset_answers(AnswerTable::of(request.dataset()))
             .filled(request.column())
             .await
             .map_err(OperationError::External)

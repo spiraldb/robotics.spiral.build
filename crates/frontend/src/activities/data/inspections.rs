@@ -1,4 +1,4 @@
-//! Each dataset's inspection — its producer, its version and the topics it
+//! Each dataset's inspection — its format, its version and the streams it
 //! records — read once and shared by every surface that asks for it: the
 //! datasets ledger, the rail, the Overview, the thumbnail camera, an
 //! episode's robot. Inspecting a dataset costs Spiral a catalog round trip,
@@ -26,11 +26,11 @@ pub(crate) struct DatasetInspections {
 }
 
 /// The inspections asked for since the catalog was last invalidated, by
-/// dataset SQL name, each read or being read.
+/// dataset, each read or being read.
 #[derive(Default)]
 struct InspectionsRead {
     invalidations: u64,
-    inspections: HashMap<String, Inspecting>,
+    inspections: HashMap<DatasetSelection, Inspecting>,
 }
 
 impl DatasetInspections {
@@ -54,7 +54,7 @@ impl DatasetInspections {
             return None;
         }
         read.inspections
-            .get(&dataset.sql_name())?
+            .get(dataset)?
             .peek()?
             .as_ref()
             .ok()
@@ -72,7 +72,7 @@ impl DatasetInspections {
         F: Future<Output = Result<DatasetInspection, CommandError>> + 'static,
     {
         let invalidations = self.refresh.invalidations(QueryDomain::Catalog);
-        let key = dataset.sql_name();
+        let key = dataset.clone();
         let mut read = self.read.borrow_mut();
         if read.invalidations != invalidations {
             read.inspections.clear();
@@ -107,17 +107,20 @@ impl DatasetInspections {
 mod tests {
     use super::*;
     use spiral_robotics_common::command_failure::CommandFailureCode;
-    use spiral_robotics_common::datasets::{DatasetProducer, DatasetSummary};
+    use spiral_robotics_common::datasets::{DatasetFormat, DatasetSummary};
     use std::cell::Cell;
 
     fn dataset(name: &str) -> DatasetSelection {
-        DatasetSelection::new(vec![name.into()]).unwrap()
+        DatasetSelection::new(name).unwrap()
     }
     fn inspection(name: &str, version: &str) -> DatasetInspection {
         DatasetInspection::new(
-            DatasetSummary::new(dataset(name), ("resource".into(), version.into())),
-            DatasetProducer::Mcap,
-            Some(1),
+            DatasetSummary::new(
+                dataset(name),
+                DatasetFormat::Mcap,
+                ("resource".into(), version.into()),
+            ),
+            1,
             Vec::new(),
         )
     }
@@ -147,24 +150,21 @@ mod tests {
         let ask = |version: &'static str| {
             let reads = reads.clone();
             dom.in_runtime(|| {
-                inspections.inspect(&dataset("dataset_a"), move || {
+                inspections.inspect(&dataset("a"), move || {
                     reads.set(reads.get() + 1);
-                    async move { Ok(inspection("dataset_a", version)) }
+                    async move { Ok(inspection("a", version)) }
                 })
             })
         };
         let (first, second) = (ask("v1"), ask("v1"));
         assert_eq!(first.await, second.await);
         assert_eq!(reads.get(), 1);
-        let known = dom.in_runtime(|| inspections.known(&dataset("dataset_a")));
-        assert_eq!(known, Some(inspection("dataset_a", "v1")));
+        let known = dom.in_runtime(|| inspections.known(&dataset("a")));
+        assert_eq!(known, Some(inspection("a", "v1")));
 
         dom.in_runtime(|| refresh.invalidate(&[QueryDomain::Catalog]));
-        assert_eq!(
-            dom.in_runtime(|| inspections.known(&dataset("dataset_a"))),
-            None
-        );
-        assert_eq!(ask("v2").await, Ok(inspection("dataset_a", "v2")));
+        assert_eq!(dom.in_runtime(|| inspections.known(&dataset("a"))), None);
+        assert_eq!(ask("v2").await, Ok(inspection("a", "v2")));
         assert_eq!(reads.get(), 2);
     }
 
@@ -175,7 +175,7 @@ mod tests {
         dom.rebuild_in_place();
         let (inspections, _) = provided.handles();
         let failing = dom.in_runtime(|| {
-            inspections.inspect(&dataset("dataset_b"), || async {
+            inspections.inspect(&dataset("b"), || async {
                 Err(CommandError::new(
                     CommandFailureCode::Transport,
                     "unreachable",
@@ -184,10 +184,8 @@ mod tests {
         });
         assert!(failing.await.is_err());
         let retried = dom.in_runtime(|| {
-            inspections.inspect(&dataset("dataset_b"), || async {
-                Ok(inspection("dataset_b", "v1"))
-            })
+            inspections.inspect(&dataset("b"), || async { Ok(inspection("b", "v1")) })
         });
-        assert_eq!(retried.await, Ok(inspection("dataset_b", "v1")));
+        assert_eq!(retried.await, Ok(inspection("b", "v1")));
     }
 }

@@ -8,20 +8,27 @@ use crate::activities::curation::path::CurationPath;
 use crate::activities::curation::population::{EpisodeSample, PopulationReader};
 use crate::activities::episode::Episode;
 use spiral_robotics_common::curation::{AnswerColumn, AnswerSource, FillEpisodes};
-use spiral_robotics_common::datasets::EpisodeId;
+use spiral_robotics_common::datasets::{DatasetTopic, EpisodeId, TopicRevision};
 
 /// Two episodes of 20 and 12 seconds, whose first messages are at one second
-/// of log time.
+/// of log time, of a dataset recording a top camera.
 fn sample() -> EpisodeSample {
+    let camera = DatasetTopic::new(
+        "/top-camera".into(),
+        TopicRevision::new("top_camera_0a1b2c3d").unwrap(),
+        "protobuf".into(),
+    )
+    .with_schema(Some("foxglove.CompressedVideo".into()));
     EpisodeSample::fixture(vec![
         Episode::fixture(&EpisodeId::fixture(1), 20_000_000_000),
         Episode::fixture(&EpisodeId::fixture(2), 12_000_000_000),
     ])
+    .with_topics(vec![camera])
 }
 
 fn graph() -> CurationGraph {
     CurationGraph::new(Some(
-        crate::activities::episode::EpisodeListing::mcap_fixture("dataset_folding"),
+        crate::activities::episode::EpisodeListing::mcap_fixture("folding"),
     ))
 }
 

@@ -231,6 +231,8 @@
                 "OBJECT_TRACKING_URL=https://spiral-dev--spiral-robotics-object-tracking-objecttracking-web.modal.run"
                 "TRAINING_SERVICE_URL=https://spiral-dev--spiral-robotics-training-control.modal.run"
                 "SPIRALDB_ADBC_DRIVER=${spiralAdbc}/lib/${adbcLibrary}"
+                # LeRobot imports encode every camera again as H.264.
+                "SPIRAL_ROBOTICS_FFMPEG=${lib.getExe' pkgs.ffmpeg_9-headless "ffmpeg"}"
                 "DIOXUS_PUBLIC_PATH=${studioWeb}"
               ];
               Volumes.${studioHome} = { };
@@ -282,6 +284,11 @@
           # graphics adapter on a Linux runner without a GPU.
           ciShell =
             sharedShell
+            // {
+              # The storage tests encode camera video with FFmpeg, as LeRobot
+              # imports do.
+              packages = sharedShell.packages ++ [ pkgs.ffmpeg_9-headless ];
+            }
             // lib.optionalAttrs hostPlatform.isLinux {
               LD_LIBRARY_PATH = lib.makeLibraryPath [ pkgs.vulkan-loader ];
               VK_ICD_FILENAMES = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.${hostPlatform.parsed.cpu.name}.json";

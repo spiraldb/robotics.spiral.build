@@ -29,7 +29,8 @@ pub mod bundle {
 }
 
 pub mod ingestion {
-    //! Hugging Face discovery and Spiral dataset materialization.
+    //! Hugging Face discovery; [`crate::HuggingFaceImport`] imports what it
+    //! finds.
 
     pub use crate::transfer::HuggingFaceDatasetDiscovery;
 }
@@ -52,4 +53,5 @@ pub use sessions::{SessionStore, StoredSession};
 pub use settings::{ServiceEndpoint, SpiralConnectionSettings};
 pub use spiral_access::{SpiralAccess, SpiralAccessPublisher, SpiralConnection};
 pub use staged_episodes::{EpisodeName, EpisodeReceipt, StagedEpisodeError, StagedEpisodes};
+pub use transfer::HuggingFaceImport;
 pub use workspaces::WorkspaceStore;

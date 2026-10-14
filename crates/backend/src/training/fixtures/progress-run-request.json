@@ -5,9 +5,7 @@
     "run_name": "fixture-progress",
     "source": {
       "dataset": {
-        "path": [
-          "dataset_fixture"
-        ]
+        "id": "fixture"
       },
       "view": "fixture_experts"
     },

@@ -1,7 +1,7 @@
 //! What each episode was recorded doing, where its dataset records it: the
 //! one source of an episode's task, which Break down tells its model.
 use super::{EpisodeListing, StreamCatalog};
-use spiral_robotics_common::datasets::DatasetProducer;
+use spiral_robotics_common::datasets::DatasetFormat;
 
 /// The topic Studio's recordings carry the operator's own words on.
 const INSTRUCTION_TOPIC: &str = "/instruction";
@@ -24,9 +24,9 @@ impl EpisodeTask {
         listing: &EpisodeListing,
         streams: &StreamCatalog,
     ) -> Option<Self> {
-        match listing.producer() {
-            DatasetProducer::LeRobot => Some(Self::Listed),
-            DatasetProducer::Mcap => streams
+        match listing.format() {
+            DatasetFormat::LeRobot => Some(Self::Listed),
+            DatasetFormat::Mcap => streams
                 .streams()
                 .iter()
                 .any(|stream| stream.name() == INSTRUCTION_TOPIC)
@@ -50,8 +50,8 @@ mod tests {
     #[test]
     fn a_lerobot_dataset_lists_its_task_and_a_recording_may_speak_it() {
         let lerobot = EpisodeListing::new(
-            DatasetSelection::new(vec!["so101".into()]).unwrap(),
-            DatasetProducer::LeRobot,
+            DatasetSelection::new("so101").unwrap(),
+            DatasetFormat::LeRobot,
         );
         let silent = StreamCatalog::default();
         assert_eq!(

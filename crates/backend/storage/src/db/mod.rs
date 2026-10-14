@@ -21,7 +21,6 @@ pub(crate) use project_store::ProjectConnection;
 pub use project_store::ProjectStore;
 pub(crate) use project_store::{ProjectDatabasePersistence, StorageClock};
 pub use schema::SCHEMA_VERSION;
-pub(crate) use schema::StorageSchema;
 pub(crate) use schema::Table;
 pub use sql::KeptInterval;
 pub(crate) use sql::ProjectQueries;
@@ -30,3 +29,7 @@ pub use adbc_database::AdbcDatabase;
 
 #[cfg(test)]
 mod contract_tests;
+#[cfg(test)]
+mod unquoted_memory;
+#[cfg(test)]
+pub(crate) use unquoted_memory::UnquotedMemory;

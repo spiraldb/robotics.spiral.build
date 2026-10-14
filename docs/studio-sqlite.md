@@ -105,9 +105,10 @@ Version **5** `.spiral-project` bundles are ZIP archives containing:
 - `manifest.json`: `{"format":"spiral-robotics-project","format_version":5,
   "schema_version":<Spiral schema>,"mcap_datasets":[…]}`; unknown fields are
   refused.
-- `dataset_source.arrows`: one Arrow IPC stream of every dataset's source
-  files (`dataset_name`, `recording`, and `payload`, the MCAP bytes); each
-  dataset restores into its own `dataset_files_<name>`.
+- `dataset_source.arrows`: one Arrow IPC stream of every MCAP dataset's
+  files (`dataset_name`, `recording`, and `payload`, the MCAP bytes, read
+  back whole from wherever each file's Blob points). LeRobot datasets are not
+  carried; import one again from Hugging Face.
 
 A relation absent from Spiral is exported as an empty stream with its canonical
 schema. Arrow is used only for data-plane payloads; Studio records have no Arrow
@@ -122,8 +123,14 @@ The archive and its total uncompressed contents are limited to 256 MiB; Arrow
 decoding has additional allocation bounds.
 
 Import validates the bundle and stages local replacements, including constraint
-checks, in a SQLite transaction before mutating Spiral. Spiral's data transaction
-commits first, then SQLite commits. A Spiral failure rolls back staged local
+checks, in a SQLite transaction before mutating Spiral. One Spiral transaction
+then drops every table of the project's MCAP datasets and writes each dataset
+the manifest names again from the bundle's files, decoding them as any MCAP
+import does ([datasets](datasets.md#writing)); a dataset without files is
+made empty, and every restored episode gets a new identity. The project's
+LeRobot datasets stay as they are, so a bundle naming a dataset the project
+holds as anything but an MCAP dataset is refused before anything changes.
+Spiral's data transaction commits first, then SQLite commits. A Spiral failure rolls back staged local
 state. If Spiral commits but the final SQLite commit fails, the error explicitly
 reports partial completion and instructs the operator to retry the same import.
 There is no distributed transaction across these two databases. Importing a

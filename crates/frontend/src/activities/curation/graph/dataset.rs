@@ -3,7 +3,6 @@
 //! over and watch one with the Data view's own player, so a curation starts
 //! from the recording rather than from a table.
 use dioxus::prelude::*;
-use spiral_robotics_common::datasets::DatasetSelection;
 use spiral_robotics_ui::{
     ActionPurpose, Button, ButtonVariant, EmptyState, Notice, NoticeTone, RefreshIcon, Remount,
     TextInput, TextInputKind,
@@ -26,7 +25,7 @@ use crate::components::icons::SpinnerIcon;
 use crate::format::ClockPresentation as _;
 
 /// The step every path starts with: every episode of the dataset as one row,
-/// with the facts its producer records for it, its first message as
+/// with the facts its format records for it, its first message as
 /// `origin_ns`, and `kept` of one range, from its first message to its last,
 /// through the episode listing `Episode` uses everywhere.
 pub(in crate::activities::curation) struct DatasetStep<'a>(&'a EpisodeListing);
@@ -82,30 +81,26 @@ pub(super) fn DatasetWorkspace(controller: CurationController) -> Element {
 fn DatasetChoice(controller: CurationController) -> Element {
     let catalog = DatasetCatalog::use_catalog();
     let mut problem = use_signal(|| None::<String>);
-    // The graph keeps the dataset with the producer that made it, which
-    // decides how its episodes are listed, so choosing one asks for it.
-    let choose = move |selection: DatasetSelection| {
-        spawn(async move {
-            let label = selection.display_name();
-            let chosen = EpisodeListing::read(&selection).await.and_then(|listing| {
-                controller.edit(|payload| {
-                    payload.set_dataset(Some(listing));
-                    Ok(())
-                })
-            });
-            problem.set(chosen.err());
-            // A graph that has never been named takes its dataset's name.
-            // Five saved curations all called "Untitled curation" are five
-            // nobody can tell apart in the list that offers them.
-            if problem.peek().is_none() && controller.name() == UNTITLED {
-                controller.set_name(label);
-            }
+    // The graph keeps the dataset with its format, which decides how its
+    // episodes are listed.
+    let choose = move |listing: EpisodeListing| {
+        let label = listing.dataset().display_name().to_owned();
+        let chosen = controller.edit(|payload| {
+            payload.set_dataset(Some(listing));
+            Ok(())
         });
+        problem.set(chosen.err());
+        // A graph that has never been named takes its dataset's name.
+        // Five saved curations all called "Untitled curation" are five
+        // nobody can tell apart in the list that offers them.
+        if problem.peek().is_none() && controller.name() == UNTITLED {
+            controller.set_name(label);
+        }
     };
     let datasets = catalog
         .datasets()
         .iter()
-        .map(|summary| summary.selection().clone())
+        .map(EpisodeListing::of)
         .collect::<Vec<_>>();
     rsx! {
         section { class: "data-glance curation-canvas-dataset-choice", "aria-label": "Choose a dataset",

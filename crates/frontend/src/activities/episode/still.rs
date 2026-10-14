@@ -2,9 +2,9 @@
 //! leads with, in Data's rail and in every Curation index alike.
 //!
 //! A list of a hundred ids is a list you have to read; a list of a hundred
-//! pictures is one you can scan. Each still is one Spiral query that seeks one
-//! camera to one instant and decodes the frame there, about a second of
-//! server time, and the same picture is asked for again and again: an
+//! pictures is one you can scan. Each still is one Spiral query that
+//! assembles one camera's packets into a video and decodes the frame at one
+//! instant, and the same picture is asked for again and again: an
 //! episode's opening frame leads its row in Data, in the Dataset node, and in
 //! every Select below it, and a node's index is rebuilt whenever the operator
 //! comes back to it. So a still is decoded once per project, camera, episode
@@ -14,17 +14,17 @@ use crate::activities::episode::{Episode, StreamCatalog};
 use crate::components::scoped_task::ScopedTask;
 use dioxus::dioxus_core::{ScopeId, current_scope_id};
 use dioxus::prelude::*;
-use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
+use spiral_robotics_common::datasets::{
+    CameraVideo, DatasetSelection, DatasetStreams, EpisodeId, TopicRevision,
+};
 use spiral_robotics_common::relations::EpisodeQueryRequest;
-use spiral_robotics_common::sql::SqlLiteral;
 use std::collections::HashMap;
 
 /// How long after its instant a still's frame may have been logged.
 ///
-/// Bounding the read on both sides is what lets Spiral seek: it decodes the
-/// group of pictures that holds the instant, where an open-ended `ORDER BY
-/// log_time LIMIT 1` decodes the rest of the episode to sort it. A camera that
-/// logged nothing in the second after an instant has no still for it.
+/// Bounding the read is what keeps a still from reading the rest of the
+/// episode's packets: the frame is the first the camera logged from the
+/// instant on, among those it logged within a second of it.
 const FRAME_SEARCH_NANOS: u64 = 1_000_000_000;
 
 /// Which picture a still is: an instant of one episode.
@@ -49,41 +49,60 @@ impl StillMoment {
     }
     fn key(&self, camera: &str) -> StillKey {
         StillKey {
-            dataset: self.episode.dataset().sql_name(),
+            dataset: self.episode.dataset().clone(),
             camera: camera.to_owned(),
             episode: self.episode.id().clone(),
             // A millisecond is finer than any camera's frame interval.
             at_ms: (self.at * 1000.0).round() as u64,
         }
     }
-    /// The statement that decodes this instant's frame on `camera`: the first
-    /// one the camera logged from the instant on.
+    /// The statement that decodes this instant's frame on `camera`, one of
+    /// the dataset's camera streams: the first frame the camera logged from
+    /// the instant on, as `image`.
     ///
-    /// `read_video` seeks only on a literal log-time bound, so the instant is
-    /// placed on the episode's clock here rather than joined to it in SQL. The
-    /// recordings carry no colour metadata; the assumed profile reproduces the
-    /// picture FFmpeg decodes from them.
-    fn statement(&self, camera: &str) -> Result<String, String> {
+    /// The camera's packets from the keyframe before the instant are
+    /// assembled into a video timed from the episode's first message, and the
+    /// frame is decoded from the group of pictures that holds it.
+    fn statement(&self, camera: &TopicRevision) -> Result<String, String> {
         let start = self
             .episode
             .facts()
             .message_start_time()
             .ok_or("This episode records no start to find a frame from.")?;
-        let from = start.saturating_add((self.at * 1e9) as u64);
+        let at = (self.at * 1e9) as u64;
+        let video = CameraVideo::new(self.episode.dataset(), camera)
+            .video_at(start, (at, FRAME_SEARCH_NANOS));
         Ok(format!(
-            "SELECT spql.image.to_rgb(v.value, 'srgb_bt709_limited') AS image \
-             FROM spql.mcap.read_video({}, {}) v \
-             WHERE v.id = $1 AND v.log_time >= {from} AND v.log_time < {} \
-             ORDER BY v.log_time LIMIT 1",
-            SqlLiteral::text(&self.episode.dataset().sql_name()),
-            SqlLiteral::text(camera),
-            from.saturating_add(FRAME_SEARCH_NANOS),
+            "SELECT spql.video.decode(spql.video.frame_at(video.source, \
+             spql.dt.from_epoch({at}, 'ns') - spql.dt.from_epoch(0, 'ns'), 'ceil')) AS image \
+             FROM ({video}) video"
         ))
     }
-    /// This instant's frame on `camera`, as a picture a row can show.
+    /// The size of this instant's frame on `camera`, as `width` and
+    /// `height`: what the camera records at.
+    pub(in crate::activities) fn size_statement(
+        &self,
+        camera: &TopicRevision,
+    ) -> Result<String, String> {
+        Ok(format!(
+            "SELECT spql.image.width(still.image) AS width, spql.image.height(still.image) AS height \
+             FROM ({}) still",
+            self.statement(camera)?
+        ))
+    }
+    /// This instant's frame on the camera topic `camera`, as a picture a row
+    /// can show.
     async fn decode(self, camera: String, datasets: DatasetClient) -> Result<String, String> {
+        let inspection = datasets
+            .inspect_dataset(self.episode.dataset().clone())
+            .await
+            .map_err(|error| format!("Decoding a still: {error}"))?;
+        let stream = DatasetStreams::new(inspection.topics())
+            .camera(&camera)?
+            .revision()
+            .clone();
         let request =
-            EpisodeQueryRequest::new(self.episode.selection(), self.statement(&camera)?, 1);
+            EpisodeQueryRequest::new(self.episode.selection(), self.statement(&stream)?, 1);
         let snapshot = datasets
             .run_episode_query(&request)
             .await
@@ -105,7 +124,7 @@ impl StillMoment {
 /// What one decoded still is filed under.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct StillKey {
-    dataset: String,
+    dataset: DatasetSelection,
     camera: String,
     episode: EpisodeId,
     at_ms: u64,
@@ -265,22 +284,44 @@ pub(in crate::activities) fn EpisodeStill(
 mod tests {
     use super::*;
 
+    fn top() -> TopicRevision {
+        TopicRevision::new("top_0a1b2c3d").unwrap()
+    }
+
     #[test]
-    fn a_still_seeks_the_camera_to_its_instant_on_the_episodes_clock() {
+    fn a_still_decodes_the_cameras_frame_at_its_instant_on_the_episodes_clock() {
         // The fixture's recording starts one second into its log.
         let episode = Episode::fixture(&EpisodeId::fixture(1), 30_000_000_000);
         let opening = StillMoment::opening(&episode)
-            .statement("/top")
+            .statement(&top())
             .expect("the episode records its start");
-        assert!(opening.contains("FROM spql.mcap.read_video('folding', '/top') v"));
-        assert!(opening.contains(
-            "WHERE v.id = $1 AND v.log_time >= 1000000000 AND v.log_time < 2000000000 \
-             ORDER BY v.log_time LIMIT 1"
-        ));
+        assert_eq!(
+            opening,
+            format!(
+                "SELECT spql.video.decode(spql.video.frame_at(video.source, \
+                 spql.dt.from_epoch(0, 'ns') - spql.dt.from_epoch(0, 'ns'), 'ceil')) AS image \
+                 FROM ({}) video",
+                CameraVideo::new(episode.dataset(), &top())
+                    .video_at(1_000_000_000, (0, FRAME_SEARCH_NANOS))
+            )
+        );
+        // A later instant reads from the keyframe before it, up to a second
+        // past it.
         let middle = StillMoment::at(&episode, 2.5)
-            .statement("/top")
+            .statement(&top())
             .expect("the episode records its start");
-        assert!(middle.contains("v.log_time >= 3500000000 AND v.log_time < 4500000000"));
+        assert!(
+            middle.contains("spql.dt.from_epoch(2500000000, 'ns') - spql.dt.from_epoch(0, 'ns')")
+        );
+        assert!(middle.contains("r.log_time < 4500000000 AND r.ordinal >="));
+        assert!(middle.contains("k.keyframe AND k.log_time <= 3500000000"));
+        let size = StillMoment::opening(&episode)
+            .size_statement(&top())
+            .unwrap();
+        assert!(size.starts_with(
+            "SELECT spql.image.width(still.image) AS width, spql.image.height(still.image) AS height \
+             FROM (SELECT spql.video.decode("
+        ));
     }
 
     #[test]

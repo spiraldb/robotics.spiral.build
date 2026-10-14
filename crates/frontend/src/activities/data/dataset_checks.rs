@@ -292,7 +292,7 @@ enum CheckState {
 /// run keeps going while the operator works elsewhere.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct DatasetChecks {
-    states: Signal<HashMap<String, CheckState>>,
+    states: Signal<HashMap<DatasetSelection, CheckState>>,
     owner: ScopeId,
 }
 
@@ -307,15 +307,15 @@ impl DatasetChecks {
         consume_context()
     }
     fn state(self, dataset: &DatasetSelection) -> Option<CheckState> {
-        self.states.read().get(&dataset.sql_name()).cloned()
+        self.states.read().get(dataset).cloned()
     }
     fn set(mut self, dataset: &DatasetSelection, state: CheckState) {
-        self.states.write().insert(dataset.sql_name(), state);
+        self.states.write().insert(dataset.clone(), state);
     }
     /// Read what `dataset`'s check columns hold, unless this session
     /// already has.
     fn ensure(self, dataset: &DatasetSelection) {
-        if self.states.peek().contains_key(&dataset.sql_name()) {
+        if self.states.peek().contains_key(dataset) {
             return;
         }
         self.set(dataset, CheckState::Reading);
@@ -324,7 +324,7 @@ impl DatasetChecks {
     }
     /// Read again, as after a failure.
     fn retry(mut self, dataset: &DatasetSelection) {
-        self.states.write().remove(&dataset.sql_name());
+        self.states.write().remove(dataset);
         self.ensure(dataset);
     }
     /// Run every check `dataset`'s columns lack.
@@ -348,9 +348,7 @@ impl DatasetChecks {
     }
     /// Move `dataset`'s run on, while it runs.
     fn advance(mut self, dataset: &DatasetSelection, change: impl FnOnce(&mut CheckProgress)) {
-        if let Some(CheckState::Running(progress)) =
-            self.states.write().get_mut(&dataset.sql_name())
-        {
+        if let Some(CheckState::Running(progress)) = self.states.write().get_mut(dataset) {
             change(progress);
         }
     }
