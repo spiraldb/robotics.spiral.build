@@ -99,6 +99,26 @@
             rustc = spiralToolchain;
           };
           runtimeLibrary = "libspiral_data_plane_runtime${hostPlatform.extensions.sharedLibrary}";
+          # The `vortex` crate's docs include its workspace README, which
+          # vendoring a Git crate leaves behind; a build step puts it back,
+          # from the Vortex commit `lockFile` pins.
+          restoreVortexReadme =
+            lockFile:
+            let
+              vortexRev = lib.head (
+                lib.concatMap (
+                  package: lib.optional (package.name == "vortex") (lib.last (lib.splitString "#" package.source))
+                ) (lib.importTOML lockFile).package
+              );
+              vortexSource = builtins.fetchGit {
+                url = "https://github.com/vortex-data/vortex.git";
+                rev = vortexRev;
+                allRefs = true;
+              };
+            in
+            ''
+              cp ${vortexSource}/README.md "$NIX_BUILD_TOP/cargo-vendor-dir/vortex-0.1.0/README.md"
+            '';
           spiralRuntime = spiralRustPlatform.buildRustPackage {
             pname = "spiral-data-plane-runtime";
             version = builtins.substring 0 9 spiralRev;
@@ -123,24 +143,7 @@
             ]
             ++ nativeBuildInputs;
             LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
-            # The `vortex` crate's docs include its workspace README, which
-            # vendoring a Git crate leaves behind.
-            preBuild =
-              let
-                vortexRev = lib.head (
-                  lib.concatMap (
-                    package: lib.optional (package.name == "vortex") (lib.last (lib.splitString "#" package.source))
-                  ) (lib.importTOML "${spiralSource}/Cargo.lock").package
-                );
-                vortexSource = builtins.fetchGit {
-                  url = "https://github.com/vortex-data/vortex.git";
-                  rev = vortexRev;
-                  allRefs = true;
-                };
-              in
-              ''
-                cp ${vortexSource}/README.md "$NIX_BUILD_TOP/cargo-vendor-dir/vortex-0.1.0/README.md"
-              '';
+            preBuild = restoreVortexReadme "${spiralSource}/Cargo.lock";
             doCheck = false;
             installPhase = ''
               runHook preInstall
@@ -160,7 +163,16 @@
               ./robot-connector
             ];
           };
-          cargoDeps = rustPlatform.importCargoLock {
+          # Vendoring finds each Git dependency's crates with `cargo metadata`
+          # over that repository's workspace, and SpiralDB's declares artifact
+          # dependencies, which Cargo parses only with `-Z bindeps`.
+          vendoringPlatform = pkgs.makeRustPlatform {
+            cargo = pkgs.writeShellScriptBin "cargo" ''
+              CARGO_UNSTABLE_BINDEPS=true exec ${packageRustToolchain}/bin/cargo "$@"
+            '';
+            rustc = packageRustToolchain;
+          };
+          cargoDeps = vendoringPlatform.importCargoLock {
             lockFile = ./Cargo.lock;
             # Spiral's SDK and Vortex come from Git; SpiralDB's private
             # repository through the caller's git credentials.
@@ -179,6 +191,10 @@
               "--package"
               "spiral-robotics-backend"
             ];
+            # OpenSSL's source build, which the server carries, configures
+            # itself with Perl.
+            nativeBuildInputs = [ pkgs.perl ];
+            preBuild = restoreVortexReadme ./Cargo.lock;
             doCheck = false;
             meta.mainProgram = "spiral-robotics-backend";
           };
