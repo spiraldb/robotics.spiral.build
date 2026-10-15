@@ -1,9 +1,10 @@
 //! An MCAP dataset's `files` table, one row per episode: its file's key and
 //! an `spql.io.Blob` holding the file's bytes inline, for a file Studio
 //! holds, or pointing at its pinned Hugging Face URI. A project bundle
-//! carries every MCAP dataset's files.
+//! carries every MCAP dataset's files as their Blobs hold them.
 use arrow_array::{
-    ArrayRef, BinaryViewArray, RecordBatch, StringArray, StringViewArray, StructArray, UInt64Array,
+    Array, ArrayRef, BinaryViewArray, RecordBatch, StringArray, StringViewArray, StructArray,
+    UInt64Array,
 };
 use arrow_schema::extension::EXTENSION_TYPE_NAME_KEY;
 use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef};
@@ -163,22 +164,34 @@ impl McapSourceBlob {
 }
 
 /// Every MCAP dataset's files as a project bundle carries them, in one
-/// stream whose rows each name their dataset.
+/// stream whose rows each name their dataset: a file the dataset holds by
+/// its bytes, one it points at by its pinned Hugging Face URI, each with its
+/// size.
 pub(crate) struct McapSources;
 
-/// One file a project bundle carries: its key, and its bytes.
+/// One file a project bundle carries: its key, and its bytes or where they
+/// are pinned.
 #[derive(Debug, PartialEq)]
 pub(crate) struct BundledFile<'a> {
     key: &'a str,
-    bytes: &'a [u8],
+    source: BundledSource<'a>,
+}
+
+/// Where a bundled file's bytes are.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum BundledSource<'a> {
+    /// In the bundle, since the dataset held them inline.
+    Held(&'a [u8]),
+    /// At the pinned Hugging Face `uri` the dataset points at, `size` bytes.
+    Pinned { uri: &'a str, size: u64 },
 }
 
 impl<'a> BundledFile<'a> {
     pub(crate) fn key(&self) -> &'a str {
         self.key
     }
-    pub(crate) fn bytes(&self) -> &'a [u8] {
-        self.bytes
+    pub(crate) fn source(&self) -> BundledSource<'a> {
+        self.source
     }
 }
 
@@ -187,14 +200,17 @@ impl McapSources {
         Schema::new(vec![
             Field::new("dataset_name", DataType::Utf8, false),
             Field::new("recording", DataType::Utf8, false),
-            Field::new("payload", DataType::Binary, false),
+            Field::new("bytes", DataType::Binary, true),
+            Field::new("uri", DataType::Utf8, true),
+            Field::new("size", DataType::UInt64, false),
         ])
     }
 
-    /// `dataset`'s files, each read back whole from wherever its Blob points.
+    /// `dataset`'s files, each one's Blob read as it is: the bytes it holds,
+    /// or the URI it points at, which is never downloaded.
     pub(crate) fn export_sql(dataset: &DatasetSelection) -> String {
         format!(
-            "SELECT recording, spql.io.read_bytes(source) AS payload FROM {}",
+            "SELECT recording, source.bytes AS bytes, source.uri AS uri, source.size AS size FROM {}",
             dataset.files()
         )
     }
@@ -205,24 +221,24 @@ impl McapSources {
         dataset: &DatasetSelection,
         batch: &RecordBatch,
     ) -> Result<RecordBatch, String> {
-        let column = |name: &str| {
-            batch
-                .column_by_name(name)
-                .cloned()
-                .ok_or_else(|| format!("MCAP source export has no {name}"))
-        };
-        RecordBatch::try_new(
-            Arc::new(Self::bundle_schema()),
-            vec![
-                Arc::new(StringArray::from_iter_values(std::iter::repeat_n(
-                    dataset.id(),
-                    batch.num_rows(),
-                ))),
-                column("recording")?,
-                column("payload")?,
-            ],
-        )
-        .map_err(|error| format!("MCAP source export: {error}"))
+        let schema = Arc::new(Self::bundle_schema());
+        let mut columns = vec![Arc::new(StringArray::from_iter_values(std::iter::repeat_n(
+            dataset.id(),
+            batch.num_rows(),
+        ))) as ArrayRef];
+        // Every column after the dataset's name is the query's, in the
+        // bundle's types.
+        for field in schema.fields().iter().skip(1) {
+            let column = batch
+                .column_by_name(field.name())
+                .ok_or_else(|| format!("MCAP source export has no {}", field.name()))?;
+            columns.push(
+                arrow_cast::cast(column, field.data_type())
+                    .map_err(|error| format!("MCAP source export: {error}"))?,
+            );
+        }
+        RecordBatch::try_new(schema, columns)
+            .map_err(|error| format!("MCAP source export: {error}"))
     }
 
     /// The files a project bundle carries, under each dataset its manifest
@@ -237,40 +253,56 @@ impl McapSources {
             .collect::<BTreeMap<_, _>>();
         for batch in batches {
             let columns = crate::db::ArrowColumns::new(batch, "MCAP source backup");
-            let payload = batch
-                .column_by_name("payload")
-                .ok_or("MCAP backup has no payload")?;
+            let bytes = batch
+                .column_by_name("bytes")
+                .ok_or("MCAP backup has no bytes")?;
             for row in 0..batch.num_rows() {
                 let dataset = DatasetSelection::new(columns.text("dataset_name", row)?)?;
+                let key = columns.text("recording", row)?;
+                let source = match (
+                    Self::bytes(bytes.as_ref(), row)?,
+                    columns.optional_text("uri", row)?,
+                ) {
+                    (Some(bytes), None) => BundledSource::Held(bytes),
+                    (None, Some(uri)) => BundledSource::Pinned {
+                        uri,
+                        size: columns
+                            .optional_unsigned("size", row)?
+                            .ok_or_else(|| format!("bundled file {key} has no size"))?,
+                    },
+                    _ => {
+                        return Err(format!(
+                            "bundled file {key} must carry either its bytes or its pinned URI"
+                        ));
+                    }
+                };
                 files
                     .get_mut(&dataset)
                     .ok_or("MCAP source names do not match the project manifest")?
-                    .push(BundledFile {
-                        key: columns.text("recording", row)?,
-                        bytes: Self::bytes(payload.as_ref(), row)?,
-                    });
+                    .push(BundledFile { key, source });
             }
         }
         Ok(files)
     }
 
-    fn bytes(array: &dyn arrow_array::Array, row: usize) -> Result<&[u8], String> {
+    /// The bytes at `row`, if it has any.
+    fn bytes(array: &dyn Array, row: usize) -> Result<Option<&[u8]>, String> {
         if array.is_null(row) {
-            return Err("MCAP source payload is null".into());
+            return Ok(None);
         }
         if let Some(array) = array.as_any().downcast_ref::<arrow_array::BinaryArray>() {
-            return Ok(array.value(row));
+            return Ok(Some(array.value(row)));
         }
         if let Some(array) = array.as_any().downcast_ref::<BinaryViewArray>() {
-            return Ok(array.value(row));
+            return Ok(Some(array.value(row)));
         }
         if let Some(array) = array
             .as_any()
             .downcast_ref::<arrow_array::LargeBinaryArray>()
         {
-            return Ok(array.value(row));
+            return Ok(Some(array.value(row)));
         }
-        Err("MCAP source payload must be binary".into())
+        Err("MCAP source bytes must be binary".into())
     }
 }
 
@@ -280,18 +312,24 @@ mod tests {
 
     #[test]
     fn a_bundle_restores_every_file_into_its_own_dataset() {
-        let batch = RecordBatch::try_new(
-            Arc::new(McapSources::bundle_schema()),
-            vec![
-                Arc::new(StringArray::from(vec!["first", "second"])),
-                Arc::new(StringArray::from(vec!["one.mcap", "two.mcap"])),
-                Arc::new(arrow_array::BinaryArray::from(vec![
-                    b"first file".as_slice(),
-                    b"second file".as_slice(),
-                ])),
-            ],
-        )
-        .unwrap();
+        let uri = "hf://datasets/org/recordings@abcdef/two.mcap";
+        let rows = |bytes: Vec<Option<&[u8]>>, uris: Vec<Option<&str>>| {
+            RecordBatch::try_new(
+                Arc::new(McapSources::bundle_schema()),
+                vec![
+                    Arc::new(StringArray::from(vec!["first", "second"])),
+                    Arc::new(StringArray::from(vec!["one.mcap", "two.mcap"])),
+                    Arc::new(arrow_array::BinaryArray::from(bytes)),
+                    Arc::new(StringArray::from(uris)),
+                    Arc::new(UInt64Array::from(vec![10, 11])),
+                ],
+            )
+            .unwrap()
+        };
+        let batch = rows(
+            vec![Some(b"first file".as_slice()), None],
+            vec![None, Some(uri)],
+        );
         let names = ["first", "second", "empty"].map(|name| DatasetSelection::new(name).unwrap());
         let restored = McapSources::files(std::slice::from_ref(&batch), &names).unwrap();
         assert_eq!(
@@ -301,17 +339,30 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["empty", "first", "second"]
         );
-        let file = |key, bytes| BundledFile { key, bytes };
+        let file = |key, source| BundledFile { key, source };
         assert_eq!(
             restored[&names[0]],
-            [file("one.mcap", b"first file".as_slice())]
+            [file("one.mcap", BundledSource::Held(b"first file"))]
         );
         assert_eq!(
             restored[&names[1]],
-            [file("two.mcap", b"second file".as_slice())]
+            [file("two.mcap", BundledSource::Pinned { uri, size: 11 })]
         );
         assert!(restored[&names[2]].is_empty());
         assert!(McapSources::files(&[batch], &names[..1]).is_err());
+        for (bytes, uris) in [
+            (
+                vec![Some(b"both".as_slice()), None],
+                vec![Some(uri), Some(uri)],
+            ),
+            (vec![Some(b"neither".as_slice()), None], vec![None, None]),
+        ] {
+            let error = McapSources::files(&[rows(bytes, uris)], &names).unwrap_err();
+            assert!(
+                error.contains("either its bytes or its pinned URI"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
@@ -337,7 +388,10 @@ mod tests {
             source.column_by_name(member).unwrap().clone()
         };
         let bytes = blob(&held, "bytes");
-        assert_eq!(McapSources::bytes(bytes.as_ref(), 0).unwrap(), b"recording");
+        assert_eq!(
+            McapSources::bytes(bytes.as_ref(), 0).unwrap(),
+            Some(b"recording".as_slice())
+        );
         assert!(blob(&pinned, "bytes").is_null(0));
         let uri = blob(&pinned, "uri");
         assert_eq!(

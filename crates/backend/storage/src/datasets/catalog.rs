@@ -6,6 +6,7 @@
 use crate::{SpiralAccess, SpiralConnection, StorageManager};
 use serde::Deserialize;
 use serde_json::json;
+use spiral_robotics_common::curation::AnswerColumn;
 use spiral_robotics_common::datasets::{
     DatasetFormat, DatasetSelection, DatasetSummary, DatasetTable, TopicRevision,
 };
@@ -290,16 +291,37 @@ impl CatalogDatasets {
                 [table] if table == "episodes" => Ok(dataset.episodes()),
                 [table] if table == "topics" => Ok(dataset.topics()),
                 [table] if table == "files" => Ok(dataset.files()),
-                [table] if table == "answers" => Ok(dataset.answers()),
                 [messages, stream] if messages == "messages" => {
                     Ok(dataset.messages(&TopicRevision::new(stream.clone())?))
                 }
-                [scratch] => dataset.scratch(scratch),
+                [answers, column] if answers == "answers" => {
+                    Ok(dataset.answers(&AnswerColumn::try_from(column.clone())?))
+                }
                 other => Err(format!(
                     "{}.{} is no table of Studio's",
                     dataset.label(),
                     other.join(".")
                 )),
+            })
+            .collect()
+    }
+
+    /// Every answer column `dataset` holds a table for.
+    pub(crate) fn answer_columns(
+        &self,
+        dataset: &DatasetSelection,
+    ) -> Result<BTreeSet<AnswerColumn>, String> {
+        let Some(tables) = self.datasets.get(dataset) else {
+            return Ok(BTreeSet::new());
+        };
+        tables
+            .tables
+            .keys()
+            .filter_map(|path| match path.as_slice() {
+                [answers, column] if answers == "answers" => {
+                    Some(AnswerColumn::try_from(column.clone()))
+                }
+                _ => None,
             })
             .collect()
     }
@@ -351,7 +373,11 @@ mod tests {
                 "stream-1"
             ),
             table(prefix("svla"), "episodes", "episodes-2"),
-            table(prefix("svla"), "answers", "answers-2"),
+            table(
+                json!({"kind": "prefix", "path": ["datasets", "svla", "answers"]}),
+                "similarity_3f9a2c",
+                "answers-2"
+            ),
             // A namespace whose episodes are gone is no dataset, but its
             // tables are still there.
             table(prefix("leftover"), "topics", "topics-3"),
@@ -389,6 +415,17 @@ mod tests {
             ]
         );
         assert_eq!(datasets.mcap(), [summaries[0].selection().clone()]);
+        let svla = summaries[1].selection();
+        let similarity = AnswerColumn::try_from("similarity_3f9a2c".to_owned()).unwrap();
+        assert_eq!(
+            datasets.tables(svla).unwrap(),
+            [svla.answers(&similarity), svla.episodes()]
+        );
+        assert_eq!(
+            datasets.answer_columns(svla).unwrap(),
+            BTreeSet::from([similarity])
+        );
+        assert!(datasets.answer_columns(&leftover).unwrap().is_empty());
     }
 
     #[test]

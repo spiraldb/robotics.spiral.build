@@ -1,8 +1,8 @@
 //! Saved curations: list, load by identity, and a revision-guarded save and
 //! delete; the fill runs that write the answers a view reads and then
 //! publish it, which Publish and a Score progress preview start and poll;
-//! which episodes a column of answers already holds; and the published views
-//! and dropping one.
+//! which episodes a column of answers already holds, and which columns a
+//! dataset holds; and the published views and dropping one.
 use crate::OperationError;
 use crate::http::delivery::{ApiJson, ApiPath, Project};
 use crate::projects::context::StudioContext;
@@ -12,10 +12,10 @@ use axum::{
     routing::{get, post},
 };
 use spiral_robotics_common::curation::{
-    CurationDeletion, CurationDocument, CurationSummary, FillRequest, FillStatus,
+    AnswerColumn, CurationDeletion, CurationDocument, CurationSummary, FillRequest, FillStatus,
     FilledEpisodesRequest, MAX_CURATION_PAYLOAD_BYTES, PublishedView, UnpublishRequest,
 };
-use spiral_robotics_common::datasets::EpisodeId;
+use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 use std::collections::BTreeSet;
 
 /// The body carries the payload as a JSON string, so escaping and the
@@ -32,6 +32,7 @@ impl CurationEndpoints {
             .route("/curations/{id}", get(Self::load))
             .route("/curated-views", get(Self::published))
             .route("/curation-answers/filled", post(Self::filled))
+            .route("/curation-answers/columns", post(Self::answer_columns))
             .route("/curation-fills", get(Self::publications))
             .route("/curation-fills/{id}", get(Self::fill_status))
     }
@@ -80,6 +81,12 @@ impl CurationEndpoints {
         ApiJson(request): ApiJson<FilledEpisodesRequest>,
     ) -> Result<Json<BTreeSet<EpisodeId>>, OperationError> {
         Ok(Json(project.curation().filled(request).await?))
+    }
+    async fn answer_columns(
+        Project(project): Project,
+        ApiJson(dataset): ApiJson<DatasetSelection>,
+    ) -> Result<Json<BTreeSet<AnswerColumn>>, OperationError> {
+        Ok(Json(project.curation().answer_columns(dataset).await?))
     }
     async fn published(
         Project(project): Project,

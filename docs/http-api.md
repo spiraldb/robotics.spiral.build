@@ -289,11 +289,12 @@ since only the payload names them. A payload over 32 MiB fails with
 twice the payload limit so a document's JSON framing always fits.
 
 Publishing is a fill run. `POST /curation-fills` takes `{dataset, columns,
-views}`: for each node that asks a model, in path order, its answers-table
+views}`: for each node that asks a model, in path order, its answer
 `column`, the `episodes` it is filled for (a read-only statement listing the
 episodes that reach the node, or listed ids), the `node` label the run
-reports, and the `source` of one episode's answer (a read-only statement with
-the episode bound as `$1`, or the Modal service's progress scores of a camera);
+reports, and the `source` of its answers (a model call through OpenRouter,
+the Modal services' progress scores or object tracks of a camera, or one
+read-only statement over the dataset);
 then the views, each `{name, statement}`: one plain identifier and the
 read-only `SELECT` or `WITH` the browser compiled from an output. The backend
 refuses an invalid name, statement, or dataset with `invalid_input`, and a
@@ -307,17 +308,22 @@ runs that publish views, `GET /curation-fills/{id}` reads one, and
 `POST /curation-fills/{id}/stop` starts nothing more; what is in flight is
 written. A Score progress preview starts the same run over the episodes it
 previews, with no views. `POST /curations/unpublish` takes `{name}`, forgets
-the view, and answers `null`; its stored answers stay. See
-[curation](curation.md).
+the view, and answers `null`; its stored answers stay.
+`POST /curation-answers/filled` takes `{dataset, column}` and answers the
+episodes the column holds an answer for, failed ones included, none before a
+run first fills it. `POST /curation-answers/columns` takes a
+`DatasetSelection` and answers the answer columns the dataset holds a table
+for. See [curation](curation.md).
 
 ## Files and media
 
 - `POST /project/import`: raw `.spiral-project` bytes with the project header. A
   body past 256 MiB fails with 413. The browser sends its native File without
   making a project-sized WebAssembly copy. Import returns `ProjectImportSummary`.
-- `GET /project/export?endpoint=...&project_id=...`: version 5 project bundle
+- `GET /project/export?endpoint=...&project_id=...`: version 6 project bundle
   download, a ZIP of `studio.sqlite3` (project-scoped control records, no
-  backend credentials) and the project's MCAP sources.
+  backend credentials) and the project's MCAP files: the bytes of each one
+  held inline, the pinned Hugging Face URI of each one imported from there.
   Import accepts only this version and also bounds total uncompressed contents
   to 256 MiB. See [project transfer](studio-sqlite.md#project-transfer).
 

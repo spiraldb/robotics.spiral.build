@@ -19,7 +19,7 @@ mod answers;
 mod fill;
 mod subtasks;
 
-pub use answers::{AnswerColumn, AnswerTable, FilledEpisodesRequest};
+pub use answers::{AnswerColumn, FilledEpisodesRequest};
 pub use fill::{
     AnswerSource, ColumnFill, EpisodeFailure, FillEpisodes, FillRequest, FillState, FillStatus,
     FillStep,

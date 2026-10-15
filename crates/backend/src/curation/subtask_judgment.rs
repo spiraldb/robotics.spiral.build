@@ -26,7 +26,7 @@ use arrow_buffer::NullBuffer;
 use arrow_schema::{DataType, Field, Fields};
 use decisions::{DecisionAnswers, Judgment};
 use futures_util::future::join_all;
-use spiral_robotics_common::curation::{AnswerColumn, AnswerTable};
+use spiral_robotics_common::curation::AnswerColumn;
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 use spiral_robotics_storage::answers::EpisodeAnswer;
 use std::sync::Arc;
@@ -37,12 +37,12 @@ use std::sync::Arc;
 pub(super) struct StoredSubtasks(Option<Vec<Option<String>>>);
 
 impl StoredSubtasks {
-    /// The statement reading the subtasks `column` stores in `dataset`'s
-    /// answers table for the episode bound as `$1`.
+    /// The statement reading the subtasks `dataset`'s answer column `column`
+    /// stores for the episode bound as `$1`: no row when it was not asked.
     pub(super) fn statement(dataset: &DatasetSelection, column: &AnswerColumn) -> String {
         format!(
-            "SELECT a.{column}.value AS subtasks FROM {} a WHERE a.episode_id = $1",
-            AnswerTable::of(dataset).table()
+            "SELECT a.value AS subtasks FROM {} a WHERE a.episode_id = $1",
+            dataset.answers(column)
         )
     }
 
@@ -52,7 +52,7 @@ impl StoredSubtasks {
             return Ok(Self(None));
         };
         if batches.iter().map(RecordBatch::num_rows).sum::<usize>() > 1 {
-            return Err("The answers table holds the episode more than once.".into());
+            return Err("The answer column holds the episode more than once.".into());
         }
         let lists = batch
             .column_by_name("subtasks")
@@ -150,7 +150,7 @@ impl<'a, J: StoredJudgment> SubtaskJudgment<'a, J> {
     }
 
     /// The type of one episode's answer: a list of its subtasks' values.
-    fn answer_type() -> DataType {
+    pub(super) fn answer_type() -> DataType {
         DataType::new_list(J::value_type(), true)
     }
 

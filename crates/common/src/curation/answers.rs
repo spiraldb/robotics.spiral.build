@@ -1,46 +1,22 @@
-//! Where the model answers curations ask for are kept: one answers table per
-//! dataset, `datasets.<id>.answers` beside its `episodes`, holding one row per
-//! episode keyed by `episode_id`, and one column per exact call a node makes.
+//! Where the model answers curations ask for are kept: one table per exact
+//! call a node makes, `datasets.<id>.answers.<column>` beside the dataset's
+//! `episodes` ([`DatasetSelection::answers`]).
 //!
 //! A column is named for what it measures and a short hash of the call, so
-//! identical calls across curations share it. Each value is wrapped as
-//! `STRUCT(value <answer>)`: a NULL struct is an episode not asked yet, and a
-//! struct whose value is NULL one the model could not answer, which is never
-//! asked again.
-use crate::datasets::{DatasetSelection, DatasetTable};
+//! identical calls across curations share it. Its table holds `episode_id`
+//! and `value`, one row per episode asked: a NULL `value` is one the model
+//! could not answer, which is never asked again, and an episode with no row
+//! is not asked yet. A fill run only appends rows, and makes the table,
+//! empty, when it starts filling the column, so whatever reads it once the
+//! run is on it finds it.
+use crate::datasets::DatasetSelection;
 use crate::sql::UnquotedSqlIdentifier;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::fmt::{self, Display, Formatter};
 
-/// One dataset's answers table.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AnswerTable {
-    dataset: DatasetSelection,
-}
-
-impl AnswerTable {
-    /// The answers table of `dataset`: every dataset has one.
-    pub fn of(dataset: &DatasetSelection) -> Self {
-        Self {
-            dataset: dataset.clone(),
-        }
-    }
-    pub fn dataset(&self) -> &DatasetSelection {
-        &self.dataset
-    }
-    /// The table, which displays as a statement spells it.
-    pub fn table(&self) -> DatasetTable {
-        self.dataset.answers()
-    }
-    /// The table one fill stages `column`'s answers in before merging them.
-    pub fn staging(&self, column: &AnswerColumn) -> Result<DatasetTable, String> {
-        self.dataset.scratch(&format!("answers_staging_{column}"))
-    }
-}
-
-/// One column of an answers table: what one exact call answered for each
-/// episode.
+/// One answer column: what one exact call answered for each episode, in a
+/// table of its own.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct AnswerColumn(String);
@@ -64,8 +40,8 @@ impl AnswerColumn {
     }
 }
 
-/// Which episodes of `dataset` one answers column holds an answer for,
-/// failed ones included: what a curation opened reads back.
+/// Which episodes of `dataset` one answer column holds an answer for, failed
+/// ones included: what a curation opened reads back.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FilledEpisodesRequest {
@@ -145,21 +121,5 @@ mod tests {
                 "{invalid}"
             );
         }
-    }
-
-    #[test]
-    fn a_datasets_answers_live_under_its_namespace() {
-        let dataset = DatasetSelection::new("pick-place").unwrap();
-        let table = AnswerTable::of(&dataset);
-        assert_eq!(table.table().target(), "datasets.pick-place.answers");
-        assert_eq!(
-            table.table().to_string(),
-            "\"datasets\".\"pick-place\".\"answers\""
-        );
-        let column = AnswerColumn::try_from("score_progress_3f9a2c".to_owned()).unwrap();
-        assert_eq!(
-            table.staging(&column).unwrap().target(),
-            "datasets.pick-place.answers_staging_score_progress_3f9a2c"
-        );
     }
 }

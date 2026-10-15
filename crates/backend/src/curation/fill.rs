@@ -1,17 +1,19 @@
-//! Fill runs: ask each model about the episodes that need its answers, write
-//! them as columns of the dataset's answers table, and then publish the
-//! views that read them.
+//! Fill runs: ask each model about the episodes that need its answers,
+//! append them to the dataset's answer columns, and then publish the views
+//! that read them.
 //!
 //! A run works through its columns in the order the browser compiled them,
 //! so every column is filled before a later one reads it to find the
-//! episodes that reach its node. For each, it asks about the episodes the
-//! column does not hold yet, a few at a time, and holds the answers in
-//! memory until they fill one write, which is written while it asks on; a
-//! failed answer is written too, so it is never asked again. Once every
-//! column is written it creates or replaces its views. Stop starts nothing
-//! more; what is in flight lands and is written. An error does the same,
-//! then ends the run. A run lives in memory: a restarted backend loses the
-//! answers held since the last write, and publishing again resumes past
+//! episodes that reach its node. Starting a column, it makes the column's
+//! table, empty, when there is none yet, so the columns after it, its views
+//! and a preview's read all find it, whatever it holds. It then asks about
+//! the episodes the column does not hold yet, a few at a time, and holds the
+//! answers in memory until they fill one write, which is written while it
+//! asks on; a failed answer is written too, so it is never asked again. Once
+//! every column is written it creates or replaces its views. Stop starts
+//! nothing more; what is in flight lands and is written. An error does the
+//! same, then ends the run. A run lives in memory: a restarted backend loses
+//! the answers held since the last write, and publishing again resumes past
 //! every episode already written.
 use super::break_down::EpisodeBreakdown;
 use super::object_tracking::ObjectTrackingService;
@@ -29,8 +31,8 @@ use arrow_array::cast::AsArray as _;
 use arrow_schema::DataType;
 use futures_util::StreamExt as _;
 use spiral_robotics_common::curation::{
-    AnswerColumn, AnswerSource, AnswerTable, ColumnFill, EpisodeFailure, FillEpisodes, FillRequest,
-    FillState, FillStatus, FillStep, ViewName,
+    AnswerColumn, AnswerSource, ColumnFill, EpisodeFailure, FillEpisodes, FillRequest, FillState,
+    FillStatus, FillStep, ViewName,
 };
 use spiral_robotics_common::datasets::{
     CameraVideo, DatasetInspection, DatasetSelection, DatasetStreams, EpisodeId, EpisodeSelection,
@@ -39,7 +41,7 @@ use spiral_robotics_common::datasets::{
 use spiral_robotics_common::relations::EpisodeQueryRequest;
 use spiral_robotics_common::sql::{ReadOnlyQuery, ReadOnlyQueryMode};
 use spiral_robotics_storage::answers::{
-    ColumnAnswers, DatasetAnswers, EpisodeAnswer, StatementAnswers,
+    ColumnAnswers, EpisodeAnswer, StatementAnswers, StoredAnswers,
 };
 use spiral_robotics_storage::{FfmpegExecutable, ProviderKeys, StorageManager};
 use std::collections::BTreeSet;
@@ -275,12 +277,13 @@ impl HeldAnswers {
 
     /// Hold `episode`'s answer, and hand what is held to the writer once it
     /// fills one write.
-    fn hold(&mut self, episode: EpisodeId, answer: EpisodeAnswer) {
-        self.held.hold(episode, answer);
+    fn hold(&mut self, episode: EpisodeId, answer: EpisodeAnswer) -> Result<(), String> {
+        self.held.hold(episode, answer)?;
         self.answered += 1;
         if self.held.is_full() {
             self.hand_over();
         }
+        Ok(())
     }
 
     /// How many episodes it has answered, written or not.
@@ -332,12 +335,8 @@ impl FillWork {
                 model,
                 revision,
             } => {
-                let service = self
-                    .progress
-                    .as_ref()
-                    .ok_or("The progress service is not set up.")?;
-                self.video_answer(selected, camera, service.scoring(model, revision))
-                    .await
+                let scoring = self.progress()?.scoring(model, revision);
+                self.video_answer(selected, camera, scoring).await
             }
             AnswerSource::ObjectTracking {
                 camera,
@@ -346,11 +345,9 @@ impl FillWork {
                 model,
                 revision,
             } => {
-                let service = self
-                    .tracking
-                    .as_ref()
-                    .ok_or("The object tracking service is not set up.")?;
-                let tracking = service.tracking((prompt, *rate), (model, revision));
+                let tracking = self
+                    .tracking()?
+                    .tracking((prompt, *rate), (model, revision));
                 self.video_answer(selected, camera, tracking).await
             }
             AnswerSource::BreakDown(call) => {
@@ -378,6 +375,50 @@ impl FillWork {
                 judgment.answer(episode, stored).await
             }
         }
+    }
+
+    /// The type of `source`'s answers, which its column's table is made
+    /// for: what a model's call declares, or what a dataset statement plans
+    /// to answer.
+    async fn answer_type(&self, source: &AnswerSource) -> Result<DataType, String> {
+        Ok(match source {
+            AnswerSource::DatasetStatement { statement } => {
+                let planned = format!(
+                    "SELECT * FROM ({}) planned LIMIT 0",
+                    statement.trim().trim_end_matches(';')
+                );
+                let (schema, _) = self.storage.queries().batches(&planned).await?;
+                StatementAnswers::answer_type(&schema)?
+            }
+            AnswerSource::ProgressService {
+                model, revision, ..
+            } => self.progress()?.scoring(model, revision).answer_type(),
+            AnswerSource::ObjectTracking {
+                prompt,
+                rate,
+                model,
+                revision,
+                ..
+            } => self
+                .tracking()?
+                .tracking((prompt, *rate), (model, revision))
+                .answer_type(),
+            AnswerSource::BreakDown(_) => EpisodeBreakdown::answer_type(),
+            AnswerSource::Similarity(_) => SubtaskJudgment::<SimilarityQuestions>::answer_type(),
+            AnswerSource::Classify(_) => SubtaskJudgment::<CategoryQuestions>::answer_type(),
+        })
+    }
+
+    fn progress(&self) -> Result<&ProgressService, String> {
+        self.progress
+            .as_ref()
+            .ok_or_else(|| "The progress service is not set up.".to_owned())
+    }
+
+    fn tracking(&self) -> Result<&ObjectTrackingService, String> {
+        self.tracking
+            .as_ref()
+            .ok_or_else(|| "The object tracking service is not set up.".to_owned())
     }
 
     fn openrouter(&self) -> Result<&OpenRouter, String> {
@@ -551,8 +592,9 @@ impl FillRun {
 
     /// Answer every episode `column` is filled for that it does not hold yet,
     /// and write what was answered, even when the run stops or fails part
-    /// way. Each write waits for every Spiral read of the project to end, so
-    /// it runs beside the asking, which keeps the reads in flight moving.
+    /// way; the column's table first, when it has none. Each write waits for
+    /// every Spiral read of the project to end, so it runs beside the
+    /// asking, which keeps the reads in flight moving.
     async fn fill_column(&self, column: &ColumnFill, work: &FillWork) -> Result<(), String> {
         let node = column.node();
         self.report(FillStep::new(node, 0, None));
@@ -564,8 +606,16 @@ impl FillRun {
         };
         let answers = work
             .storage
-            .dataset_answers(AnswerTable::of(self.request.dataset()));
-        let mut skipped = answers.filled(column.column()).await?;
+            .stored_answers(self.request.dataset(), column.column());
+        let mut skipped = match answers.filled().await? {
+            Some(filled) => filled,
+            None => {
+                answers
+                    .create(&work.answer_type(column.source()).await?)
+                    .await?;
+                BTreeSet::new()
+            }
+        };
         let needed = listed
             .into_iter()
             .filter(|episode| skipped.insert(episode.clone()))
@@ -588,8 +638,7 @@ impl FillRun {
             held.finish();
             failed
         };
-        let (failed, unwritten) =
-            tokio::join!(asking, self.write_each(&answers, column.column(), sets));
+        let (failed, unwritten) = tokio::join!(asking, self.write_each(&answers, sets));
         unwritten.or(failed).map_or(Ok(()), Err)
     }
 
@@ -597,13 +646,12 @@ impl FillRun {
     /// lets go; the first write that failed, which halts the run.
     async fn write_each(
         &self,
-        answers: &DatasetAnswers<'_>,
-        column: &AnswerColumn,
+        answers: &StoredAnswers<'_>,
         mut sets: mpsc::UnboundedReceiver<ColumnAnswers>,
     ) -> Option<String> {
         let mut failed = None::<String>;
         while let Some(set) = sets.recv().await {
-            if let Err(reason) = answers.write(column, set).await {
+            if let Err(reason) = answers.write(set).await {
                 self.progress.recover_lock().halted = true;
                 failed.get_or_insert(reason);
             }
@@ -630,7 +678,7 @@ impl FillRun {
         let mut answered = StatementAnswers::from_statement(&schema, &batches)?;
         for episode in needed {
             let answer = answered.answer(&episode);
-            held.hold(episode, answer);
+            held.hold(episode, answer)?;
         }
         self.report(FillStep::new(node, held.answered(), Some(total)));
         Ok(())
@@ -664,7 +712,10 @@ impl FillRun {
                             .failures
                             .push(EpisodeFailure::new(episode.clone(), reason));
                     }
-                    held.hold(episode, answer);
+                    if let Err(reason) = held.hold(episode, answer) {
+                        progress.halted = true;
+                        failed.get_or_insert(reason);
+                    }
                     progress.state =
                         FillState::Running(FillStep::new(node, held.answered(), Some(total)));
                 }

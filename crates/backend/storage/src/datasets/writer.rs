@@ -1,21 +1,18 @@
 //! Writing decoded episodes into a dataset's tables
 //! ([datasets](../../../../../docs/datasets.md#writing)): at most 32 at a
 //! time, each batch every stream's message rows first, then the episodes'
-//! rows, a row of the answers table per episode, and an MCAP episode's file;
-//! the `topics` table is replaced with the new counts once, when the
-//! transaction's writes are done. A reader that finds an episode therefore
-//! finds all its messages.
-use super::answers::AnswerRows;
+//! rows and an MCAP episode's file; the `topics` table is replaced with the
+//! new counts once, when the transaction's writes are done. A reader that
+//! finds an episode therefore finds all its messages. Model answers are the
+//! fill runs' to write, never the import's.
 use super::episodes::EpisodeRows;
 use super::files::McapFile;
 use super::streams::{RecordedStream, StreamMessages};
 use super::topics::TopicCounts;
 use crate::{ProjectConnection, ProjectStore};
 use arrow_array::RecordBatch;
-use arrow_schema::SchemaRef;
 use spiral_robotics_common::datasets::{DatasetFormat, DatasetSelection, EpisodeId, TopicRevision};
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 /// One episode decoded from its source, ready to write.
 pub(crate) struct DecodedEpisode {
@@ -113,21 +110,20 @@ impl DecodedEpisode {
 }
 
 /// Writes one dataset's episodes within the caller's transaction. It knows
-/// the dataset's topics and answer columns as of its last write, so a
-/// transaction reads them at most once however many batches it writes.
+/// the dataset's topics as of its last write, so a transaction reads them at
+/// most once however many batches it writes.
 pub(crate) struct DatasetWrite<'a> {
     dataset: &'a DatasetSelection,
     format: DatasetFormat,
     topics: TopicCounts,
-    answers: SchemaRef,
 }
 
 impl<'a> DatasetWrite<'a> {
     /// The most episodes one write takes.
     pub(crate) const MAX_EPISODES: usize = 32;
 
-    /// Create `dataset` in `format` with no episodes: empty episodes, topics
-    /// and answers tables, and an MCAP dataset's empty files.
+    /// Create `dataset` in `format` with no episodes: empty episodes and
+    /// topics tables, and an MCAP dataset's empty files.
     pub(crate) async fn create(
         connection: &mut ProjectConnection,
         dataset: &'a DatasetSelection,
@@ -137,18 +133,11 @@ impl<'a> DatasetWrite<'a> {
             dataset,
             format,
             topics: TopicCounts::default(),
-            answers: Arc::new(AnswerRows::schema()),
         };
         connection
             .create_or_append_batches(
                 &dataset.episodes().target(),
                 vec![RecordBatch::new_empty(EpisodeRows::schema())],
-            )
-            .await?;
-        connection
-            .create_or_append_batches(
-                &dataset.answers().target(),
-                vec![RecordBatch::new_empty(write.answers.clone())],
             )
             .await?;
         if format == DatasetFormat::Mcap {
@@ -169,15 +158,10 @@ impl<'a> DatasetWrite<'a> {
         format: DatasetFormat,
     ) -> Result<Self, String> {
         let topics = TopicCounts::read(connection, dataset).await?;
-        let answers = connection
-            .relation_schema(&dataset.answers().target())
-            .await?
-            .ok_or_else(|| format!("{} has no answers table", dataset.label()))?;
         Ok(Self {
             dataset,
             format,
             topics,
-            answers: Arc::new(answers),
         })
     }
 
@@ -237,13 +221,6 @@ impl<'a> DatasetWrite<'a> {
         for (_, episode) in &written {
             self.topics.count(episode)?;
         }
-        let ids = written.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
-        connection
-            .create_or_append_batches(
-                &self.dataset.answers().target(),
-                vec![AnswerRows::batch(&self.answers, &ids)?],
-            )
-            .await?;
         let files = written
             .iter()
             .filter_map(|(_, episode)| Some(episode.origin().mcap()?.row().clone()))

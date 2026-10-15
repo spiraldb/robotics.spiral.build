@@ -1,7 +1,7 @@
-//! How the checks keep what they measured: one column of the dataset's
-//! answers table per check, and in it each episode's cell, listing the parts
-//! of the recording the check measured in that episode — a stream, a camera,
-//! an arm. A cell holds that episode's measurements alone, so appending
+//! How the checks keep what they measured: one of the dataset's answer
+//! columns per check, and in it each episode's cell, listing the parts of the
+//! recording the check measured in that episode — a stream, a camera, an
+//! arm. A cell holds that episode's measurements alone, so appending
 //! episodes checks only the new ones; whatever compares episodes with each
 //! other — a typical rate, the furthest a joint reached — is judged from
 //! every cell when the report is read.
@@ -12,22 +12,21 @@
 //! Spiral too — medians, thresholds, the episodes a finding names — so only
 //! what it shows comes back to the browser, however many episodes there are.
 use super::stream_reads::CheckedStreams;
+use crate::activities::curation::FillRuns;
 use crate::activities::data::DatasetClient;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use spiral_robotics_common::curation::{
-    AnswerColumn, AnswerSource, AnswerTable, ColumnFill, FillEpisodes,
-};
+use spiral_robotics_common::curation::{AnswerColumn, AnswerSource, ColumnFill, FillEpisodes};
 use spiral_robotics_common::datasets::DatasetSelection;
 use spiral_robotics_common::sql::SqlLiteral;
 
 /// The version of the checks a column was filled by. Changing what any
 /// check measures or keeps bumps it, and every dataset is checked again.
 const DEFINITION: u32 = 2;
-/// The most rows one judgment of the answers table answers with.
+/// The most rows one judgment of the check columns answers with.
 const PAGE_ROWS: usize = 1000;
 
-/// Every check, each one column of the answers table.
+/// Every check, each one answer column.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum CheckKind {
     Rates,
@@ -173,36 +172,36 @@ impl CheckColumn {
             },
         )
     }
-    /// This column's parts in the answers table `table`, as a relation:
-    /// `episode_id`, `part` and the check's fields, one row per part of every
-    /// episode. An episode with no cell, or one the check found nothing to
-    /// measure in, has no row.
-    fn parts_in(&self, table: &str) -> String {
+    /// This column's parts in `dataset`, as a relation: `episode_id`, `part`
+    /// and the check's fields, one row per part of every episode. An episode
+    /// with no cell, or one the check found nothing to measure in, has no
+    /// row.
+    fn parts_in(&self, dataset: &DatasetSelection) -> String {
         let fields = std::iter::once("part")
             .chain(self.fields.iter().copied())
             .map(|field| format!("p.{field} AS {field}"))
             .collect::<Vec<_>>()
             .join(", ");
         format!(
-            "(SELECT a.episode_id AS episode_id, {fields} FROM {table} a CROSS JOIN LATERAL UNNEST(a.{}.value) p)",
-            self.column
+            "(SELECT a.episode_id AS episode_id, {fields} FROM {} a CROSS JOIN LATERAL UNNEST(a.value) p)",
+            dataset.answers(&self.column)
         )
     }
 }
 
-/// The dataset's answers table as the report reads it: which check columns
-/// runs have filled, how many episodes no run has checked, and each check's
-/// parts as a relation its judgment reads in Spiral.
+/// The dataset's check columns as the report reads them: which of them runs
+/// have filled, how many episodes no run has checked, and each check's parts
+/// as a relation its judgment reads in Spiral.
 pub(super) struct CheckTable {
     client: DatasetClient,
-    table: String,
-    filled: Vec<String>,
+    dataset: DatasetSelection,
+    filled: Vec<AnswerColumn>,
     episodes: u64,
     unchecked: u64,
 }
 
-/// How many episodes the answers table holds, and how many lack a cell in
-/// some filled check column.
+/// How many episodes the dataset holds, and how many lack a cell in some
+/// filled check column.
 #[derive(Deserialize)]
 struct EpisodeCounts {
     episodes: Option<u64>,
@@ -210,61 +209,69 @@ struct EpisodeCounts {
 }
 
 impl CheckTable {
-    /// Which of `columns` runs have filled in `dataset`'s answers table, and
-    /// how many of its episodes they hold no cell for.
+    /// Which of `columns` runs have begun filling in `dataset`, each one's
+    /// table there, and how many of its episodes they hold no cell for.
     pub(super) async fn read(
         client: &DatasetClient,
         dataset: &DatasetSelection,
         columns: &[CheckColumn],
     ) -> Result<Self, String> {
-        let table = AnswerTable::of(dataset).table().to_string();
-        let text = |error: crate::client::CommandError| error.to_string();
-        let stored = client
-            .run_spiral_query(format!("SELECT * FROM {table} LIMIT 0"), 1)
+        let stored = FillRuns::current()
+            .answer_columns(dataset)
             .await
-            .map_err(text)?;
+            .map_err(|error| error.to_string())?;
         let filled = columns
             .iter()
-            .map(|column| column.column.as_str().to_owned())
-            .filter(|name| stored.columns().iter().any(|stored| stored.name() == name))
+            .map(|column| column.column.clone())
+            .filter(|column| stored.contains(column))
             .collect::<Vec<_>>();
-        let lacking = match filled.as_slice() {
-            [] => "1".to_owned(),
-            filled => format!(
-                "CASE WHEN {} THEN 1 ELSE 0 END",
-                filled
-                    .iter()
-                    .map(|column| format!("{column} IS NULL"))
-                    .collect::<Vec<_>>()
-                    .join(" OR ")
-            ),
-        };
+        let counting = Self::counting(dataset, &filled);
         let mut table = Self {
             client: client.clone(),
-            table,
+            dataset: dataset.clone(),
             filled,
             episodes: 0,
             unchecked: 0,
         };
-        let counts = table
-            .rows::<EpisodeCounts>(format!(
-                "SELECT count(*) AS episodes, sum({lacking}) AS unchecked FROM {}",
-                table.table
-            ))
-            .await?;
+        let counts = table.rows::<EpisodeCounts>(counting).await?;
         if let Some(counts) = counts.first() {
             table.episodes = counts.episodes.unwrap_or_default();
             table.unchecked = counts.unchecked.unwrap_or_default();
         }
         Ok(table)
     }
-    /// Whether a run has filled `column` for some episode.
-    pub(super) fn holds(&self, column: &CheckColumn) -> bool {
-        self.filled
-            .iter()
-            .any(|filled| filled == column.column.as_str())
+    /// The statement counting `dataset`'s episodes, and those lacking a
+    /// cell in some `filled` column: each column's table joined to the
+    /// episodes, an episode it has no row for unchecked.
+    fn counting(dataset: &DatasetSelection, filled: &[AnswerColumn]) -> String {
+        let joins = (filled.iter().enumerate())
+            .map(|(place, column)| {
+                format!(
+                    " LEFT JOIN {} c{place} ON c{place}.episode_id = e.id",
+                    dataset.answers(column)
+                )
+            })
+            .collect::<String>();
+        let lacking = match filled.len() {
+            0 => "1".to_owned(),
+            filled => format!(
+                "CASE WHEN {} THEN 1 ELSE 0 END",
+                (0..filled)
+                    .map(|place| format!("c{place}.episode_id IS NULL"))
+                    .collect::<Vec<_>>()
+                    .join(" OR ")
+            ),
+        };
+        format!(
+            "SELECT count(*) AS episodes, sum({lacking}) AS unchecked FROM {} e{joins}",
+            dataset.episodes()
+        )
     }
-    /// How many episodes the answers table holds.
+    /// Whether a run has begun filling `column`.
+    pub(super) fn holds(&self, column: &CheckColumn) -> bool {
+        self.filled.contains(&column.column)
+    }
+    /// How many episodes the dataset holds.
     pub(super) fn episodes(&self) -> u64 {
         self.episodes
     }
@@ -279,7 +286,7 @@ impl CheckTable {
     /// measure.
     pub(super) fn parts(&self, columns: &[CheckColumn], kind: CheckKind) -> Option<String> {
         let column = columns.iter().find(|column| column.kind == kind)?;
-        Some(column.parts_in(&self.table))
+        Some(column.parts_in(&self.dataset))
     }
     /// The rows `sql`, a judgment over the parts, answers, each read as `R`.
     /// A judgment answers a row per part or per finding, never a row per
@@ -348,6 +355,24 @@ mod tests {
     }
 
     #[test]
+    fn an_episode_no_filled_column_has_a_row_for_is_unchecked() {
+        let dataset = DatasetSelection::new("folding").unwrap();
+        let rates = AnswerColumn::try_from("check_rates_3f9a2c".to_owned()).unwrap();
+        let frames = AnswerColumn::try_from("check_frames_0b1c2d".to_owned()).unwrap();
+        assert_eq!(
+            CheckTable::counting(&dataset, &[]),
+            "SELECT count(*) AS episodes, sum(1) AS unchecked FROM \"datasets\".\"folding\".\"episodes\" e"
+        );
+        assert_eq!(
+            CheckTable::counting(&dataset, &[rates, frames]),
+            "SELECT count(*) AS episodes, sum(CASE WHEN c0.episode_id IS NULL OR c1.episode_id IS NULL THEN 1 ELSE 0 END) AS unchecked \
+             FROM \"datasets\".\"folding\".\"episodes\" e \
+             LEFT JOIN \"datasets\".\"folding\".\"answers\".\"check_rates_3f9a2c\" c0 ON c0.episode_id = e.id \
+             LEFT JOIN \"datasets\".\"folding\".\"answers\".\"check_frames_0b1c2d\" c1 ON c1.episode_id = e.id"
+        );
+    }
+
+    #[test]
     fn a_columns_parts_unpack_into_one_row_per_part_of_every_episode() {
         let column = CheckColumn::of(
             CheckKind::Rates,
@@ -359,10 +384,10 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(
-            column.parts_in("\"datasets\".\"folding\".\"answers\""),
+            column.parts_in(&DatasetSelection::new("folding").unwrap()),
             format!(
                 "(SELECT a.episode_id AS episode_id, p.part AS part, p.messages AS messages, p.first_ns AS first_ns \
-                 FROM \"datasets\".\"folding\".\"answers\" a CROSS JOIN LATERAL UNNEST(a.{}.value) p)",
+                 FROM \"datasets\".\"folding\".\"answers\".\"{}\" a CROSS JOIN LATERAL UNNEST(a.value) p)",
                 column.column
             )
         );

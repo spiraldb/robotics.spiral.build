@@ -1,6 +1,6 @@
 //! A fill run: the backend asks each model about the episodes that need its
-//! answers, writes them as columns of the dataset's answers table, and then
-//! publishes the views that read those columns.
+//! answers, appends them to the dataset's answer columns, and then publishes
+//! the views that read those columns.
 //!
 //! The browser compiles the run: for each node that asks a model, in path
 //! order, the column its answers go in, which episodes reach the node, and
@@ -102,7 +102,7 @@ impl ColumnFill {
     }
 }
 
-/// A fill run: the dataset whose answers table it writes, every column in
+/// A fill run: the dataset whose answer columns it writes, every column in
 /// the order they are filled, and the views created or replaced once all of
 /// them are.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -12,11 +12,11 @@ mod recording;
 mod streams;
 mod topics;
 mod writer;
-pub use answers::{ColumnAnswers, DatasetAnswers, EpisodeAnswer, StatementAnswers};
+pub use answers::{ColumnAnswers, EpisodeAnswer, StatementAnswers, StoredAnswers};
 pub(crate) use catalog::DatasetCatalogClient;
 #[cfg(test)]
 pub(crate) use catalog::TestJournal;
-pub(crate) use files::{McapFile, McapSources};
+pub(crate) use files::{BundledFile, BundledSource, McapFile, McapSources};
 #[cfg(test)]
 pub(crate) use streams::ArrowTypeText;
 pub(crate) use streams::{MessagePositions, RecordedStream, StreamMessages};

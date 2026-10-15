@@ -3,14 +3,14 @@
 //! one column each, which their entries read.
 use super::PathSource;
 use crate::activities::curation::graph::DatasetStep;
-use spiral_robotics_common::curation::{AnswerColumn, AnswerTable};
+use spiral_robotics_common::curation::AnswerColumn;
 use spiral_robotics_common::datasets::DatasetSelection;
 
 /// Each episode's row: every answer the nodes of a path stored about the
-/// whole episode, read from the dataset's answers table, one column each,
-/// named for the column that stores it. Published, the row is built on the
-/// dataset's listing, one per episode; previewed, it is the listed
-/// episodes'.
+/// whole episode, one column each, read from that answer column's table and
+/// named for it; NULL where the episode was not asked yet or its answer
+/// failed. Published, the row is built on the dataset's listing, one per
+/// episode; previewed, it is the listed episodes'.
 pub(in crate::activities::curation) struct EpisodeRow {
     dataset: DatasetSelection,
     source: PathSource,
@@ -22,8 +22,6 @@ impl EpisodeRow {
     pub(in crate::activities::curation) const ORIGIN: &'static str = "origin_ns";
     /// The entry holding each episode's row.
     pub(in crate::activities::curation) const EPISODES: &'static str = "episodes";
-    /// What the answers table is read as.
-    const STORED: &'static str = "a";
     /// What the dataset's listing of the previewed episodes is read as.
     const LISTED: &'static str = "e";
 
@@ -39,8 +37,8 @@ impl EpisodeRow {
         }
     }
 
-    /// Read each episode's answers in `column` from the answers table; two
-    /// nodes making one call on a path read its one stored column.
+    /// Read each episode's answer in `column`; two nodes making one call on a
+    /// path read its one stored column.
     pub(in crate::activities::curation) fn stored(&mut self, column: &AnswerColumn) {
         if !self.answers.contains(column) {
             self.answers.push(column.clone());
@@ -88,18 +86,27 @@ impl EpisodeRow {
 
     /// Every answer as a column of the row, led by a comma.
     fn answer_columns(&self) -> String {
-        self.answers
-            .iter()
-            .map(|column| format!(", {}.{column}.value AS {column}", Self::STORED))
+        (self.answers.iter().enumerate())
+            .map(|(place, column)| format!(", {}.value AS {column}", Self::alias(place)))
             .collect()
     }
 
-    /// The answers table joined to the episode `id` names.
+    /// Each answer column's table joined to the episode `id` names, keeping
+    /// every episode, asked or not.
     fn joins(&self, id: &str) -> String {
-        let alias = Self::STORED;
-        format!(
-            " JOIN {} {alias} ON {alias}.episode_id = {id}",
-            AnswerTable::of(&self.dataset).table()
-        )
+        (self.answers.iter().enumerate())
+            .map(|(place, column)| {
+                let alias = Self::alias(place);
+                format!(
+                    " LEFT JOIN {} {alias} ON {alias}.episode_id = {id}",
+                    self.dataset.answers(column)
+                )
+            })
+            .collect()
+    }
+
+    /// What the `place`th answer column's table is read as.
+    fn alias(place: usize) -> String {
+        format!("a{place}")
     }
 }

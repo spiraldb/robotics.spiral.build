@@ -107,7 +107,16 @@ fn column(graph: &CurationGraph, node: &str) -> String {
         .to_string()
 }
 
-const ANSWERS: &str = "\"datasets\".\"abc130k\".\"answers\"";
+/// The table of `graph`'s answer column `column`.
+fn answers(graph: &CurationGraph, column: &str) -> String {
+    let column = AnswerColumn::try_from(column.to_owned()).unwrap();
+    graph
+        .listing()
+        .unwrap()
+        .dataset()
+        .answers(&column)
+        .to_string()
+}
 
 #[test]
 fn a_select_on_duration_keeps_whole_episodes_and_publishes_the_dataset_table() {
@@ -157,10 +166,11 @@ fn the_fastest_quarter_by_duration_per_bottle_ranks_every_reaching_episode() {
         ))],
     );
     let tracks = column(&graph, &track);
+    let stored = answers(&graph, &tracks);
     let published = published(&graph, &fastest);
     for step in [
         format!(
-            "episodes AS (SELECT d.episode_id, d.origin_ns, a.{tracks}.value AS {tracks} FROM dataset d JOIN {ANSWERS} a ON a.episode_id = d.episode_id)"
+            "episodes AS (SELECT d.episode_id, d.origin_ns, a0.value AS {tracks} FROM dataset d LEFT JOIN {stored} a0 ON a0.episode_id = d.episode_id)"
         ),
         // The tracks, a picture at a time in log time, folded per episode.
         format!(
@@ -202,7 +212,7 @@ fn the_fastest_quarter_by_duration_per_bottle_ranks_every_reaching_episode() {
     // episodes held, never the boxes.
     let counting = preview(&graph, &track);
     assert!(counting.contains(&format!(
-        "episodes AS (SELECT e.id AS episode_id, CAST(e.message_start_time AS BIGINT) AS origin_ns, a.{tracks}.value AS {tracks} FROM \"datasets\".\"abc130k\".\"episodes\" e JOIN {ANSWERS} a ON a.episode_id = e.id WHERE e.id IN ($1, $2))"
+        "episodes AS (SELECT e.id AS episode_id, CAST(e.message_start_time AS BIGINT) AS origin_ns, a0.value AS {tracks} FROM \"datasets\".\"abc130k\".\"episodes\" e LEFT JOIN {stored} a0 ON a0.episode_id = e.id WHERE e.id IN ($1, $2))"
     )));
     assert!(counting.ends_with(
         "\nSELECT episode_id, timestamp_ns, spql.list.len(objects) AS value FROM track_objects_1_entries"
@@ -389,7 +399,8 @@ fn a_search_lists_every_subtask_with_its_similarity_and_a_select_keeps_the_close
     }
     // The stored subtasks and similarities are each read once on the row.
     for stored in [&subtasks, &similarities] {
-        assert_eq!(published.matches(&format!("a.{stored}.value")).count(), 1);
+        let table = answers(&graph, stored);
+        assert_eq!(published.matches(&format!("LEFT JOIN {table} ")).count(), 1);
     }
     assert!(published.ends_with(
         ", break_down_subtasks_1.break_down_subtasks_1, find_similar_subtasks_1.find_similar_subtasks_1 FROM select_1 r JOIN dataset d ON d.episode_id = r.episode_id LEFT JOIN break_down_subtasks_1 ON break_down_subtasks_1.episode_id = r.episode_id LEFT JOIN find_similar_subtasks_1 ON find_similar_subtasks_1.episode_id = r.episode_id"
@@ -713,7 +724,6 @@ fn no_published_path_asks_a_model_and_each_fill_reads_only_what_is_filled_before
         let statement = published(graph, node);
         let path = CurationPath::to(graph, node).unwrap();
         let fills = path.fills().unwrap();
-        assert!(statement.matches(ANSWERS).count() <= 1, "{statement}");
         let compiled = CompiledEntries::of(&statement);
         // The reach chain: every Select reads the reach above it once.
         for select in path
@@ -724,13 +734,8 @@ fn no_published_path_asks_a_model_and_each_fill_reads_only_what_is_filled_before
             assert_eq!(compiled.reads(&select.stem()), 1, "{statement}");
         }
         for (filled, fill) in fills.iter().enumerate() {
-            assert_eq!(
-                statement
-                    .matches(&format!("a.{}.value", fill.column()))
-                    .count(),
-                1,
-                "{statement}"
-            );
+            let table = answers(graph, fill.column().as_str());
+            assert_eq!(statement.matches(&table).count(), 1, "{statement}");
             let FillEpisodes::Reaching(reaching) = fill.episodes() else {
                 panic!("a published fill asks what reaches the node")
             };

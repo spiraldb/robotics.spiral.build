@@ -3,7 +3,7 @@
 //!
 //! The scorer runs on the Modal service, which scores the scorer's camera of
 //! each episode with a velocity for every frame; a fill stores those scores
-//! in the dataset's answers table, and every reading of the node, a preview
+//! in the node's answer column, and every reading of the node, a preview
 //! included, reads them from there. Its entries are the scores unnested, one
 //! per frame, at the frame's log time with the progress rate it made, and its
 //! column folds them into the episode's timeline. The scorer reads whole

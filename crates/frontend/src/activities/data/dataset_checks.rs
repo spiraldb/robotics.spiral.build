@@ -4,7 +4,7 @@
 //! arm followed its commands, neared its limits, spiked, paused, stuck, and
 //! closed its gripper.
 //!
-//! Each check is a column of the dataset's answers table with one cell per
+//! Each check is one of the dataset's answer columns, with one cell per
 //! episode (see `check_columns`). The operator runs the health check, and a
 //! backend fill run fills every column the dataset lacks, reading each check
 //! over every episode at once; a dataset is checked once, and episodes
@@ -243,8 +243,8 @@ impl CheckInputs {
 /// What a dataset's check columns hold.
 #[derive(Clone, Debug, PartialEq)]
 enum CheckReading {
-    /// The health check has not run, or a run stopped before it filled
-    /// every column.
+    /// The health check has not run, or a run stopped before it began
+    /// filling every column.
     NotRun,
     /// The report, and how many episodes no run has checked yet, such as
     /// ones appended since.

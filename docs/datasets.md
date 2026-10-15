@@ -25,8 +25,8 @@ Hugging Face LeRobot v3 repository @ commit → LeRobot import (FFmpeg) ──�
 ## Catalog layout
 
 `<id>` is the dataset's name: 1–96 letters, numbers, `_` or `-`. Every
-relation is a plain table; `datasets` and `datasets.<id>` are namespace
-prefixes only.
+relation is a plain table; `datasets`, `datasets.<id>`, and its `messages` and
+`answers` are namespace prefixes only.
 
 | Table | One row per | Holds |
 | --- | --- | --- |
@@ -34,7 +34,7 @@ prefixes only.
 | `datasets.<id>.topics` | stream | one recorded stream: a topic and the schema its messages use (below) |
 | `datasets.<id>.messages.<stream>` | message | the messages of one stream (below) |
 | `datasets.<id>.files` | MCAP episode | the episode's source MCAP file: `recording` (its key) and `source`, an `spql.io.Blob` holding its bytes inline, or pointing at its pinned Hugging Face URI. LeRobot datasets have none |
-| `datasets.<id>.answers` | episode | model answers about the episode, keyed by `episode_id` ([curation](curation.md#answers)) |
+| `datasets.<id>.answers.<column>` | episode asked | one answer column, what one exact model call answered: `episode_id` (UUID, `arrow.uuid`, not null) and `value`, the answer, NULL where the model could not answer. An episode with no row is not asked yet ([curation](curation.md#stored-answers)) |
 
 A dataset exists when its `episodes` table does, and is an MCAP dataset when
 it also has `files`; the catalog alone says both, so listing datasets reads no
@@ -105,12 +105,15 @@ Utf8View}` holding one H.264 access unit, `format` `h264`.
 ## Writing
 
 Imports write episodes in batches of up to 32, each batch in one Spiral
-transaction: every stream's message rows first, then the episodes' rows and an
-`answers` row per new episode, and last the `topics` table replaced with the
-updated counts, once per transaction, since Spiral refuses to replace a table
-the same transaction already wrote. A reader that finds an episode therefore
-finds all its messages. A
-failed batch commits nothing; the batches before it stay.
+transaction: every stream's message rows first, then the episodes' rows (and
+an MCAP episode's file), and last the `topics` table replaced with the updated
+counts, once per transaction, since Spiral refuses to replace a table the same
+transaction already wrote. A reader that finds an episode therefore finds all
+its messages. A failed batch commits nothing; the batches before it stay.
+
+Writing episodes never touches the answer columns: a new episode has no row
+in any of them, which reads as not asked yet. Only fill runs write answers,
+and only by appending rows ([curation](curation.md#stored-answers)).
 
 - **Recording.** A Rollout episode is one batch of one episode: its file goes
   to `files`, its messages to their streams. Storing the same key with the
@@ -210,10 +213,13 @@ capture types; the metadata Studio writes into its files is ordinary optional
 content. [Episode playback](episode-playback.md) describes the inspection
 built on them.
 
-Project bundles carry each MCAP dataset's `files` rows and its name,
-including empty datasets; import drops the project's MCAP datasets and imports
-the bundle's files again in the same transaction as Studio state, so restored
-episodes get new identities. A bundle naming a dataset the project holds as a
+Project bundles carry each MCAP dataset's name and its `files` rows as their
+Blobs hold them, the bytes of a file held inline or the pinned URI of one
+imported from Hugging Face, including empty datasets; import drops the
+project's MCAP datasets and imports the bundle's files again, downloading each
+pinned one at its commit, in the same transaction as Studio state, so restored
+episodes get new identities and a pinned dataset keeps pointing at its URIs.
+A bundle naming a dataset the project holds as a
 LeRobot dataset is refused before anything changes. A LeRobot dataset stays in its project and is
 imported again from Hugging Face. See
 [project transfer](studio-sqlite.md#project-transfer).

@@ -4,7 +4,7 @@
 //! The node asks the backend to break each episode down over the chosen
 //! camera's video, with the episode's task when the dataset records one: its
 //! recorded instruction, or the task a LeRobot dataset lists. A fill stores
-//! the answer in the dataset's answers table, and the published view and the
+//! the answer in the node's answer column, and the published view and the
 //! preview read it from there. The model reads each episode whole, so what
 //! it is asked never depends on anything above the node. Its entries list
 //! the subtasks of every episode, each with its place in the answer, which

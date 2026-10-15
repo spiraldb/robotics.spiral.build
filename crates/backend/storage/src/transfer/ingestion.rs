@@ -7,6 +7,7 @@ mod downloads;
 mod lerobot;
 
 use downloads::HuggingFaceDownloads;
+pub(super) use downloads::PinnedMcapFiles;
 use lerobot::LeRobotRepository;
 use reqwest::StatusCode;
 use reqwest::header::LINK;
@@ -18,7 +19,7 @@ use spiral_robotics_common::datasets::{
 };
 use url::Url;
 
-use crate::datasets::{DatasetImport, DatasetWrite, DecodedEpisode, McapFile};
+use crate::datasets::{DatasetImport, DatasetWrite, DecodedEpisode};
 use crate::manager::StorageManager;
 
 const HUGGING_FACE_ORIGIN: &str = "https://huggingface.co";
@@ -406,14 +407,10 @@ impl RepositoryEpisodes<'_> {
     ) -> Result<DecodedEpisode, String> {
         match self {
             Self::Mcap(files) => {
-                let path = files[position].path().to_owned();
-                let bytes = downloads.bytes(&path).await?;
-                let uri = downloads.pinned_uri(&path)?;
-                tokio::task::spawn_blocking(move || {
-                    DecodedEpisode::of_mcap(McapFile::pinned(&path, uri, &bytes)?, &bytes)
-                })
-                .await
-                .map_err(|error| format!("decoding an MCAP file failed: {error}"))?
+                let path = files[position].path();
+                downloads
+                    .mcap_episode(path, downloads.bytes(path).await?)
+                    .await
             }
             Self::LeRobot(repository) => repository.episode(position).await,
         }
@@ -518,7 +515,6 @@ impl HuggingFaceFileSelection {
         if let Self::McapRecordings = self {
             tables.push(dataset.files());
         }
-        tables.push(dataset.answers());
         tables.iter().map(|table| table.target()).collect()
     }
 
@@ -619,17 +615,12 @@ mod tests {
             [
                 "datasets.pick-place.episodes",
                 "datasets.pick-place.topics",
-                "datasets.pick-place.files",
-                "datasets.pick-place.answers"
+                "datasets.pick-place.files"
             ]
         );
         assert_eq!(
             HuggingFaceFileSelection::LeRobot.planned(&dataset),
-            [
-                "datasets.pick-place.episodes",
-                "datasets.pick-place.topics",
-                "datasets.pick-place.answers"
-            ]
+            ["datasets.pick-place.episodes", "datasets.pick-place.topics"]
         );
         assert!(
             HuggingFaceDatasetSource::new("pick.place", "org/data")

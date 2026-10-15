@@ -15,11 +15,11 @@
 //! keeps which node wrote each column and what it means ([`TableColumns`]),
 //! so a Select, Data, and Training read a column by the node that wrote it.
 //!
-//! Every model answer is stored: each model node writes one column of the
-//! dataset's answers table per exact call ([`AnswerColumn`]), and a fill run
-//! computes it for every episode that reaches the node and does not have it
-//! yet ([`CurationPath::fills`]), in path order, so the episodes reaching a
-//! node are read over the columns above it. The published view reads those
+//! Every model answer is stored: each model node writes one of the dataset's
+//! answer columns per exact call ([`AnswerColumn`]), a table each, and a fill
+//! run computes it for every episode that reaches the node and does not have
+//! it yet ([`CurationPath::fills`]), in path order, so the episodes reaching
+//! a node are read over the columns above it. The published view reads those
 //! columns and asks no model.
 //!
 //! A preview reads one model node's entries over the stored answers of the

@@ -3,7 +3,7 @@
 //! The tracker runs on the Modal service, which tracks what the node names
 //! on its camera at the node's rate and answers every sampled picture with
 //! the objects it holds, each by track and box; a fill stores those tracks
-//! in the dataset's answers table, and every reading of the node, a preview
+//! in the node's answer column, and every reading of the node, a preview
 //! included, reads them from there. Its entries are the pictures unnested,
 //! one per picture at its log time with its objects, and its column folds
 //! them into the episode's timeline. The tracker reads whole episodes, so

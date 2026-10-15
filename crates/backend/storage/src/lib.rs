@@ -18,9 +18,10 @@ mod transfer;
 mod workspaces;
 
 pub mod answers {
-    //! Each dataset's table of stored model answers, which curation fills write.
+    //! Each dataset's stored model answers, a table per answer column, which
+    //! curation fills write.
 
-    pub use crate::datasets::{ColumnAnswers, DatasetAnswers, EpisodeAnswer, StatementAnswers};
+    pub use crate::datasets::{ColumnAnswers, EpisodeAnswer, StatementAnswers, StoredAnswers};
 }
 
 pub mod bundle {

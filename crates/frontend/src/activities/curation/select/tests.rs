@@ -2,7 +2,7 @@
 //! the preview's reads is what Spiral's engine answered for the compiled
 //! statement over the same answers (`spql.list.collect` folding `kept`,
 //! `RANK` and `COUNT` windows ranking), run with literal stand-ins for the
-//! listing and the answers table.
+//! listing and the answer columns.
 use crate::activities::curation::annotate::{CategoryPlacement, JudgmentValue, SubtaskRow};
 use crate::activities::curation::document::{
     Comparison, CurationGraph, CurationNodeKind, DATASET_NODE_ID, EpisodeCondition, EpisodeNumber,

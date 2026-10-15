@@ -10,10 +10,10 @@
 use super::fill::FillRuns;
 use crate::OperationError;
 use spiral_robotics_common::curation::{
-    AnswerTable, CurationDeletion, CurationDocument, CurationSummary, FillRequest, FillStatus,
+    AnswerColumn, CurationDeletion, CurationDocument, CurationSummary, FillRequest, FillStatus,
     FilledEpisodesRequest, PublishedView, UnpublishRequest, ViewName,
 };
-use spiral_robotics_common::datasets::EpisodeId;
+use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 use spiral_robotics_storage::{ProviderKeys, StorageManager};
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -123,14 +123,28 @@ impl CurationManager {
     }
 
     /// The episodes `request`'s column holds an answer for, failed ones
-    /// included; none before the column is first written.
+    /// included; none before a run first fills the column.
     pub(super) async fn filled(
         &self,
         request: FilledEpisodesRequest,
     ) -> Result<BTreeSet<EpisodeId>, OperationError> {
+        let filled = self
+            .storage
+            .stored_answers(request.dataset(), request.column())
+            .filled()
+            .await
+            .map_err(OperationError::External)?;
+        Ok(filled.unwrap_or_default())
+    }
+
+    /// The answer columns `dataset` holds a table for: each one a run has
+    /// started filling.
+    pub(super) async fn answer_columns(
+        &self,
+        dataset: DatasetSelection,
+    ) -> Result<BTreeSet<AnswerColumn>, OperationError> {
         self.storage
-            .dataset_answers(AnswerTable::of(request.dataset()))
-            .filled(request.column())
+            .answer_columns(&dataset)
             .await
             .map_err(OperationError::External)
     }

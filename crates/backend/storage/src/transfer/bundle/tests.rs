@@ -3,6 +3,7 @@ use arrow_array::{ArrayRef, BinaryArray, NullArray, StringArray, UInt64Array};
 use arrow_ipc::writer::IpcWriteOptions;
 use arrow_schema::{DataType, Field, Schema};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 fn arrow_payload(batch: &RecordBatch) -> Vec<u8> {
     arrow_payload_batches(std::slice::from_ref(batch))
 }
@@ -200,6 +201,35 @@ impl Fixture {
         }
         bundle.finish().unwrap()
     }
+    /// The `dataset_source` rows of `files`, each its dataset, key and
+    /// source.
+    fn sources(files: &[(&str, &str, BundledSource<'_>)]) -> RecordBatch {
+        let (mut held, mut uris, mut sizes) = (Vec::new(), Vec::new(), Vec::new());
+        for (_, _, source) in files {
+            let (bytes, uri, size) = match *source {
+                BundledSource::Held(bytes) => (Some(bytes), None, bytes.len() as u64),
+                BundledSource::Pinned { uri, size } => (None, Some(uri), size),
+            };
+            held.push(bytes);
+            uris.push(uri);
+            sizes.push(size);
+        }
+        RecordBatch::try_new(
+            Arc::new(Table::DatasetSources.schema()),
+            vec![
+                Arc::new(StringArray::from_iter_values(
+                    files.iter().map(|(dataset, _, _)| *dataset),
+                )),
+                Arc::new(StringArray::from_iter_values(
+                    files.iter().map(|(_, key, _)| *key),
+                )),
+                Arc::new(BinaryArray::from(held)),
+                Arc::new(StringArray::from(uris)),
+                Arc::new(UInt64Array::from(sizes)),
+            ],
+        )
+        .unwrap()
+    }
     fn zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
         for (name, bytes) in entries {
@@ -212,18 +242,22 @@ impl Fixture {
 }
 
 #[test]
-fn data_archive_preserves_recording_bytes() {
-    let sources = RecordBatch::try_new(
-        Arc::new(Table::DatasetSources.schema()),
-        vec![
-            Arc::new(StringArray::from(vec!["demonstrations"])),
-            Arc::new(StringArray::from(vec!["take.mcap"])),
-            Arc::new(BinaryArray::from(vec![
-                b"opaque recording bytes".as_slice(),
-            ])),
-        ],
-    )
-    .unwrap();
+fn data_archive_preserves_held_bytes_and_pinned_uris() {
+    let sources = Fixture::sources(&[
+        (
+            "demonstrations",
+            "take.mcap",
+            BundledSource::Held(b"opaque recording bytes"),
+        ),
+        (
+            "demonstrations",
+            "episodes/take.mcap",
+            BundledSource::Pinned {
+                uri: "hf://datasets/org/recordings@abcdef/episodes/take.mcap",
+                size: 9,
+            },
+        ),
+    ]);
     let bytes = Fixture::bundle(
         &Manifest::current(vec!["demonstrations".into()]),
         b"sqlite validated separately",
@@ -251,7 +285,7 @@ fn data_archive_rejects_changed_source_schema() {
     );
     let error = ProjectBundle::decode(&bytes).err().unwrap();
     assert!(
-        error.contains("dataset_source has 1 columns; expected 3"),
+        error.contains("dataset_source has 1 columns; expected 5"),
         "{error}"
     );
 }
@@ -272,7 +306,7 @@ async fn export_writes_what_decode_reads() {
 }
 
 #[tokio::test]
-async fn format_five_is_a_manifest_sqlite_and_one_arrow_stream_per_relation() {
+async fn format_six_is_a_manifest_sqlite_and_one_arrow_stream_per_relation() {
     let store = crate::StudioStore::in_memory();
     let source = store.project(&Fixture::connection());
     crate::SessionStore::new(store.clone())
@@ -322,7 +356,7 @@ fn older_formats_wrong_members_and_corrupt_data_are_rejected() {
     let format_three = Fixture::zip(&[("studio.sqlite3", b"unused"), ("spiral.data", b"unused")]);
     assert!(error(&format_three).contains("older Studio versions"));
     let manifest = Manifest {
-        format_version: 4,
+        format_version: 5,
         ..Manifest::current(vec![])
     };
     assert!(
@@ -331,7 +365,7 @@ fn older_formats_wrong_members_and_corrupt_data_are_rejected() {
             b"unused",
             Fixture::empty_relations()
         ))
-        .contains("format 4 is not supported")
+        .contains("format 5 is not supported")
     );
 
     let manifest = serde_json::to_vec(&Manifest::current(vec![])).unwrap();
@@ -447,7 +481,7 @@ async fn spiral_failure_rolls_back_staged_sqlite_replacements() {
             .await
             .unwrap()
     );
-    let source = ProjectBundleImport::new(&project, &bytes).unwrap();
+    let source = ProjectBundleImport::new(&project, &bytes, PinnedMcapFiles::new(None)).unwrap();
     let database = Arc::new(FailingSpiral::default());
     let spiral = crate::ProjectStore::new(
         crate::SpiralConnection::new(settings, crate::SpiralAccess::fixed("token".into())),
@@ -510,11 +544,9 @@ impl HeldDatasets {
         journal.name(&[
             old.episodes(),
             old.topics(),
-            old.answers(),
             old.files(),
             svla.episodes(),
             svla.topics(),
-            svla.answers(),
         ]);
         Self {
             _journal: journal,
@@ -537,15 +569,7 @@ impl HeldDatasets {
         let studio = self.studio.project(&self.spiral.connection_settings());
         let snapshot = StudioSnapshot::capture(&studio).await.unwrap();
         let take = RolloutFixture::mcap("take", true);
-        let sources = RecordBatch::try_new(
-            Arc::new(Table::DatasetSources.schema()),
-            vec![
-                Arc::new(StringArray::from(vec!["demo"])),
-                Arc::new(StringArray::from(vec!["take.mcap"])),
-                Arc::new(BinaryArray::from(vec![take.as_slice()])),
-            ],
-        )
-        .unwrap();
+        let sources = Fixture::sources(&[("demo", "take.mcap", BundledSource::Held(&take))]);
         Fixture::bundle(
             &Manifest::current(datasets.iter().map(|name| (*name).to_owned()).collect()),
             &snapshot.bytes().unwrap(),
@@ -572,7 +596,7 @@ async fn an_import_replaces_the_mcap_datasets_and_leaves_lerobot_ones() {
     let summary = project
         .storage()
         .transfer()
-        .import_project(&bytes)
+        .import_project(&bytes, None)
         .await
         .unwrap();
     assert_eq!((summary.relations(), summary.rows()), (1, 1));
@@ -582,13 +606,10 @@ async fn an_import_replaces_the_mcap_datasets_and_leaves_lerobot_ones() {
     for (table, expected) in [
         (demo.episodes(), 1),
         (demo.files(), 1),
-        (demo.answers(), 1),
         (empty.episodes(), 0),
         (empty.topics(), 0),
         (empty.files(), 0),
-        (empty.answers(), 0),
         (svla.episodes(), 0),
-        (svla.answers(), 0),
     ] {
         assert_eq!(
             project.rows(table.clone()).await,
@@ -612,7 +633,7 @@ async fn an_import_refuses_a_bundle_naming_a_lerobot_dataset() {
     let error = project
         .storage()
         .transfer()
-        .import_project(&bytes)
+        .import_project(&bytes, None)
         .await
         .unwrap_err();
     assert!(
@@ -621,4 +642,189 @@ async fn an_import_refuses_a_bundle_naming_a_lerobot_dataset() {
     );
     let old = DatasetSelection::new("old").unwrap();
     assert_eq!(project.rows(old.episodes()).await, Ok(1), "nothing changed");
+}
+
+/// A stand-in for Hugging Face serving one file at a commit, counting its
+/// downloads.
+struct FakeHuggingFace {
+    origin: String,
+    downloads: Arc<AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl FakeHuggingFace {
+    const FILE: &str = "episodes/take.mcap";
+    const URI: &str = "hf://datasets/org/recordings@abcdef/episodes/take.mcap";
+
+    /// `bytes` as [`Self::URI`]'s file.
+    async fn serving(bytes: Vec<u8>) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let downloads = Arc::new(AtomicUsize::new(0));
+        let counted = downloads.clone();
+        let app = axum::Router::new().route(
+            "/datasets/org/recordings/resolve/abcdef/episodes/take.mcap",
+            axum::routing::get(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(bytes.clone())
+            }),
+        );
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        Self {
+            origin,
+            downloads,
+            task,
+        }
+    }
+
+    fn pinned(&self) -> PinnedMcapFiles {
+        PinnedMcapFiles::at(&self.origin)
+    }
+
+    fn downloads(&self) -> usize {
+        self.downloads.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for FakeHuggingFace {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// `dataset`'s `files` rows in `spiral`, as a bundle carries them.
+async fn bundled_rows(
+    spiral: &crate::ProjectStore,
+    dataset: &DatasetSelection,
+) -> Vec<RecordBatch> {
+    let mut connection = spiral.connect_exclusive().await.unwrap();
+    let batches = connection
+        .read_batches(&McapSources::export_sql(dataset))
+        .await
+        .unwrap();
+    batches
+        .iter()
+        .map(|batch| McapSources::bundled(dataset, batch).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_bundle_points_at_pinned_files_and_its_import_downloads_them() {
+    use crate::datasets::fixtures::RolloutFixture;
+    use crate::datasets::{DatasetImport, DecodedEpisode};
+    let take = RolloutFixture::mcap("take", false);
+    let (source, _) = crate::db::UnquotedMemory::store().await;
+    let held = DatasetSelection::new("held").unwrap();
+    let pinned = DatasetSelection::new("pinned").unwrap();
+    for (dataset, file) in [
+        (&held, McapFile::held("take.mcap", &take)),
+        (
+            &pinned,
+            McapFile::pinned(FakeHuggingFace::FILE, FakeHuggingFace::URI.into(), &take),
+        ),
+    ] {
+        DatasetImport::new(&source, dataset, DatasetFormat::Mcap)
+            .commit(vec![DecodedEpisode::of_mcap(file.unwrap(), &take).unwrap()])
+            .await
+            .unwrap();
+    }
+    let studio = crate::StudioStore::in_memory();
+    let bytes = ProjectBundle
+        .export(
+            &mut source.connect_exclusive().await.unwrap(),
+            ProjectBundleExport::new(
+                &studio.project(&source.connection_settings()),
+                vec![held.clone(), pinned.clone()],
+            ),
+        )
+        .await
+        .unwrap();
+    let decoded = ProjectBundle::decode(&bytes).unwrap();
+    let carried = McapSources::files(&decoded.tables[0].1, &decoded.datasets).unwrap();
+    let files = |dataset: &DatasetSelection| {
+        carried[dataset]
+            .iter()
+            .map(|file| (file.key(), file.source()))
+            .collect::<Vec<_>>()
+    };
+    let pinned_take = BundledSource::Pinned {
+        uri: FakeHuggingFace::URI,
+        size: take.len() as u64,
+    };
+    assert_eq!(files(&held), [("take.mcap", BundledSource::Held(&take))]);
+    assert_eq!(files(&pinned), [(FakeHuggingFace::FILE, pinned_take)]);
+
+    let huggingface = FakeHuggingFace::serving(take.clone()).await;
+    let (target, _) = crate::db::UnquotedMemory::store().await;
+    let studio = crate::StudioStore::in_memory();
+    let summary = ProjectBundle
+        .import(
+            &mut target.connect_exclusive().await.unwrap(),
+            ProjectBundleImport::new(
+                &studio.project(&target.connection_settings()),
+                &bytes,
+                huggingface.pinned(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!((summary.relations(), summary.rows()), (1, 2));
+    assert_eq!(huggingface.downloads(), 1);
+    for (dataset, expected) in [(&held, BundledSource::Held(&take)), (&pinned, pinned_take)] {
+        let rows = bundled_rows(&target, dataset).await;
+        let restored = McapSources::files(&rows, std::slice::from_ref(dataset)).unwrap();
+        assert_eq!(
+            restored[dataset]
+                .iter()
+                .map(BundledFile::source)
+                .collect::<Vec<_>>(),
+            [expected],
+            "{}",
+            dataset.label()
+        );
+        let episodes = target
+            .connect()
+            .await
+            .unwrap()
+            .read_batches(&format!("SELECT * FROM {}", dataset.episodes()))
+            .await
+            .unwrap();
+        assert_eq!(episodes.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+    }
+}
+
+#[tokio::test]
+async fn an_import_refuses_a_pinned_file_of_another_size() {
+    use crate::datasets::fixtures::RolloutFixture;
+    let take = RolloutFixture::mcap("take", false);
+    let huggingface = FakeHuggingFace::serving(take.clone()).await;
+    let (target, _) = crate::db::UnquotedMemory::store().await;
+    let studio = crate::StudioStore::in_memory();
+    let project = studio.project(&target.connection_settings());
+    let sources = Fixture::sources(&[(
+        "pinned",
+        FakeHuggingFace::FILE,
+        BundledSource::Pinned {
+            uri: FakeHuggingFace::URI,
+            size: take.len() as u64 + 1,
+        },
+    )]);
+    let bytes = Fixture::bundle(
+        &Manifest::current(vec!["pinned".into()]),
+        &StudioSnapshot::capture(&project)
+            .await
+            .unwrap()
+            .bytes()
+            .unwrap(),
+        [arrow_payload(&sources)],
+    );
+    let error = ProjectBundle
+        .import(
+            &mut target.connect_exclusive().await.unwrap(),
+            ProjectBundleImport::new(&project, &bytes, huggingface.pinned()).unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.contains("its dataset recorded"), "{error}");
 }

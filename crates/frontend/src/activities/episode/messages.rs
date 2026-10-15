@@ -285,6 +285,15 @@ impl MessageBuffer {
         }
         Ok(Rc::new(loaded))
     }
+    /// Every message one episode query lists, in one request: a read its
+    /// statement bounds rather than a window pages.
+    pub(super) async fn query(request: &EpisodeQueryRequest) -> Result<Self, String> {
+        let answer = MessagePage::fetch(request).await?;
+        Ok(Self {
+            schema: answer.schema,
+            batches: answer.batches,
+        })
+    }
     pub(in crate::activities) fn value_field(&self) -> Result<MessageField, String> {
         self.schema
             .field_with_name("value")
@@ -447,12 +456,21 @@ struct MessagePage {
 }
 impl MessagePage {
     async fn read(request: &MessageRead) -> Result<Self, String> {
+        let answer = Self::fetch(&EpisodeQueryRequest::new(
+            request.episode(),
+            request.sql()?,
+            request.max_rows(),
+        ))
+        .await?;
+        let limit = request.window().map_or(0, |window| window.limit());
+        let mut page = Self::keep(answer.schema, answer.batches, limit)?;
+        page.bytes = answer.bytes;
+        Ok(page)
+    }
+    /// Every row `request` answers, as a page nothing continues.
+    async fn fetch(request: &EpisodeQueryRequest) -> Result<Self, String> {
         let response = DatasetClient::current()
-            .run_episode_arrow_query(&EpisodeQueryRequest::new(
-                request.episode(),
-                request.sql()?,
-                request.max_rows(),
-            ))
+            .run_episode_arrow_query(request)
             .await
             .map_err(|e| e.to_string())?;
         let bytes = response.len();
@@ -462,10 +480,12 @@ impl MessagePage {
         let batches = reader
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
-        let limit = request.window().map_or(0, |window| window.limit());
-        let mut page = Self::keep(schema, batches, limit)?;
-        page.bytes = bytes;
-        Ok(page)
+        Ok(Self {
+            schema,
+            batches,
+            next: None,
+            bytes,
+        })
     }
     /// The first `limit` rows; one more means the read continues after them.
     fn keep(

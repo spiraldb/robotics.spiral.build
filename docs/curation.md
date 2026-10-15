@@ -8,8 +8,8 @@ the dataset's first 100 episodes, and you publish any node as a named view: a
 read-only query Studio keeps and Spiral runs whenever it is read, with one
 row per episode over every episode of the dataset. Every model answer is
 stored: publishing asks each model about the episodes that reach its node
-once, in the background, and writes the answers into the dataset's answers
-table, which the view reads without asking any model again.
+once, in the background, and appends the answers to the dataset's answer
+columns, which the view reads without asking any model again.
 
 How a model sees that data (sample rate, cameras, image size, normalization)
 is Training's concern, not Curation's. [Why](#why) records the decisions
@@ -155,19 +155,38 @@ subtask is named before its fields are read.
 
 ### Stored answers
 
-Each dataset has an answers table, `datasets.<id>.answers` beside its
-`episodes`: one row per episode keyed by `episode_id`, written in the same
-transaction as each batch of episodes ([datasets](datasets.md#writing)). Every model
-call a node makes is one column, named for what it measures and six hex
-digits of a SHA-256 of the exact call (`score_progress_3f9a2c`): the function
-or service, the model revision, the Modal service revision, the arguments
-(Track objects' rate among them), the camera or where the task is read, and for a
-judgment the Break down column it reads. Identical calls across curations
-share a column. A value is `STRUCT(value …)`: a NULL struct is an episode not
-asked yet, a NULL `value` one the model could not answer, which is never
-asked again. Each node's table column is derived from its stored answer in
-SQL, so answers stored before a column's shape changed are read again
-without asking any model. Unpublishing drops only the view.
+Every model call a node makes is one answer column, named for what it
+measures and six hex digits of a SHA-256 of the exact call
+(`score_progress_3f9a2c`): the function or service, the model revision, the
+Modal service revision, the arguments (Track objects' rate among them), the
+camera or where the task is read, and for a judgment the Break down column it
+reads. Identical calls across curations share a column. Each column is a
+table of its own beside the dataset's `episodes`,
+`datasets.<id>.answers.<column>` ([datasets](datasets.md#catalog-layout)):
+`episode_id` and `value`, one row per episode asked. A row whose `value` is
+NULL is an episode the model could not answer, which is never asked again,
+and an episode with no row is not asked yet, as every episode is when it is
+added: writing episodes never touches the answer columns. Fills only append
+rows, never update or delete one, so the columns need no SQL writes. Each
+node's table column is derived from its stored answer in SQL, so answers
+stored before a column's shape changed are read again without asking any
+model. Unpublishing drops only the view.
+
+A column's table exists once a fill run has started filling it: the run
+makes it, empty, before it asks about any episode, its `value` typed as the
+call's answers are (a model's as its call declares them, a dataset
+statement's as it plans with `LIMIT 0`) with every nested field nullable. So
+every statement a curation compiles finds the tables it reads: a published
+view is created only once its run has filled every column it reads, a
+preview reads only after its fill, and the episodes reaching a node are read
+over the columns filled before it, even ones no episode reached. The episode
+row joins each column's table with a `LEFT JOIN` on `episode_id`, so an
+episode not asked yet and one whose answer failed both read NULL. A reader
+that may come before any run asks first instead of reading a table that may
+not be there: a curation opened asks which episodes a column holds (none
+before its table exists), and the dataset health check asks which answer
+columns the dataset holds (`POST /api/curation-answers/columns`, read from
+the catalog) and reads only those.
 
 | Node | Stored answer, per episode |
 | --- | --- |
@@ -333,9 +352,11 @@ object tracking service eight, two H100 containers' worth; and retries 408s,
 says),
 and holds the answers in memory until they reach 4 MiB, since Spiral refuses
 to change more than 16 MiB of a hosted table in one statement. Each full set,
-and the rest at the end, is written while the asking goes on: ingested into a
-staging table, the column added the first time, merged in by `episode_id`,
-and the staging table dropped. A rejected video (422) is that episode's
+and the rest at the end, is written while the asking goes on: appended to
+the column's table by bulk ingest, without the episodes the table already
+holds, so two runs filling one column at once (two previews of one call)
+still leave one row per episode; writes wait for each other and for every
+read of the project. A rejected video (422) is that episode's
 failed answer, and so is an episode a model through OpenRouter could not
 answer; a refused token, a service on another revision or a model it can't
 run (409), a model it doesn't know (404), a refused OpenRouter key or an
@@ -399,6 +420,7 @@ published view, since each read Spiral's retired Datasets.
 | Every node compiles to Spiral SQL, and a published view is the whole curation | One executable form: every reader sees exactly what was curated | Studio materializing results |
 | Per-row model work is the backend's: a call it makes through OpenRouter, or a Modal service for video models; an authoring suggestion, such as proposed categories, stays in the browser and becomes part of the call | A view reads only what Spiral stores, and Studio owns the calls its models answer | Browser-orchestrated calls per episode; Spiral's `spql.ai` functions in fill statements |
 | Model answers are stored per dataset, one column per exact call, filled by a backend run | A view over the whole dataset must not ask its models on every read, and identical calls share their work | Re-asking on every read over the first 20 episodes; waiting for Spiral to cache |
+| One table per answer column, written only by appending (decided 2026-10-14) | Appends need no SQL writes: plain bulk ingest now, Spiral's transactions later | One answers table per dataset, a column added and merged in per call |
 | One row per episode, with `kept` as a list of ranges (decided 2026-10-08) | Upstream SpiralDB is moving to one episode as one row; an episode's answers stay whole beside what is kept of it | One row per kept interval; one row per moment |
 | Model nodes add columns; the Select is the one filter (decided 2026-10-08) | One place owns every cutoff, and any column can be cut on, such as duration per bottle | Each measure keeping by its own rule |
 | Column meaning is the compiler's, by node id | A Select, Data, and Training read a column by what wrote it, and a renamed category is still the same column | Inspecting the view's types at run time |
@@ -411,8 +433,8 @@ published view, since each read Spiral's retired Datasets.
 
 ## Not yet
 
-- Columns no curation reads any more stay in the answers table; collecting
-  them is later. Cancelling a running query is Spiral's to add.
+- Answer columns no curation reads any more stay; collecting them is
+  later. Cancelling a running query is Spiral's to add.
 - Training reads published views ([Training](training.md)): it resamples
   each kept range onto its own clock, and the checkpoint carries how the
   model saw the data. Exposure normalization and colour jitter are not

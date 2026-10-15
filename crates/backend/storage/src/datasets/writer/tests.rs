@@ -45,7 +45,7 @@ async fn an_import_commits_32_episodes_a_transaction() {
             .unwrap();
     }
     assert_eq!(commits.load(Ordering::SeqCst), 3);
-    for table in [dataset.episodes(), dataset.answers(), dataset.files()] {
+    for table in [dataset.episodes(), dataset.files()] {
         assert_eq!(
             count(&store, format!("SELECT count(*) AS rows FROM {table}")).await,
             70,

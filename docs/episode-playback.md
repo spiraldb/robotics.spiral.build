@@ -39,15 +39,16 @@ visible span, at the frame shown mid-cell, visited left to right so each costs
 at most one keyframe interval, and kept while the row is shown.
 
 The still a row of episodes leads with, in Data's rail and in every Curation
-index, is decoded on the server instead (`episode/still.rs`): one statement
-assembles the camera's packets with `spql.video.from_packets`, timed from the
-episode's first message, and decodes the frame at its instant with
-`spql.video.frame_at(…, 'ceil')` and `spql.video.decode`. A packet video starts
-at a keyframe and no packet row says which packets are keyframes, so the
-statement reads from the episode's first packet to a second past the instant;
-decoding takes only the group of pictures that holds the frame. Training reads
-a camera's size from the same still at the first episode's start, with
-`spql.image.width` and `spql.image.height`.
+index, is decoded in the browser too, by the same decoder (`episode/still.rs`).
+Its frame is the first the camera logged at or after its instant, within a
+second, and one episode query reads only the packets that decode it: from the
+last keyframe at or before that frame up to the frame, found by the stream's
+`keyframe` and `ordinal` columns. A still therefore reads one group of pictures
+at most, and an episode's opening still one packet. It is drawn as a JPEG just
+large enough to cover the largest slot a row gives it, decoded once per
+project, camera, episode and instant (`EpisodeStills`). Training reads a
+camera's size from the same still at the first episode's start, as the decoded
+frame displays.
 
 ## One message transport
 

@@ -73,6 +73,12 @@ impl ProjectFactory {
         StagedEpisodes::new(self.data.studio.clone(), endpoint)
     }
 
+    /// The deployment's Hugging Face token, which a project import downloads
+    /// pinned files with.
+    fn huggingface_token(&self) -> Option<&str> {
+        self.data.keys.huggingface_token()
+    }
+
     /// A project that reaches Spiral with `access`.
     fn create(
         &self,
@@ -321,7 +327,7 @@ impl ProjectRegistry {
         let summary = candidate
             .storage()
             .transfer()
-            .import_project(document)
+            .import_project(document, self.factory.huggingface_token())
             .await
             .map_err(OperationError::External)?;
         if let Some(slot) = self

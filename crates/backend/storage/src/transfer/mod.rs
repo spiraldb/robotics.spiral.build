@@ -10,6 +10,7 @@ use spiral_robotics_common::datasets::ProjectImportSummary;
 
 use crate::db::ProjectStore;
 use bundle::{ProjectBundleExport, ProjectBundleImport};
+use ingestion::PinnedMcapFiles;
 
 /// Portable transfer operations for one project.
 pub struct TransferPersistence<'a> {
@@ -28,7 +29,9 @@ impl<'a> TransferPersistence<'a> {
         }
     }
 
-    /// The project's Studio records and every MCAP dataset's files.
+    /// The project's Studio records and every MCAP dataset's files: the
+    /// bytes of each it holds, the pinned Hugging Face URI of each it points
+    /// at.
     pub async fn export_project(&self) -> Result<Vec<u8>, String> {
         let datasets = self
             .project_store
@@ -46,10 +49,17 @@ impl<'a> TransferPersistence<'a> {
     }
 
     /// Replace the project's Studio records and every one of its MCAP
-    /// datasets with the bundle's, in one Spiral transaction. A LeRobot
+    /// datasets with the bundle's, in one Spiral transaction, downloading
+    /// each file the bundle names by its pinned Hugging Face URI with
+    /// `huggingface_token`, the deployment's, when there is one. A LeRobot
     /// dataset stays as it is, so a bundle may not name one.
-    pub async fn import_project(&self, bytes: &[u8]) -> Result<ProjectImportSummary, String> {
-        let source = ProjectBundleImport::new(self.studio, bytes)?;
+    pub async fn import_project(
+        &self,
+        bytes: &[u8],
+        huggingface_token: Option<&str>,
+    ) -> Result<ProjectImportSummary, String> {
+        let source =
+            ProjectBundleImport::new(self.studio, bytes, PinnedMcapFiles::new(huggingface_token))?;
         let catalog = self.project_store.dataset_catalog().datasets().await?;
         let current = catalog.mcap();
         if let Some(dataset) = source

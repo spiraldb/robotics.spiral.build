@@ -2,6 +2,7 @@
 //! writes itself ([datasets](../../../../docs/datasets.md)), and what reading
 //! them reports.
 use super::EpisodeId;
+use crate::curation::AnswerColumn;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display, Formatter};
 
@@ -73,30 +74,14 @@ impl DatasetSelection {
     pub fn files(&self) -> DatasetTable {
         self.table(&["files"])
     }
-    /// One row per episode of model answers.
-    pub fn answers(&self) -> DatasetTable {
-        self.table(&["answers"])
+    /// One answer column's table: a row per episode asked, keyed by
+    /// `episode_id` ([`AnswerColumn`]).
+    pub fn answers(&self, column: &AnswerColumn) -> DatasetTable {
+        self.table(&["answers", column.as_str()])
     }
     /// The messages of one stream.
     pub fn messages(&self, stream: &TopicRevision) -> DatasetTable {
         self.table(&["messages", stream.stream()])
-    }
-    /// A table under the dataset's namespace that Studio derives for a
-    /// moment, such as a staged answers column: `name` must be a plain
-    /// identifier no other table of the convention uses.
-    pub fn scratch(&self, name: &str) -> Result<DatasetTable, String> {
-        if name.is_empty()
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-            || matches!(
-                name,
-                "episodes" | "topics" | "files" | "answers" | "messages"
-            )
-        {
-            return Err(format!("{name:?} cannot name a scratch table"));
-        }
-        Ok(self.table(&[name]))
     }
 
     /// The dataset a catalog path belongs to, and the path's part under the
@@ -447,14 +432,16 @@ mod tests {
             dataset.episodes().to_string(),
             "\"datasets\".\"pick-place\".\"episodes\""
         );
-        assert_eq!(dataset.answers().target(), "datasets.pick-place.answers");
+        let column = AnswerColumn::try_from("score_progress_3f9a2c".to_owned()).unwrap();
+        assert_eq!(
+            dataset.answers(&column).to_string(),
+            "\"datasets\".\"pick-place\".\"answers\".\"score_progress_3f9a2c\""
+        );
         let stream = TopicRevision::new("studio_joints_leader_3fa2c1d0").unwrap();
         assert_eq!(
             dataset.messages(&stream).to_string(),
             "\"datasets\".\"pick-place\".\"messages\".\"studio_joints_leader_3fa2c1d0\""
         );
-        assert!(dataset.scratch("answers").is_err());
-        assert!(dataset.scratch("answers_staging_x").is_ok());
     }
 
     #[test]

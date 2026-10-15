@@ -152,7 +152,8 @@ fn every_model_node_previews_what_it_has_the_backend_answer_and_store_first() {
         assert_eq!(fill.episodes(), &FillEpisodes::Listed(episodes.to_vec()));
         // One read then reads what was stored of both, and asks nothing.
         let statement = plan.statement();
-        assert!(statement.contains(&format!("a.{}.value", fill.column())));
+        let stored = graph.listing().unwrap().dataset().answers(fill.column());
+        assert!(statement.contains(&format!("LEFT JOIN {stored} ")));
         assert!(statement.contains("WHERE e.id IN ($1, $2))"));
         match fill.source() {
             AnswerSource::ProgressService { .. } => assert_eq!(node, &score),

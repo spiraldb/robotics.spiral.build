@@ -50,12 +50,8 @@ impl RecordingProject {
             .store_recording(&EpisodeName::new("demo", episode).unwrap(), bytes)
             .await;
         let dataset = DatasetSelection::new("demo").unwrap();
-        self.journal.name(&[
-            dataset.episodes(),
-            dataset.topics(),
-            dataset.answers(),
-            dataset.files(),
-        ]);
+        self.journal
+            .name(&[dataset.episodes(), dataset.topics(), dataset.files()]);
         stored
     }
 
@@ -118,7 +114,7 @@ async fn a_recording_joins_only_an_mcap_dataset() {
     let lerobot = DatasetSelection::new("svla").unwrap();
     project
         .journal
-        .name(&[lerobot.episodes(), lerobot.topics(), lerobot.answers()]);
+        .name(&[lerobot.episodes(), lerobot.topics()]);
     let error = project
         .storage
         .store_recording(

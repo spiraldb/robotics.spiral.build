@@ -63,7 +63,7 @@ fn a_judgment_reads_the_descriptions_a_break_down_stored_in_their_order() {
     assert_eq!(
         StoredSubtasks::statement(&dataset, &column),
         format!(
-            "SELECT a.{column}.value AS subtasks FROM \"datasets\".\"folding\".\"answers\" a WHERE a.episode_id = $1"
+            "SELECT a.value AS subtasks FROM \"datasets\".\"folding\".\"answers\".\"{column}\" a WHERE a.episode_id = $1"
         )
     );
     let StoredSubtasks(read_back) =

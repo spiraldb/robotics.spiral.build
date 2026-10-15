@@ -10,7 +10,6 @@ use std::collections::HashMap;
 
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{DatasetSelection, DatasetStreams};
-use spiral_robotics_common::relations::EpisodeQueryRequest;
 use spiral_robotics_common::training::{ImageSize, TrainingObservation};
 use spiral_robotics_ui::{
     ActionPurpose, Fact, FactList, Field, FieldLayout, ModeButton, ModeGroup, Select, TextInput,
@@ -106,27 +105,8 @@ impl DatasetCamera {
             .into_iter()
             .next()
             .ok_or("The dataset has no episodes.")?;
-        let statement = StillMoment::opening(&episode).size_statement(&stream)?;
-        let request = EpisodeQueryRequest::new(episode.selection(), statement, 1);
-        let frame = datasets
-            .run_episode_query(&request)
-            .await
-            .map_err(|error| error.to_string())?
-            .into_rows()
-            .into_iter()
-            .next()
-            .ok_or("The camera logged no frame in the first second of the first episode.")?;
-        let side = |name: &str| {
-            frame
-                .get(name)
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|pixels| u32::try_from(pixels).ok())
-                .filter(|pixels| *pixels > 0)
-        };
-        match (side("width"), side("height")) {
-            (Some(width), Some(height)) => Ok(ImageSize::new(width, height)),
-            _ => Err("The decoded frame has no size.".to_owned()),
-        }
+        let (width, height) = StillMoment::opening(&episode).frame_size(&stream).await?;
+        Ok(ImageSize::new(width, height))
     }
 }
 
