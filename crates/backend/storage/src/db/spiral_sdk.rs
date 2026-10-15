@@ -105,13 +105,15 @@ impl SpiralProject {
             .boxed()
         });
         // Storage is reached only through SPFS, which signs each request for
-        // the project's roots; Studio reads no local files.
+        // the project's roots; Studio reads no local files and no provider
+        // (`s3://`, `gs://`) roots.
         let spfs = url::Url::parse(settings.spfs_endpoint()).map_err(|error| {
             DatabaseError::invalid_input(format!("the SPFS endpoint is not a URL: {error}"))
         })?;
         let storage = ScandalConfig {
             spfs_endpoint: Some(spfs),
             local_files: false,
+            provider_roots: false,
         };
         // SAFETY: the runtime is built from the SpiralDB commit the SDK is
         // pinned at (the flake's `spiral-runtime`), so its ABI is the SDK's.
