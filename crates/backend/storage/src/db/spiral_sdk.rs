@@ -14,7 +14,7 @@ use datafusion::prelude::SessionConfig;
 use futures::FutureExt as _;
 use spiral::auth::{CredentialError, Token};
 use spiral::resources::catalog_types::ProjectCommitId;
-use spiral::{Client, CommitOutcome, EmbeddedConfig};
+use spiral::{Client, CommitOutcome, NativeScandal, ScandalConfig};
 use spiral_datafusion::{SpiralCatalogProvider, SpiralTableProvider};
 use tokio::sync::OnceCell;
 
@@ -104,12 +104,23 @@ impl SpiralProject {
             }
             .boxed()
         });
-        let storage =
-            EmbeddedConfig::spfs(settings.spfs_endpoint()).map_err(DatabaseError::from_spiral)?;
+        // Storage is reached only through SPFS, which signs each request for
+        // the project's roots; Studio reads no local files.
+        let spfs = url::Url::parse(settings.spfs_endpoint()).map_err(|error| {
+            DatabaseError::invalid_input(format!("the SPFS endpoint is not a URL: {error}"))
+        })?;
+        let storage = ScandalConfig {
+            spfs_endpoint: Some(spfs),
+            local_files: false,
+        };
+        // SAFETY: the runtime is built from the SpiralDB commit the SDK is
+        // pinned at (the flake's `spiral-runtime`), so its ABI is the SDK's.
+        let scandal = unsafe { NativeScandal::load(&Self::runtime_library()?, &storage) }
+            .map_err(|error| DatabaseError::from_spiral(error.into()))?;
         let client = Client::builder()
             .api_url(settings.endpoint())
             .auth_token_provider(tokens)
-            .embedded_library(Self::runtime_library()?, storage)
+            .scandal(Arc::new(scandal))
             .build()
             .map_err(DatabaseError::from_spiral)?;
         Ok(Self {

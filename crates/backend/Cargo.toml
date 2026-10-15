@@ -39,9 +39,6 @@ url = "2"
 reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
 # Draws Break down's contact sheets from the PPM pictures FFmpeg decodes.
 image = { workspace = true, features = ["pnm"] }
-# Spiral's SDK verifies sign-in tokens through OpenSSL (spiral-auth's jwtk);
-# the server carries its own build of it, not the host's.
-openssl = { version = "0.10", features = ["vendored"] }
 
 [dev-dependencies]
 spiral-robotics-common = { workspace = true, features = ["test-support"] }
