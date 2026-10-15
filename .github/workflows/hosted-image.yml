@@ -46,6 +46,15 @@ jobs:
           printf 'Host github.com\n  IdentityFile ~/.ssh/spiraldb\n  IdentitiesOnly yes\n' >> ~/.ssh/config
           git config --global url."git@github.com:spiraldb/spiraldb.git".insteadOf "https://github.com/spiraldb/spiraldb.git"
 
+      # The data-plane runtime, the server and the web interface build at once,
+      # and their build trees outgrow the runner's free disk; the SDKs the runner
+      # comes with, which nothing here uses, make room.
+      - name: Make room on the runner
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+
       # The result is a script that streams the image as a Docker archive.
       - name: Build the image
         run: nix build .#hosted-image --out-link hosted-image
