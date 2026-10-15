@@ -8,6 +8,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     flake-utils.url = "github:numtide/flake-utils";
+    crane.url = "github:ipetkov/crane";
   };
 
   outputs =
@@ -16,6 +17,7 @@
       nixpkgs,
       rust-overlay,
       flake-utils,
+      crane,
       ...
     }:
     flake-utils.lib.eachSystem
@@ -57,10 +59,6 @@
           # components: with rust-src installed, panic locations name the
           # toolchain's store path, which would put all of it in the image.
           packageRustToolchain = pkgs.rust-bin.fromRustupToolchain (rustPin // { profile = "minimal"; });
-          rustPlatform = pkgs.makeRustPlatform {
-            cargo = packageRustToolchain;
-            rustc = packageRustToolchain;
-          };
           # nixpkgs kept Tailwind 3 under the unsuffixed name for a while.
           tailwind = pkgs.tailwindcss_4 or pkgs.tailwindcss;
           # `dx` builds the web client and native server as one fullstack app,
@@ -163,65 +161,63 @@
               ./robot-connector
             ];
           };
-          # Vendoring finds each Git dependency's crates with `cargo metadata`
-          # over that repository's workspace, and SpiralDB's declares artifact
-          # dependencies, which Cargo parses only with `-Z bindeps`.
-          vendoringPlatform = pkgs.makeRustPlatform {
-            cargo = pkgs.writeShellScriptBin "cargo" ''
-              CARGO_UNSTABLE_BINDEPS=true exec ${packageRustToolchain}/bin/cargo "$@"
-            '';
-            rustc = packageRustToolchain;
+          # Studio's packages build with crane, which builds a package's
+          # dependencies as a derivation of their own: a release that changes
+          # only Studio's code takes them from the Nix cache.
+          craneLib = (crane.mkLib pkgs).overrideToolchain (_: packageRustToolchain);
+          # Every crate Cargo.lock names. Git ones (Spiral's SDK, Vortex, the
+          # patched Dioxus) come through the caller's git credentials, which
+          # reach SpiralDB's private repository.
+          cargoVendorDir = craneLib.vendorCargoDeps {
+            src = workspaceSource;
+            # The `vortex` crate's docs include its workspace README, which
+            # vendoring a Git crate leaves behind.
+            overrideVendorGitCheckout =
+              packages: checkout:
+              if lib.any (package: package.name == "vortex") packages then
+                checkout.overrideAttrs { postPatch = "cp README.md vortex/README.md"; }
+              else
+                checkout;
           };
-          cargoDeps = vendoringPlatform.importCargoLock {
-            lockFile = ./Cargo.lock;
-            # Spiral's SDK and Vortex come from Git; SpiralDB's private
-            # repository through the caller's git credentials.
-            allowBuiltinFetchGit = true;
-            # The patched Dioxus checkout (Cargo.toml's [patch.crates-io]),
-            # one hash for every crate it provides.
-            outputHashes."const-serialize-0.8.0-alpha.0" =
-              "sha256-1YJZcijcAXEQ//NxevLvOUfDu18jdzwOGnBztouwisE=";
-          };
-          studioServer = rustPlatform.buildRustPackage {
+          serverArgs = {
             pname = "spiral-robotics-backend";
             version = workspaceVersion;
             src = workspaceSource;
-            inherit cargoDeps;
-            cargoBuildFlags = [
-              "--package"
-              "spiral-robotics-backend"
-            ];
+            inherit cargoVendorDir;
+            strictDeps = true;
+            cargoExtraArgs = "--locked --package spiral-robotics-backend";
             # On Linux, Vortex's custom-labels generates its bindings with
             # libclang.
             inherit nativeBuildInputs;
             LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
-            preBuild = restoreVortexReadme ./Cargo.lock;
             doCheck = false;
-            meta.mainProgram = "spiral-robotics-backend";
           };
+          studioServer = craneLib.buildPackage (
+            serverArgs
+            // {
+              cargoArtifacts = craneLib.buildDepsOnly serverArgs;
+              meta.mainProgram = "spiral-robotics-backend";
+            }
+          );
           # The `public/` directory the server serves the web interface from.
-          studioWeb = pkgs.stdenv.mkDerivation {
+          studioWeb = craneLib.mkCargoDerivation {
             pname = "spiral-robotics-web";
             version = workspaceVersion;
             src = workspaceSource;
-            inherit cargoDeps;
+            inherit cargoVendorDir;
+            cargoArtifacts = null;
+            doInstallCargoArtifacts = false;
             nativeBuildInputs = [
-              rustPlatform.cargoSetupHook
-              packageRustToolchain
               tailwind
               pkgs.wasm-bindgen-cli_0_2_126
             ]
             ++ webBuildInputs;
-            buildPhase = ''
-              runHook preBuild
+            buildPhaseCargoCommand = ''
               dx bundle --web --release --debug-symbols false --frozen \
                 --package spiral-robotics-frontend --out-dir bundle
-              runHook postBuild
             '';
-            installPhase = ''
-              runHook preInstall
+            installPhaseCommand = ''
               cp -r bundle/public "$out"
-              runHook postInstall
             '';
           };
           # Studio as a Linux server for the hosted VM. The `studio` user owns

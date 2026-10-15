@@ -23,18 +23,30 @@ jobs:
   image:
     name: Hosted image
     # A RunsOn runner, as SpiralDB's own release builds use: the data-plane
-    # runtime, the server and the web interface compile at once, from scratch.
-    runs-on: runs-on=${{ github.run_id }}-${{ github.run_attempt }}-studio-image/family=c8a+m7a/cpu=32/image=ubuntu24-full-x64/volume=150gb:gp3
+    # runtime, the server and the web interface compile at once. Its S3 cache
+    # keeps the Nix store between releases.
+    runs-on: runs-on=${{ github.run_id }}-${{ github.run_attempt }}-studio-image/family=c8a+m7a/cpu=32/image=ubuntu24-full-x64/extras=s3-cache/volume=150gb:gp3
     timeout-minutes: 90
     permissions:
       contents: read
       id-token: write
     steps:
+      # Sends `actions/cache` to RunsOn's S3 bucket, beside the runner.
+      - uses: runs-on/action@17b59092eb37ebfdbb034460892887c09100eaa3 # v2.5.0
+
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
       - uses: DeterminateSystems/determinate-nix-action@v3
+
+      # The Nix store a build with the same flake and manifests left, or else
+      # the newest one: the data-plane runtime, the toolchains and crane's
+      # dependency builds come from it unless their inputs changed.
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+        with:
+          primary-key: studio-image-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.lock', '**/Cargo.toml') }}
+          restore-prefixes-first-match: studio-image-${{ runner.arch }}-
 
       # Spiral's SDK and data-plane runtime come from the private SpiralDB
       # repository; cargo and Nix fetch it with git over this read-only key.
