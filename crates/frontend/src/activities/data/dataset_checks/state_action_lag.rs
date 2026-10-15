@@ -459,10 +459,6 @@ mod tests {
     use super::super::stream_reads::TwoArmDataset;
     use super::*;
 
-    fn episode(ordinal: u32) -> EpisodeId {
-        EpisodeId::try_from(format!("{ordinal:032x}")).unwrap()
-    }
-
     #[test]
     fn every_commanded_arm_keeps_its_error_at_each_shift() {
         let dataset = TwoArmDataset::new();
@@ -525,11 +521,11 @@ mod tests {
             "settled": {"fewest": 4, "most": 6, "shortest_ms": 133.48, "longest_ms": 202.16},
             "settled_tracking": 0.0229,
             "flagged": [
-                {"episode_id": episode(3).to_string(), "samples": 6, "tracking": 0.0483, "at_edge": false, "worse": true},
-                {"episode_id": episode(2).to_string(), "samples": 10, "tracking": 0.0197, "at_edge": true, "worse": false},
-                {"episode_id": episode(4).to_string(), "samples": 5, "tracking": 0.0412, "at_edge": false, "worse": true},
+                {"episode_id": EpisodeId::fixture(3), "samples": 6, "tracking": 0.0483, "at_edge": false, "worse": true},
+                {"episode_id": EpisodeId::fixture(2), "samples": 10, "tracking": 0.0197, "at_edge": true, "worse": false},
+                {"episode_id": EpisodeId::fixture(4), "samples": 5, "tracking": 0.0412, "at_edge": false, "worse": true},
             ],
-            "unpaired": [episode(5).to_string()],
+            "unpaired": [EpisodeId::fixture(5)],
         }]))
         .unwrap();
         let lag = StateActionLag::of(dataset.arms(), judged);
@@ -539,7 +535,7 @@ mod tests {
         let arm = &lag.arms[0];
         assert_eq!(arm.lag_label(), "4–6 samples");
         assert_eq!(arm.tracking_label(), "20.5 mrad · worst 48.3 mrad");
-        assert_eq!(arm.unpaired, [episode(5)]);
+        assert_eq!(arm.unpaired, [EpisodeId::fixture(5)]);
         // A lag at the edge leads, then the worst tracking first.
         let evidence = arm.evidence();
         assert_eq!(

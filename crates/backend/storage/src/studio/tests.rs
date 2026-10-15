@@ -362,6 +362,43 @@ async fn every_curation_before_encoding_7_is_dropped_with_every_view() {
     assert_eq!(left, [Vec::<String>::new(), Vec::new()]);
 }
 
+/// Episodes became numbers: a curation saved before encoding 8 names them by
+/// UUID and goes, and what Studio kept under each dataset's old version goes.
+#[tokio::test]
+async fn episode_numbers_drop_older_curations_and_what_was_kept_per_dataset() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("before-episode-numbers.sqlite3");
+    let raw = migrated_until(&path, "m20261014_000001_studio_datasets").await;
+    raw.execute_unprepared(
+        r#"INSERT INTO curations VALUES ('p', 'uuids', 'Folds', 1, 7, '{}', 1);
+           INSERT INTO curations VALUES ('p', 'numbers', 'Bottles', 1, 8, '{}', 1);
+           INSERT INTO dataset_robots VALUES ('p', 'default', 'v1', '{}');
+           INSERT INTO dataset_joint_roles VALUES ('p', 'default', 'v1', '{}');"#,
+    )
+    .await
+    .unwrap();
+    let store = StudioStore::at(path);
+    store.initialize().await.unwrap();
+    let connection = store.connection().await.unwrap();
+    let mut left = Vec::new();
+    for sql in [
+        "SELECT id FROM curations ORDER BY id",
+        "SELECT dataset FROM dataset_robots",
+        "SELECT dataset FROM dataset_joint_roles",
+    ] {
+        let rows = connection
+            .query_all(Statement::from_string(DbBackend::Sqlite, sql))
+            .await
+            .unwrap();
+        left.push(
+            rows.iter()
+                .map(|row| row.try_get_by_index::<String>(0).unwrap())
+                .collect::<Vec<_>>(),
+        );
+    }
+    assert_eq!(left, [vec!["numbers".to_owned()], Vec::new(), Vec::new()]);
+}
+
 /// A training run keeps its record and names its dataset by the id its
 /// tables live under; what Studio kept about the retired Dataset resources
 /// goes.

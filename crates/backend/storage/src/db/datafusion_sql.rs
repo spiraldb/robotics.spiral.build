@@ -14,7 +14,8 @@ use super::database::{
 
 impl SqlStatement {
     /// Plan the statement on `context` with its parameters bound, `$1`
-    /// onwards, each keeping its field's metadata, and stream its rows.
+    /// onwards, each keeping its field's metadata when it has any, and stream
+    /// its rows.
     pub(super) async fn stream_on(
         &self,
         context: &SessionContext,
@@ -31,10 +32,11 @@ impl SqlStatement {
                 .zip(parameters.columns())
                 .map(|(field, column)| {
                     let value = ScalarValue::try_from_array(column, 0)?;
-                    Ok(ScalarAndMetadata::new(
-                        value,
-                        Some(FieldMetadata::new_from_field(field)),
-                    ))
+                    // A plain value binds without metadata, so Spiral can
+                    // filter its scan by it.
+                    let metadata = (!field.metadata().is_empty())
+                        .then(|| FieldMetadata::new_from_field(field));
+                    Ok(ScalarAndMetadata::new(value, metadata))
                 })
                 .collect::<Result<Vec<_>, DataFusionError>>()
                 .map_err(DatabaseError::from_datafusion)?;

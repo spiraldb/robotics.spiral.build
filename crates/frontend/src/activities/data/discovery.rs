@@ -72,7 +72,8 @@ impl DiscoveryEpisode {
             .ok_or("Imported dataset has no episodes")?;
         let id = row
             .get("id")
-            .and_then(Value::as_str)
+            .and_then(Value::as_u64)
+            .map(EpisodeId::new)
             .ok_or("Episode has no identity")?;
         let source = row
             .get("source_uri")
@@ -83,7 +84,7 @@ impl DiscoveryEpisode {
             .await
             .map_err(|error| error.to_string())?
             .format();
-        let episode = EpisodeSelection::new(selection, EpisodeId::try_from(id)?);
+        let episode = EpisodeSelection::new(selection, id);
         let topics = data
             .episode_topics(episode.clone())
             .await

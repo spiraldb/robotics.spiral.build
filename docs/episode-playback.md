@@ -61,7 +61,7 @@ a topic's streams side by side, told apart by the hash their names end with.
 
 The browser reads messages with ordinary episode SQL. `MessageRead` (in
 `common`) reads one stream's `datasets.<id>.messages.<stream>` table, and
-`POST /api/queries/episode/arrow` runs it with `$1` bound to the episode UUID and
+`POST /api/queries/episode/arrow` runs it with `$1` bound to the episode's number and
 returns `application/vnd.apache.arrow.stream`. The same query serves schema
 discovery, plots and recorded camera packets; there are no dedicated joint,
 video, or message endpoints.
@@ -76,7 +76,7 @@ video, or message endpoints.
   timestamps are not skipped. Each page asks for one row past its limit; that
   row means the browser continues after the last kept message.
 - The Arrow endpoint returns the complete result or refuses it (over 10,000 rows
-  or 32 MiB); it never truncates. Reads are pinned to the episode UUID, so an
+  or 32 MiB); it never truncates. Reads are pinned to the episode's number, so an
   episode appended to the dataset does not disturb an open one. The browser
   rejects a schema that changes between pages.
 

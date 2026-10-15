@@ -1,7 +1,7 @@
 //! Schema-neutral reads of one stream of one episode.
 //!
 //! A read is one episode query over the stream's `messages` table: `$1` binds
-//! the episode UUID, and a windowed read pages by keyset on
+//! the episode number, and a windowed read pages by keyset on
 //! `(log_time, ordinal)`.
 use super::{EpisodeSelection, EpisodeTopicRequest, TopicRevision};
 use serde::{Deserialize, Serialize};
@@ -229,7 +229,7 @@ mod tests {
             EpisodeTopicRequest::new(
                 DatasetSelection::new("test").unwrap(),
                 "/sensor's".into(),
-                EpisodeId::try_from("01a0989fb65870a7a5459902f9e3e090").unwrap(),
+                EpisodeId::new(7),
             ),
             stream("sensor_s_0a1b2c3d"),
         )
@@ -280,7 +280,7 @@ mod tests {
             EpisodeTopicRequest::new(
                 read().topic().dataset().clone(),
                 "/sensor".into(),
-                EpisodeId::try_from("01a0989fc80b75e7a89de99ad2bd1d49").unwrap(),
+                EpisodeId::new(8),
             ),
             stream("sensor_s_0a1b2c3d"),
         );

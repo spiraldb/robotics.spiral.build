@@ -1,7 +1,7 @@
 //! One recorded stream of a dataset — a topic in one schema and Arrow type —
 //! and the messages of it one episode holds, as rows of the stream's
 //! `messages` table ([datasets](../../../../../docs/datasets.md#messages)).
-use super::EpisodeUuids;
+use super::EpisodeIds;
 use arrow_array::{ArrayRef, BooleanArray, RecordBatch, UInt32Array, UInt64Array};
 use arrow_schema::{DataType, Field, Fields, Schema};
 use sha2::{Digest as _, Sha256};
@@ -176,7 +176,7 @@ impl StreamMessages {
     /// message's position, for video whether it is a keyframe, and the value.
     pub(crate) fn schema(stream: &RecordedStream) -> Schema {
         let mut fields = vec![
-            EpisodeUuids::field("id"),
+            EpisodeIds::field("id"),
             Field::new("log_time", DataType::UInt64, false),
             Field::new("publish_time", DataType::UInt64, false),
             Field::new("sequence", DataType::UInt32, false),
@@ -197,7 +197,7 @@ impl StreamMessages {
             sequences,
         } = &self.positions;
         let mut columns: Vec<ArrayRef> = vec![
-            EpisodeUuids::array(&vec![episode.clone(); self.len()])?,
+            EpisodeIds::array(&vec![episode.clone(); self.len()]),
             Arc::new(UInt64Array::from(log_times.clone())),
             Arc::new(UInt64Array::from(publish_times.clone())),
             Arc::new(UInt32Array::from(sequences.clone())),
@@ -375,7 +375,7 @@ mod tests {
         let messages =
             StreamMessages::new(camera, positions, Some(vec![true, false]), values).unwrap();
         assert_eq!(messages.time_span(), Some((0, 33_333_333)));
-        let episode = EpisodeId::try_from("01900000000070008000000000000001").unwrap();
+        let episode = EpisodeId::new(1);
         let batch = messages.batch(&episode).unwrap();
         assert_eq!(
             batch
@@ -402,7 +402,7 @@ mod tests {
             .unwrap();
         assert_eq!(ordinals.values().to_vec(), [0, 1]);
         assert_eq!(
-            EpisodeUuids::read(batch.column(0).as_ref()).unwrap(),
+            EpisodeIds::read(batch.column(0).as_ref()).unwrap(),
             [episode.clone(), episode]
         );
     }

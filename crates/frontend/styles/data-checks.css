@@ -412,7 +412,7 @@
     line-height: 1.5;
   }
 
-  /* Evidence: an episode by its id tail, and what was measured in it. */
+  /* Evidence: an episode by its number, and what was measured in it. */
   .data-checks-chips {
     display: flex;
     flex-wrap: wrap;

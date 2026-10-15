@@ -24,7 +24,7 @@ use spiral_robotics_common::relations::{
 
 use super::database::{DatabaseSession, RecordBatchStream, SqlStatement};
 use super::project_store::{ProjectConnection, ProjectStore};
-use crate::datasets::EpisodeUuids;
+use crate::datasets::EpisodeIds;
 use spiral_robotics_common::sql::{ListItems, ReadOnlyQueryMode};
 
 const MAX_QUERY_ROWS: usize = 1_000;
@@ -183,7 +183,7 @@ impl<'a> ProjectQueries<'a> {
     }
 
     /// The same bounded read, scoped to one exact dataset member through a
-    /// bound UUID parameter (`$1`).
+    /// bound episode number (`$1`).
     pub async fn query_for_episode(
         &self,
         request: &EpisodeQueryRequest,
@@ -338,7 +338,7 @@ impl<'a> ProjectQueries<'a> {
                     .column_by_name(name)
                     .ok_or_else(|| format!("The view lists no {name}."))
             };
-            let episodes = EpisodeUuids::read(column("episode_id")?.as_ref())?;
+            let episodes = EpisodeIds::read(column("episode_id")?.as_ref())?;
             let times = |name: &str| -> Result<Vec<i64>, String> {
                 let cast = arrow_cast::cast(column(name)?, &DataType::Int64)
                     .map_err(|error| error.to_string())?;
@@ -375,7 +375,7 @@ impl<'a> ProjectQueries<'a> {
             let listed = batch
                 .column_by_name("episode_id")
                 .ok_or("The statement lists no episode_id.")?;
-            ids.extend(EpisodeUuids::read(listed.as_ref())?);
+            ids.extend(EpisodeIds::read(listed.as_ref())?);
         }
         Ok(ids)
     }

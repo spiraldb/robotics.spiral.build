@@ -171,7 +171,7 @@ impl DatasetClient {
             HttpRequest::new("POST", "/api/queries").json(&QueryRequest::new(statement, max_rows)),
         )
     }
-    /// A read-only query over one exact episode; `$1` binds its UUID.
+    /// A read-only query over one exact episode; `$1` binds its number.
     pub(in crate::activities) fn run_episode_query(
         &self,
         request: &EpisodeQueryRequest,
@@ -189,7 +189,7 @@ impl DatasetClient {
             .request_bytes(HttpRequest::new("POST", "/api/queries/episode/arrow").json(request))
     }
     /// A read-only query over listed episodes of one dataset; `$1` through
-    /// `$N` bind their UUIDs.
+    /// `$N` bind their numbers.
     pub(in crate::activities) fn run_episodes_query(
         &self,
         request: &EpisodesQueryRequest,

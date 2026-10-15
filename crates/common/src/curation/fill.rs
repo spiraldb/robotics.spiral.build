@@ -261,7 +261,7 @@ mod tests {
             vec![ColumnFill::new(
                 "Find similar subtasks",
                 column,
-                FillEpisodes::Listed(vec![EpisodeId::try_from("0".repeat(32)).unwrap()]),
+                FillEpisodes::Listed(vec![EpisodeId::new(0)]),
                 AnswerSource::Similarity(SubtaskSimilarity::new(
                     AnswerColumn::of("break_down", &["m"]).unwrap(),
                     "fold the towel",

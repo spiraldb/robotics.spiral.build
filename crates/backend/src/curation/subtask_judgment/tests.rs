@@ -9,7 +9,7 @@ use serde_json::json;
 use spiral_robotics_common::curation::CategoryDefinition;
 
 fn episode() -> EpisodeId {
-    EpisodeId::try_from("0".repeat(32)).unwrap()
+    EpisodeId::new(0)
 }
 
 /// Three subtasks a Break down stored, the second without a description.

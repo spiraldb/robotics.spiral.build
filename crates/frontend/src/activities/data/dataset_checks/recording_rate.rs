@@ -217,10 +217,6 @@ mod tests {
     use crate::activities::data::dataset_checks::stream_reads::TwoArmDataset;
     use spiral_robotics_common::datasets::DatasetSelection;
 
-    fn episode(ordinal: u32) -> EpisodeId {
-        EpisodeId::try_from(format!("{ordinal:032x}")).unwrap()
-    }
-
     #[test]
     fn the_judgment_finds_each_streams_typical_rate_and_its_departures_in_spiral() {
         let sql = RecordingRate::judgment("(parts)");
@@ -260,7 +256,7 @@ mod tests {
         assert_eq!(column.kind(), CheckKind::Rates);
         let judged: Vec<JudgedStream> = serde_json::from_value(serde_json::json!([{
             "part": "/joints", "typical": 29.8,
-            "departures": [{"episode_id": episode(4).to_string(), "hz": 281.9}]
+            "departures": [{"episode_id": EpisodeId::fixture(4), "hz": 281.9}]
         }]))
         .unwrap();
         let rates = RecordingRate::of(streams, judged);

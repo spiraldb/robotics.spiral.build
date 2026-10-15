@@ -240,7 +240,7 @@ impl AnnotationOutput {
             .filter(|failure| {
                 wanted.is_empty()
                     || failure.reason().to_lowercase().contains(&wanted)
-                    || failure.episode().as_str().contains(&wanted)
+                    || Episode::is_numbered(failure.episode(), &wanted)
             })
             .cloned()
             .map(IndexEntry::Failed);
@@ -413,7 +413,7 @@ fn IndexSearch(
                 class: "curation-entries-jump",
                 value: String::new(),
                 onchange: move |episode: String| {
-                    let Ok(episode) = EpisodeId::try_from(episode) else {
+                    let Ok(episode) = episode.parse::<EpisodeId>() else {
                         return;
                     };
                     chosen.show(&episode);

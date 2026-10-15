@@ -24,10 +24,10 @@ unreachable_pub = "deny"
 
 [workspace.dependencies]
 # Spiral's SDK and its DataFusion integration, from the private SpiralDB
-# repository at one commit (spiraldb#7867, table drops and renames, until it
-# merges); the data-plane runtime Studio loads is built from the same commit.
-spiral-sdk = { git = "https://github.com/spiraldb/spiraldb.git", rev = "c2ba4d92756bab8dbc3590d24c35450012a3f84b", features = ["embedded"] }
-spiral-datafusion = { git = "https://github.com/spiraldb/spiraldb.git", rev = "c2ba4d92756bab8dbc3590d24c35450012a3f84b", features = ["sql"] }
+# repository at one develop commit; the data-plane runtime Studio loads is
+# built from the same commit.
+spiral-sdk = { git = "https://github.com/spiraldb/spiraldb.git", rev = "dbd858e319761897aae74c512a5919c1d671dcf7", features = ["embedded"] }
+spiral-datafusion = { git = "https://github.com/spiraldb/spiraldb.git", rev = "dbd858e319761897aae74c512a5919c1d671dcf7", features = ["sql"] }
 datafusion = { version = "55", default-features = false }
 base64 = "0.22"
 spiral-robotics-common = { path = "crates/common" }

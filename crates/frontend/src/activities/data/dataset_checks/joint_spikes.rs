@@ -207,10 +207,6 @@ mod tests {
     use super::super::stream_reads::TwoArmDataset;
     use super::*;
 
-    fn episode(ordinal: u32) -> EpisodeId {
-        EpisodeId::try_from(format!("{ordinal:032x}")).unwrap()
-    }
-
     #[test]
     fn every_arm_keeps_its_spikes_and_only_episodes_with_one_are_judged() {
         let dataset = TwoArmDataset::new();
@@ -233,8 +229,8 @@ mod tests {
         let judged: Vec<JudgedArm> = serde_json::from_value(serde_json::json!([{
             "part": "right",
             "episodes": [
-                {"episode_id": episode(2).to_string(), "spikes": 1, "first_at": 4.2},
-                {"episode_id": episode(1).to_string(), "spikes": 2, "first_at": null},
+                {"episode_id": EpisodeId::fixture(2), "spikes": 1, "first_at": 4.2},
+                {"episode_id": EpisodeId::fixture(1), "spikes": 2, "first_at": null},
             ],
         }]))
         .unwrap();
@@ -245,12 +241,12 @@ mod tests {
             spikes.arms[1].episodes,
             [
                 EpisodeSpikes {
-                    episode: episode(1),
+                    episode: EpisodeId::fixture(1),
                     spikes: 2,
                     first_at: None
                 },
                 EpisodeSpikes {
-                    episode: episode(2),
+                    episode: EpisodeId::fixture(2),
                     spikes: 1,
                     first_at: Some(4.2)
                 }

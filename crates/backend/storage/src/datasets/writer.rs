@@ -111,11 +111,13 @@ impl DecodedEpisode {
 
 /// Writes one dataset's episodes within the caller's transaction. It knows
 /// the dataset's topics as of its last write, so a transaction reads them at
-/// most once however many batches it writes.
+/// most once however many batches it writes, and the number its next episode
+/// is given, since what the transaction holds is not read back.
 pub(crate) struct DatasetWrite<'a> {
     dataset: &'a DatasetSelection,
     format: DatasetFormat,
     topics: TopicCounts,
+    next: EpisodeId,
 }
 
 impl<'a> DatasetWrite<'a> {
@@ -123,16 +125,22 @@ impl<'a> DatasetWrite<'a> {
     pub(crate) const MAX_EPISODES: usize = 32;
 
     /// Create `dataset` in `format` with no episodes: empty episodes and
-    /// topics tables, and an MCAP dataset's empty files.
+    /// topics tables, and an MCAP dataset's empty files. A dataset the
+    /// transaction already sees is refused, since its episodes would be
+    /// numbered again from 0.
     pub(crate) async fn create(
         connection: &mut ProjectConnection,
         dataset: &'a DatasetSelection,
         format: DatasetFormat,
     ) -> Result<Self, String> {
+        if connection.table_exists(dataset.episodes().name()).await? {
+            return Err(format!("{} exists already", dataset.label()));
+        }
         let write = Self {
             dataset,
             format,
             topics: TopicCounts::default(),
+            next: EpisodeId::new(0),
         };
         connection
             .create_or_append_batches(
@@ -158,11 +166,35 @@ impl<'a> DatasetWrite<'a> {
         format: DatasetFormat,
     ) -> Result<Self, String> {
         let topics = TopicCounts::read(connection, dataset).await?;
+        let next = Self::next_episode(connection, dataset).await?;
         Ok(Self {
             dataset,
             format,
             topics,
+            next,
         })
+    }
+
+    /// The number after `dataset`'s last episode, or 0 when it has none.
+    async fn next_episode(
+        connection: &mut ProjectConnection,
+        dataset: &DatasetSelection,
+    ) -> Result<EpisodeId, String> {
+        let batches = connection
+            .read_batches(&format!(
+                "SELECT max(id) AS last FROM {}",
+                dataset.episodes()
+            ))
+            .await?;
+        let last = batches
+            .iter()
+            .find(|batch| batch.num_rows() > 0)
+            .map(|batch| {
+                crate::db::ArrowColumns::new(batch, "last episode").optional_unsigned("last", 0)
+            })
+            .transpose()?
+            .flatten();
+        Ok(last.map_or(EpisodeId::new(0), |last| EpisodeId::new(last).next()))
     }
 
     /// Write `episodes`, at most [`Self::MAX_EPISODES`], each of this
@@ -189,8 +221,10 @@ impl<'a> DatasetWrite<'a> {
                     episode.key()
                 ));
             }
-            // Every episode Studio writes gets its identity here, once.
-            let id = EpisodeId::from(*uuid::Uuid::now_v7().as_bytes());
+            // Every episode Studio writes gets its number here, once, in the
+            // order it is written.
+            let id = self.next.clone();
+            self.next = id.next();
             for messages in episode.streams() {
                 let (stream, batches) = streams
                     .entry(messages.stream().name().clone())

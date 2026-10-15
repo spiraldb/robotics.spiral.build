@@ -169,7 +169,7 @@ impl KeptEpisode {
 
     /// This episode's intervals with `streams`, as the service reads them.
     fn streams<S>(&self, streams: S) -> EpisodeStreams<S> {
-        EpisodeStreams::new(self.id.as_str().to_owned(), self.intervals.clone(), streams)
+        EpisodeStreams::new(self.id.to_string(), self.intervals.clone(), streams)
     }
 }
 
@@ -307,7 +307,7 @@ impl StreamRead {
 
     /// The key of this read of `episode` of `dataset` at its version.
     fn key(&self, dataset: &DatasetSummary, episode: &EpisodeId) -> StreamKey {
-        StreamKey::of(dataset.identity(), episode.as_str(), &self.statement)
+        StreamKey::of(dataset.identity(), &episode.to_string(), &self.statement)
     }
 
     pub(super) fn statement(&self) -> &str {

@@ -199,11 +199,8 @@ fn answers_go_to_the_writer_each_time_they_fill_one_write_and_the_rest_at_the_en
         ])))
     };
     for ordinal in 0..5u32 {
-        held.hold(
-            EpisodeId::try_from(format!("{ordinal:032x}")).unwrap(),
-            scores(),
-        )
-        .unwrap();
+        held.hold(EpisodeId::new(u64::from(ordinal)), scores())
+            .unwrap();
     }
     assert!(sets.try_recv().is_ok(), "four answers fill the first write");
     assert!(sets.try_recv().is_err(), "the fifth waits for more");
@@ -331,9 +328,21 @@ async fn a_run_fills_each_column_once_and_then_publishes_its_view() {
         assert!(status.failures().is_empty());
         assert_eq!(mock.requests(), 3, "one scoring per episode");
         assert_eq!(fills.publications().len(), 1);
+        // A published view is its statement, which a reader inlines.
+        let published = storage.curated_views().list().await?;
+        let published = published
+            .iter()
+            .find(|published| published.name() == view)
+            .ok_or("the view is published")?;
         let read = storage
             .queries()
-            .query(&format!("SELECT COUNT(*) AS frames FROM {view}"), 1)
+            .query(
+                &format!(
+                    "SELECT COUNT(*) AS frames FROM ({}) {view}",
+                    published.statement()
+                ),
+                1,
+            )
             .await?;
         assert_eq!(read.rows()[0]["frames"].as_u64(), Some(24));
         let counted = storage

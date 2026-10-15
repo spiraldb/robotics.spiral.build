@@ -416,10 +416,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn episode(ordinal: u32) -> EpisodeId {
-        EpisodeId::try_from(format!("{ordinal:032x}")).unwrap()
-    }
-
     /// A robot whose elbow, the left arm's second joint, is limited to
     /// 0–2 rad and recorded at half scale.
     fn robot() -> DatasetRobot {
@@ -505,12 +501,12 @@ mod tests {
         let judged: Vec<JudgedArm> = serde_json::from_value(json!([{
             "part": "left",
             "near": [
-                {"episode_id": episode(1).to_string(), "near_s": 1.5, "longest_at": 3.0},
-                {"episode_id": episode(2).to_string(), "near_s": 5.5, "longest_at": 12.0},
+                {"episode_id": EpisodeId::fixture(1), "near_s": 1.5, "longest_at": 3.0},
+                {"episode_id": EpisodeId::fixture(2), "near_s": 5.5, "longest_at": 12.0},
             ],
             "past": [
-                {"position": 1, "above": true, "reached": 4.5, "bound": 4.0, "episode_id": episode(3).to_string()},
-                {"position": 1, "above": false, "reached": -0.004, "bound": 0.0, "episode_id": episode(2).to_string()},
+                {"position": 1, "above": true, "reached": 4.5, "bound": 4.0, "episode_id": EpisodeId::fixture(3)},
+                {"position": 1, "above": false, "reached": -0.004, "bound": 0.0, "episode_id": EpisodeId::fixture(2)},
             ],
         }]))
         .unwrap();

@@ -33,24 +33,24 @@ pub(crate) struct EpisodeTopicQuery {
 }
 
 impl EpisodeTopicQuery {
-    /// `sql` over one episode, whose UUID `$1` binds.
+    /// `sql` over one episode, whose number `$1` binds.
     pub(crate) fn for_episode(episode_id: &EpisodeId, sql: String) -> Result<Self, String> {
         Self::for_episodes(std::slice::from_ref(episode_id), sql)
     }
 
-    /// `sql` over the listed episodes: `$1` through `$N` bind their UUIDs,
-    /// in order.
+    /// `sql` over the listed episodes: `$1` through `$N` bind their
+    /// numbers, in order.
     pub(crate) fn for_episodes(episodes: &[EpisodeId], sql: String) -> Result<Self, String> {
         if episodes.is_empty() {
             return Err("A statement over listed episodes lists at least one".to_owned());
         }
         let fields = (1..=episodes.len())
-            .map(|place| EpisodeUuids::field(&format!("id_{place}")))
+            .map(|place| EpisodeIds::field(&format!("id_{place}")))
             .collect::<Vec<_>>();
         let columns = episodes
             .iter()
-            .map(|episode| EpisodeUuids::array(std::slice::from_ref(episode)))
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|episode| EpisodeIds::array(std::slice::from_ref(episode)))
+            .collect::<Vec<_>>();
         let parameters = arrow_array::RecordBatch::try_new(
             std::sync::Arc::new(arrow_schema::Schema::new(fields)),
             columns,
@@ -66,43 +66,34 @@ impl EpisodeTopicQuery {
     }
 }
 
-/// Dataset member ids as Spiral types them: `arrow.uuid`, sixteen bytes each.
-pub(crate) struct EpisodeUuids;
+/// Episode ids as every dataset table holds them: `UInt64`, never null.
+pub(crate) struct EpisodeIds;
 
-impl EpisodeUuids {
+impl EpisodeIds {
     pub(crate) fn field(name: &str) -> arrow_schema::Field {
-        arrow_schema::Field::new(name, arrow_schema::DataType::FixedSizeBinary(16), false)
-            .with_extension_type(arrow_schema::extension::Uuid)
+        arrow_schema::Field::new(name, arrow_schema::DataType::UInt64, false)
     }
 
-    pub(crate) fn array(ids: &[EpisodeId]) -> Result<arrow_array::ArrayRef, String> {
-        let uuids = ids
-            .iter()
-            .map(|id| {
-                uuid::Uuid::parse_str(id.as_str()).map_err(|_| "Invalid recording UUID".to_owned())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let values = arrow_array::FixedSizeBinaryArray::try_from_iter(
-            uuids.iter().map(|uuid| uuid.as_bytes()),
-        )
-        .map_err(|error| error.to_string())?;
-        Ok(std::sync::Arc::new(values))
+    pub(crate) fn array(ids: &[EpisodeId]) -> arrow_array::ArrayRef {
+        std::sync::Arc::new(arrow_array::UInt64Array::from_iter_values(
+            ids.iter().map(EpisodeId::number),
+        ))
     }
 
-    /// The ids a column of member UUIDs holds, in order.
+    /// The ids a column of episode numbers holds, in order.
     pub(crate) fn read(array: &dyn arrow_array::Array) -> Result<Vec<EpisodeId>, String> {
         use arrow_array::Array as _;
-        let uuids = array
+        let numbers = array
             .as_any()
-            .downcast_ref::<arrow_array::FixedSizeBinaryArray>()
-            .filter(|uuids| uuids.value_length() == 16 && uuids.null_count() == 0)
-            .ok_or("Episode ids must be member UUIDs")?;
-        (0..uuids.len())
-            .map(|row| {
-                let bytes = <[u8; 16]>::try_from(uuids.value(row)).map_err(|e| e.to_string())?;
-                Ok(EpisodeId::from(bytes))
-            })
-            .collect()
+            .downcast_ref::<arrow_array::UInt64Array>()
+            .filter(|numbers| numbers.null_count() == 0)
+            .ok_or("Episode ids must be episode numbers")?;
+        Ok(numbers
+            .values()
+            .iter()
+            .copied()
+            .map(EpisodeId::new)
+            .collect())
     }
 }
 
@@ -201,42 +192,32 @@ impl crate::StorageManager {
 mod tests {
     use super::*;
     #[test]
-    fn episode_reads_bind_uuid_bytes_and_reject_invalid_ids() {
-        let id = uuid::Uuid::parse_str("01900000-0000-7000-8000-000000000001").unwrap();
+    fn episode_reads_bind_the_episode_number_without_metadata() {
         let statement = EpisodeTopicQuery::for_episode(
-            &EpisodeId::try_from(id.simple().to_string()).unwrap(),
+            &EpisodeId::new(7),
             "SELECT value FROM source WHERE id = $1".into(),
         )
         .unwrap()
         .statement;
         assert!(statement.as_str().contains("WHERE id = $1"));
-        assert!(!statement.as_str().contains(&id.to_string()));
         let parameters = statement.parameters().unwrap();
-        assert_eq!(
-            parameters
-                .schema()
-                .field(0)
-                .metadata()
-                .get("ARROW:extension:name")
-                .unwrap(),
-            "arrow.uuid"
+        let field = parameters.schema().field(0).clone();
+        assert_eq!(field.data_type(), &arrow_schema::DataType::UInt64);
+        assert!(
+            field.metadata().is_empty(),
+            "a plain number filters Spiral's scan"
         );
         let values = parameters
             .column(0)
             .as_any()
-            .downcast_ref::<arrow_array::FixedSizeBinaryArray>()
+            .downcast_ref::<arrow_array::UInt64Array>()
             .unwrap();
-        assert_eq!(values.value(0), id.as_bytes());
-        // An id that is not a member UUID never reaches a statement at all.
-        assert!(EpisodeId::try_from("' OR true --").is_err());
+        assert_eq!(values.value(0), 7);
     }
 
     #[test]
-    fn listed_episodes_bind_one_uuid_each_in_their_order() {
-        let ids = [
-            EpisodeId::try_from("01900000000070008000000000000001").unwrap(),
-            EpisodeId::try_from("01a0b63c7b7f779b9237d4e0206c08ff").unwrap(),
-        ];
+    fn listed_episodes_bind_one_number_each_in_their_order() {
+        let ids = [EpisodeId::new(1), EpisodeId::new(2)];
         let statement = EpisodeTopicQuery::for_episodes(
             &ids,
             "SELECT value FROM source WHERE id IN ($1, $2)".into(),
@@ -246,21 +227,18 @@ mod tests {
         let parameters = statement.parameters().unwrap();
         assert_eq!(parameters.num_rows(), 1);
         let bound = (0..parameters.num_columns())
-            .map(|place| EpisodeUuids::read(parameters.column(place).as_ref()).unwrap())
+            .map(|place| EpisodeIds::read(parameters.column(place).as_ref()).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(bound, [vec![ids[0].clone()], vec![ids[1].clone()]]);
         assert!(EpisodeTopicQuery::for_episodes(&[], "SELECT 1".into()).is_err());
     }
 
     #[test]
-    fn member_ids_travel_as_uuids_and_read_back_as_they_went() {
-        let ids = [
-            EpisodeId::try_from("01900000000070008000000000000001").unwrap(),
-            EpisodeId::try_from("01a0b63c7b7f779b9237d4e0206c08ff").unwrap(),
-        ];
-        let array = EpisodeUuids::array(&ids).unwrap();
-        assert_eq!(EpisodeUuids::read(array.as_ref()).unwrap(), ids);
+    fn episode_ids_travel_as_numbers_and_read_back_as_they_went() {
+        let ids = [EpisodeId::new(1), EpisodeId::new(2)];
+        let array = EpisodeIds::array(&ids);
+        assert_eq!(EpisodeIds::read(array.as_ref()).unwrap(), ids);
         let text = arrow_array::StringArray::from(vec!["01900000000070008000000000000001"]);
-        assert!(EpisodeUuids::read(&text).is_err());
+        assert!(EpisodeIds::read(&text).is_err());
     }
 }

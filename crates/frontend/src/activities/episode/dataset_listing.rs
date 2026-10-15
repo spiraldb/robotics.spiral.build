@@ -229,7 +229,7 @@ mod tests {
         );
         assert!(!listing.sql().contains("channel_count") && !listing.sql().contains("source"));
         let row = serde_json::json!({
-            "id": "01a1181263837279a03b89d481c7ed9b", "episode_index": 0,
+            "id": EpisodeId::fixture(0), "episode_index": 0,
             "tasks": ["pink lego brick into the transparent box"], "message_count": 1212,
             "message_start_time": 0, "duration_ns": 10_066_666_603_u64,
         });

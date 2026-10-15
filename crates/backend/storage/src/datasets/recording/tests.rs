@@ -196,7 +196,7 @@ async fn stored_recordings_read_back_by_episode_and_stream() {
             .await?;
         assert_eq!(rows.rows().len(), 3, "a retry stores nothing new");
         for row in rows.rows() {
-            let member = EpisodeId::try_from(row["id"].as_str().unwrap()).unwrap();
+            let member = EpisodeId::new(row["id"].as_u64().unwrap());
             let key = row["key"].as_str().unwrap();
             let available = storage
                 .episode_topics(EpisodeSelection::new(dataset.clone(), member.clone()))
@@ -259,7 +259,7 @@ async fn stored_recordings_read_back_by_episode_and_stream() {
             );
         }
         // An episode the dataset does not hold holds no topics.
-        let stranger = EpisodeId::try_from(uuid::Uuid::now_v7().simple().to_string()).unwrap();
+        let stranger = EpisodeId::new(u64::MAX);
         assert!(
             storage
                 .episode_topics(EpisodeSelection::new(dataset.clone(), stranger))

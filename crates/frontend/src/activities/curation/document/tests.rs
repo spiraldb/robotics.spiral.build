@@ -562,8 +562,17 @@ fn every_node_saves_its_recipe_and_nothing_it_read() {
         serde_json::json!({"id": "score_progress-1", "kind": {"type": "score_progress"}})
     );
     // What earlier encodings stored is refused rather than carried: a rule on
-    // a model node, and a Select without its conditions.
+    // a model node, a Select without its conditions, and a row asked about by
+    // its episode's UUID rather than its number.
+    let asked_about = |episode: &str| {
+        format!(
+            r#"{{"nodes":[{{"id":"dataset","kind":{{"type":"dataset"}}}},{{"id":"a","kind":{{"type":"break_down_subtasks","sample_interval_seconds":0.5}}}},{{"id":"s","kind":{{"type":"find_similar_subtasks","query":"fold","source":{{"episode":{episode},"start_time":0.0}}}}}}],"edges":[{{"from":"dataset","to":"a"}},{{"from":"a","to":"s"}}]}}"#
+        )
+    };
+    assert!(CurationGraph::decode(CURATION_ENCODING_VERSION, &asked_about("12")).is_ok());
+    let asked_about_a_uuid = asked_about(r#""01a0989fb6557788a2dd36342635e3d1""#);
     for stored in [
+        asked_about_a_uuid.as_str(),
         r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"m","kind":{"type":"score_progress"},"keeps":{"keep":"progressing","minimum":0.5}}],"edges":[{"from":"dataset","to":"m"}]}"#,
         r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"s","kind":{"type":"select"}}],"edges":[{"from":"dataset","to":"s"}]}"#,
         r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"t","kind":{"type":"track_objects","camera":"/top","prompt":"bottle"}}],"edges":[{"from":"dataset","to":"t"}]}"#,

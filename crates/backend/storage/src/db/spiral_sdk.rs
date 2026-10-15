@@ -6,13 +6,14 @@
 
 use std::backtrace::Backtrace;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use arrow_schema::Schema;
 use datafusion::catalog::TableProvider as _;
 use datafusion::prelude::SessionConfig;
 use futures::FutureExt as _;
 use spiral::auth::{CredentialError, Token};
+use spiral::resources::catalog_types::ProjectCommitId;
 use spiral::{Client, CommitOutcome, EmbeddedConfig};
 use spiral_datafusion::{SpiralCatalogProvider, SpiralTableProvider};
 use tokio::sync::OnceCell;
@@ -24,6 +25,10 @@ use super::database::{
 };
 use super::staged_writes::{StagedWrite, StagedWrites};
 use crate::SpiralConnection;
+
+mod episode_numbers;
+#[cfg(test)]
+mod tests;
 
 /// One Spiral project as the signed-in user reaches it. No SDK work runs in
 /// `new`.
@@ -58,11 +63,20 @@ impl Database for SpiralSdkDatabase {
     }
 }
 
-/// The project's tables as statements and writes reach them: the latest
-/// commit on `main` each time.
+/// The project's tables as statements and writes reach them, at the commit
+/// of `main` each is given.
 #[derive(Clone)]
 struct SpiralProject {
     project: spiral::Project,
+    resolved: Arc<Mutex<Option<ResolvedTables>>>,
+}
+
+/// The project's tables at one commit of `main`, each resolved once, the
+/// first time a statement names it: a table at a commit is one immutable
+/// version, so every statement while `main` stays there reuses it.
+struct ResolvedTables {
+    commit: ProjectCommitId,
+    catalog: SpiralCatalogProvider,
 }
 
 impl SpiralProject {
@@ -102,6 +116,7 @@ impl SpiralProject {
             project: client
                 .project(project)
                 .map_err(DatabaseError::from_spiral)?,
+            resolved: Arc::default(),
         })
     }
 
@@ -128,17 +143,33 @@ impl SpiralProject {
         )))
     }
 
-    async fn query(&self, sql: SqlStatement) -> DatabaseResult<RecordBatchStream> {
-        let tables = self
-            .project
-            .table_session(Self::BRANCH)
-            .await
-            .map_err(DatabaseError::from_spiral)?;
-        let context = SpiralCatalogProvider::new(tables).session(SessionConfig::new());
+    async fn query(
+        &self,
+        snapshot: &spiral::Snapshot,
+        sql: SqlStatement,
+    ) -> DatabaseResult<RecordBatchStream> {
+        let context = self.catalog(snapshot).session(SessionConfig::new());
         sql.stream_on(&context).await
     }
 
-    /// The table named `relation` on `main` now, if there is one.
+    /// The tables at `snapshot`, as earlier statements resolved them at the
+    /// same commit.
+    fn catalog(&self, snapshot: &spiral::Snapshot) -> SpiralCatalogProvider {
+        let mut resolved = self.resolved.lock().expect("resolved tables");
+        match resolved.as_ref() {
+            Some(tables) if tables.commit == snapshot.commit_id() => tables.catalog.clone(),
+            _ => {
+                let catalog = SpiralCatalogProvider::new(snapshot.table_session());
+                *resolved = Some(ResolvedTables {
+                    commit: snapshot.commit_id(),
+                    catalog: catalog.clone(),
+                });
+                catalog
+            }
+        }
+    }
+
+    /// The table named `relation` at `snapshot`, if there is one.
     async fn table(
         &self,
         snapshot: &spiral::Snapshot,
@@ -153,10 +184,10 @@ impl SpiralProject {
 
     async fn committed_schema(
         &self,
+        snapshot: &spiral::Snapshot,
         relation: &RelationName,
     ) -> DatabaseResult<Option<Arc<Schema>>> {
-        let snapshot = self.snapshot().await?;
-        let Some(table) = self.table(&snapshot, relation).await? else {
+        let Some(table) = self.table(snapshot, relation).await? else {
             return Ok(None);
         };
         let provider = SpiralTableProvider::try_new(table)
@@ -172,34 +203,44 @@ impl SpiralProject {
             .map_err(DatabaseError::from_spiral)
     }
 
-    /// Publish `writes` in one commit on top of `main` as it is now; a
-    /// conflict with another writer publishes nothing.
-    async fn publish(&self, writes: StagedWrites) -> DatabaseResult<ExecutionSummary> {
+    /// Publish `writes` in one commit on top of `snapshot`. When `main` has
+    /// moved past it, what the writes were made from may be stale, so nothing
+    /// is published.
+    async fn publish(
+        &self,
+        snapshot: &spiral::Snapshot,
+        writes: StagedWrites,
+    ) -> DatabaseResult<ExecutionSummary> {
         if writes.is_empty() {
             return Ok(ExecutionSummary);
         }
-        let snapshot = self.snapshot().await?;
         let mut transaction = snapshot.transaction().map_err(DatabaseError::from_spiral)?;
+        // Writes that change nothing (no rows to add, a drop of a missing
+        // table) stage nothing, and Spiral refuses to commit nothing.
+        let mut changes = 0;
         for (relation, write) in writes.into_writes() {
-            let existing = self.table(&snapshot, &relation).await?;
+            let existing = self.table(snapshot, &relation).await?;
             let staged = match (write, existing) {
-                (StagedWrite::Append(rows), Some(_)) if rows.is_empty() => Ok(()),
+                (StagedWrite::Append(rows), Some(_)) if rows.is_empty() => Ok(false),
                 (StagedWrite::Append(rows), Some(table)) => transaction
                     .append(&table, rows.into_parts())
                     .await
-                    .map(drop),
+                    .map(|_| true),
                 (StagedWrite::Replace(rows), Some(table)) => transaction
                     .overwrite(&table, rows.into_parts())
                     .await
-                    .map(drop),
+                    .map(|_| true),
                 (StagedWrite::Append(rows) | StagedWrite::Replace(rows), None) => transaction
                     .create_table(relation.as_str(), rows.into_parts())
                     .await
-                    .map(drop),
-                (StagedWrite::Drop, None) => Ok(()),
-                (StagedWrite::Drop, Some(table)) => transaction.drop_table(&table),
+                    .map(|_| true),
+                (StagedWrite::Drop, None) => Ok(false),
+                (StagedWrite::Drop, Some(table)) => transaction.drop_table(&table).map(|()| true),
             };
-            staged.map_err(DatabaseError::from_spiral)?;
+            changes += usize::from(staged.map_err(DatabaseError::from_spiral)?);
+        }
+        if changes == 0 {
+            return Ok(ExecutionSummary);
         }
         match transaction
             .commit()
@@ -215,21 +256,33 @@ impl SpiralProject {
     }
 }
 
-/// An autocommit connection: every write is its own commit.
+/// An autocommit connection: every statement reads `main` as it is then, and
+/// every write is its own commit on top of it.
 struct SpiralSdkConnection {
     project: SpiralProject,
 }
 
+impl SpiralSdkConnection {
+    async fn publish(&self, writes: StagedWrites) -> DatabaseResult<ExecutionSummary> {
+        let snapshot = self.project.snapshot().await?;
+        self.project.publish(&snapshot, writes).await
+    }
+}
+
 impl DatabaseSession for SpiralSdkConnection {
     fn query(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, RecordBatchStream> {
-        async move { self.project.query(sql).await }.boxed()
+        async move {
+            let snapshot = self.project.snapshot().await?;
+            self.project.query(&snapshot, sql).await
+        }
+        .boxed()
     }
 
     fn drop_table(&mut self, relation: RelationName) -> DatabaseFuture<'_, ExecutionSummary> {
         async move {
             let mut writes = StagedWrites::default();
             writes.drop_table(relation);
-            self.project.publish(writes).await
+            self.publish(writes).await
         }
         .boxed()
     }
@@ -238,21 +291,27 @@ impl DatabaseSession for SpiralSdkConnection {
         async move {
             let mut writes = StagedWrites::default();
             writes.stage(ingestion).await?;
-            self.project.publish(writes).await
+            self.publish(writes).await
         }
         .boxed()
     }
 
     fn table_schema(&mut self, relation: RelationName) -> DatabaseFuture<'_, Option<Arc<Schema>>> {
-        async move { self.project.committed_schema(&relation).await }.boxed()
+        async move {
+            let snapshot = self.project.snapshot().await?;
+            self.project.committed_schema(&snapshot, &relation).await
+        }
+        .boxed()
     }
 }
 
 impl DatabaseConnection for SpiralSdkConnection {
     fn begin(self: Box<Self>) -> DatabaseFuture<'static, Box<dyn DatabaseTransaction>> {
         async move {
+            let snapshot = self.project.snapshot().await?;
             Ok(Box::new(SpiralSdkTransaction {
                 project: self.project,
+                snapshot,
                 writes: StagedWrites::default(),
             }) as Box<dyn DatabaseTransaction>)
         }
@@ -260,15 +319,18 @@ impl DatabaseConnection for SpiralSdkConnection {
     }
 }
 
-/// A transaction: its writes are held, and published in one commit.
+/// A transaction: it reads `main` as it was when it began, holds its writes,
+/// and publishes them in one commit only if `main` has not moved since, so
+/// what it wrote from what it read cannot race another writer.
 struct SpiralSdkTransaction {
     project: SpiralProject,
+    snapshot: spiral::Snapshot,
     writes: StagedWrites,
 }
 
 impl DatabaseSession for SpiralSdkTransaction {
     fn query(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, RecordBatchStream> {
-        async move { self.project.query(sql).await }.boxed()
+        async move { self.project.query(&self.snapshot, sql).await }.boxed()
     }
 
     fn drop_table(&mut self, relation: RelationName) -> DatabaseFuture<'_, ExecutionSummary> {
@@ -288,7 +350,11 @@ impl DatabaseSession for SpiralSdkTransaction {
         async move {
             match self.writes.schema(&relation) {
                 Some(held) => Ok(held),
-                None => self.project.committed_schema(&relation).await,
+                None => {
+                    self.project
+                        .committed_schema(&self.snapshot, &relation)
+                        .await
+                }
             }
         }
         .boxed()
@@ -297,7 +363,7 @@ impl DatabaseSession for SpiralSdkTransaction {
 
 impl DatabaseTransaction for SpiralSdkTransaction {
     fn commit(self: Box<Self>) -> DatabaseFuture<'static, ExecutionSummary> {
-        async move { self.project.publish(self.writes).await }.boxed()
+        async move { self.project.publish(&self.snapshot, self.writes).await }.boxed()
     }
 
     fn rollback(self: Box<Self>) -> DatabaseFuture<'static, ()> {

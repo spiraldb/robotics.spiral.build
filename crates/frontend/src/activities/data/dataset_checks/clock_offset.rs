@@ -339,10 +339,6 @@ mod tests {
     use spiral_robotics_common::curation::AnswerSource;
     use spiral_robotics_common::datasets::DatasetSelection;
 
-    fn episode(ordinal: u32) -> String {
-        format!("{ordinal:032x}")
-    }
-
     #[test]
     fn the_judgment_pairs_streams_whose_episodes_read_alike_and_flags_them_in_spiral() {
         let sql = ClockOffset::judgment("(parts)", 33.4);
@@ -409,16 +405,16 @@ mod tests {
             {
                 "streams": ["/right-arm-state"], "median_ms": -10.0, "low_ms": -12.0, "high_ms": -8.0,
                 "episodes": 1, "flagged": false, "apart": null,
-                "furthest": [{"episode_id": episode(1), "median_ms": -10.0}]
+                "furthest": [{"episode_id": EpisodeId::fixture(1), "median_ms": -10.0}]
             },
             {
                 "streams": ["/left-arm-action", "/left-arm-state"], "median_ms": -105.0, "low_ms": -130.0, "high_ms": -30.0,
                 "episodes": 3, "flagged": true,
-                "apart": [{"episode_id": episode(1), "median_ms": -100.0}, {"episode_id": episode(2), "median_ms": -110.0}],
+                "apart": [{"episode_id": EpisodeId::fixture(1), "median_ms": -100.0}, {"episode_id": EpisodeId::fixture(2), "median_ms": -110.0}],
                 "furthest": [
-                    {"episode_id": episode(1), "median_ms": -100.0},
-                    {"episode_id": episode(3), "median_ms": -126.0},
-                    {"episode_id": episode(2), "median_ms": -110.0}
+                    {"episode_id": EpisodeId::fixture(1), "median_ms": -100.0},
+                    {"episode_id": EpisodeId::fixture(3), "median_ms": -126.0},
+                    {"episode_id": EpisodeId::fixture(2), "median_ms": -110.0}
                 ]
             }
         ]))

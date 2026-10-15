@@ -15,9 +15,8 @@ impl StorageManager {
     pub async fn store_recording(&self, name: &EpisodeName, bytes: &[u8]) -> Result<(), String> {
         let dataset = DatasetSelection::new(name.dataset())?;
         let catalog = self.project_store().dataset_catalog().datasets().await?;
-        let exists = match catalog.summary(&dataset) {
-            Some(summary) if summary.format() == DatasetFormat::Mcap => true,
-            Some(_) => {
+        match catalog.summary(&dataset) {
+            Some(summary) if summary.format() != DatasetFormat::Mcap => {
                 return Err(format!(
                     "{} is a LeRobot dataset; record into an MCAP dataset",
                     dataset.display_name()
@@ -29,8 +28,8 @@ impl StorageManager {
                     dataset.label()
                 ));
             }
-            None => false,
-        };
+            _ => {}
+        }
         let key = format!("{}.mcap", name.episode());
         let file = McapFile::held(&key, bytes)?;
         let sha256 = file.sha256().to_owned();
@@ -41,6 +40,10 @@ impl StorageManager {
         let mut connection = self.project_store().connect_exclusive().await?;
         connection
             .transaction("recording store", async |connection| {
+                // Whether the dataset exists is read again here, where it
+                // cannot change before the commit: another recording may
+                // have created it since.
+                let exists = connection.table_exists(dataset.episodes().name()).await?;
                 let mut write = if !exists {
                     DatasetWrite::create(connection, &dataset, DatasetFormat::Mcap).await?
                 } else {

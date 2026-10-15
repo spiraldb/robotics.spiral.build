@@ -250,10 +250,6 @@ mod tests {
     use super::super::stream_reads::TwoArmDataset;
     use super::*;
 
-    fn episode(ordinal: u32) -> EpisodeId {
-        EpisodeId::try_from(format!("{ordinal:032x}")).unwrap()
-    }
-
     #[test]
     fn every_arm_is_read_at_the_instants_they_were_logged_together() {
         let dataset = TwoArmDataset::new();
@@ -281,12 +277,12 @@ mod tests {
         let dataset = TwoArmDataset::new();
         let judged: Vec<JudgedPauses> = serde_json::from_value(serde_json::json!([{
             "still_share": 0.0349, "long_pauses": 2,
-            "longest": {"episode_id": episode(1).to_string(), "longest_s": 3.0, "longest_at": 1.5},
+            "longest": {"episode_id": EpisodeId::fixture(1), "longest_s": 3.0, "longest_at": 1.5},
             "lengthy": [
-                {"episode_id": episode(2).to_string(), "longest_s": 2.5, "longest_at": 4.0},
-                {"episode_id": episode(1).to_string(), "longest_s": 3.0, "longest_at": 1.5},
+                {"episode_id": EpisodeId::fixture(2), "longest_s": 2.5, "longest_at": 4.0},
+                {"episode_id": EpisodeId::fixture(1), "longest_s": 3.0, "longest_at": 1.5},
             ],
-            "apart": [episode(3).to_string()],
+            "apart": [EpisodeId::fixture(3)],
         }]))
         .unwrap();
         let pauses = Pauses::of(dataset.arms(), judged);
@@ -297,8 +293,8 @@ mod tests {
             "3.0 s"
         );
         // The episodes with a long pause lead with the longest.
-        assert_eq!(pauses.lengthy[0].episode, episode(1));
-        assert_eq!(pauses.apart, [episode(3)]);
+        assert_eq!(pauses.lengthy[0].episode, EpisodeId::fixture(1));
+        assert_eq!(pauses.apart, [EpisodeId::fixture(3)]);
         // No episode measured is no pause.
         let quiet = Pauses::of(dataset.arms(), Vec::new());
         assert_eq!(quiet.still_share, 0.0);

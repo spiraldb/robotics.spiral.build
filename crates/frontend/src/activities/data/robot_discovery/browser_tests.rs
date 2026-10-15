@@ -32,7 +32,7 @@ export function installRobotDiscoveryFetch() {
         const recordedPath = path === '/api/proxy' ? metadata.url : path;
         robotRequests.push({path:recordedPath, transport:path, project: request.headers.get('X-Spiral-Project'), metadata, body});
         if (path === '/api/queries') return Response.json({
-            columns:[{name:'id'}],rows:[{id:'01a0989fb65870a7a5459902f9e3e090'}],truncated:false
+            columns:[{name:'id'}],rows:[{id:7}],truncated:false
         });
         if (path === '/api/datasets/inspect') return Response.json({
             dataset:{selection:{id:'demo'},format:'mcap',resource_id:'demo-resource',version_id:'demo-version'},
@@ -185,10 +185,7 @@ async fn browser_dispatches_native_tools_and_repairs_a_rejected_result() {
         .iter()
         .find(|request| request["path"] == "/api/queries/episode")
         .unwrap();
-    assert_eq!(
-        samples["body"]["episode"]["episode_id"],
-        "01a0989fb65870a7a5459902f9e3e090"
-    );
+    assert_eq!(samples["body"]["episode"]["episode_id"], 7);
     assert!(
         samples["body"]["statement"]
             .as_str()

@@ -123,12 +123,11 @@ async fn an_episode_rows_hold_its_facts_and_streams() {
         .unwrap();
     let batch = arrow_select::concat::concat_batches(&batches[0].schema(), &batches).unwrap();
     let columns = ArrowColumns::new(&batch, "episodes");
-    let ids = super::super::EpisodeUuids::read(batch.column(0).as_ref()).unwrap();
+    let ids = super::super::EpisodeIds::read(batch.column(0).as_ref()).unwrap();
     assert!(
-        ids.iter().all(|id| id.as_str().as_bytes()[12] == b'7'),
-        "every new episode is a UUIDv7"
+        ids.windows(2).all(|pair| pair[1] == pair[0].next()),
+        "episodes are numbered in the order they are written"
     );
-    assert_ne!(ids[0], ids[1]);
     assert_eq!(columns.text("key", 0).unwrap(), "take-1.mcap");
     assert_eq!(columns.optional_text("source_uri", 0).unwrap(), None);
     assert_eq!(columns.text("sha256", 0).unwrap().len(), 64);
@@ -177,4 +176,19 @@ async fn a_write_takes_at_most_32_episodes_of_its_format() {
         .map(|index| decoded(&format!("take-{index}"), false))
         .collect();
     assert!(write.write(&mut connection, many).await.is_err());
+}
+
+#[tokio::test]
+async fn a_dataset_that_exists_is_not_created_again() {
+    let (store, _) = MemoryDatabase::store().await;
+    let dataset = DatasetSelection::new("demo").unwrap();
+    DatasetImport::new(&store, &dataset, DatasetFormat::Mcap)
+        .commit(vec![decoded("take-1", false)])
+        .await
+        .unwrap();
+    let error = DatasetImport::new(&store, &dataset, DatasetFormat::Mcap)
+        .commit(vec![decoded("take-2", false)])
+        .await
+        .unwrap_err();
+    assert!(error.contains("exists already"), "{error}");
 }

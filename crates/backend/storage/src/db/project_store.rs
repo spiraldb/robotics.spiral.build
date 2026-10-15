@@ -186,7 +186,6 @@ impl ProjectConnection {
             .await
     }
 
-    #[cfg(test)]
     pub(crate) async fn table_exists(&mut self, target: &str) -> Result<bool, String> {
         self.relation_schema(target)
             .await

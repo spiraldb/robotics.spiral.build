@@ -10,7 +10,7 @@
 //! time. An episode the table already holds is not written again, so two
 //! runs filling one column at once, such as two previews of one call, still
 //! leave one row per episode. The tables go with their dataset.
-use super::EpisodeUuids;
+use super::EpisodeIds;
 use crate::{ProjectConnection, ProjectStore, StorageManager};
 use arrow_array::{Array, ArrayRef, ListArray, RecordBatch, make_array};
 use arrow_buffer::OffsetBuffer;
@@ -119,7 +119,7 @@ impl StoredAnswers<'_> {
         let mut episodes = BTreeSet::new();
         for batch in batches {
             let ids = batch.column_by_name("episode_id").ok_or("no episode_id")?;
-            episodes.extend(EpisodeUuids::read(ids.as_ref())?);
+            episodes.extend(EpisodeIds::read(ids.as_ref())?);
         }
         Ok(Some(WrittenRows {
             schema: Arc::new(schema),
@@ -210,7 +210,7 @@ impl StatementAnswers {
         let answer = schema.index_of(ANSWER).map_err(|_| Self::missing(ANSWER))?;
         let mut answers = BTreeMap::new();
         for batch in batches {
-            let episodes = EpisodeUuids::read(batch.column(episode).as_ref())?;
+            let episodes = EpisodeIds::read(batch.column(episode).as_ref())?;
             for (row, id) in episodes.into_iter().enumerate() {
                 let answered = EpisodeAnswer(batch.column(answer).slice(row, 1));
                 if answers.insert(id.clone(), answered).is_some() {
@@ -302,7 +302,7 @@ impl ColumnAnswers {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| format!("An answer is not of its column's type: {error}"))?;
         let (ids, values) = (
-            EpisodeUuids::array(&episodes)?,
+            EpisodeIds::array(&episodes),
             EpisodeAnswer::concatenated(&answers)?,
         );
         let columns = written
@@ -330,7 +330,7 @@ impl AnswerSchema {
     /// the model could not answer.
     fn of(answer_type: &DataType) -> Schema {
         Schema::new(vec![
-            EpisodeUuids::field("episode_id"),
+            EpisodeIds::field("episode_id"),
             Field::new(VALUE, Self::nullable(answer_type), true),
         ])
     }
@@ -435,7 +435,7 @@ mod tests {
     }
 
     fn episode(ordinal: u32) -> EpisodeId {
-        EpisodeId::try_from(format!("{ordinal:032x}")).unwrap()
+        EpisodeId::new(u64::from(ordinal))
     }
 
     /// The rows of a new table of `answer_type`'s answers, none written.
@@ -480,7 +480,7 @@ mod tests {
         let rows = answers.rows(&table).unwrap().unwrap();
         assert_eq!(rows.schema(), table.schema);
         assert_eq!(
-            EpisodeUuids::read(rows.column(0).as_ref()).unwrap(),
+            EpisodeIds::read(rows.column(0).as_ref()).unwrap(),
             [episode(1), episode(2)]
         );
         assert!(rows.column(1).is_valid(0) && rows.column(1).is_null(1));
@@ -524,7 +524,7 @@ mod tests {
         // 64 episodes' scores of 256 KiB each, read as one 16 MiB column.
         let scores = DataType::List(Arc::new(Field::new_list_field(DataType::Float32, false)));
         let schema = Schema::new(vec![
-            EpisodeUuids::field("episode_id"),
+            EpisodeIds::field("episode_id"),
             Field::new(ANSWER, scores, true),
         ]);
         let frames = 64 * 1024;
@@ -537,7 +537,7 @@ mod tests {
         let episodes = (0..64).map(episode).collect::<Vec<_>>();
         let batch = RecordBatch::try_new(
             Arc::new(schema.clone()),
-            vec![EpisodeUuids::array(&episodes).unwrap(), Arc::new(read)],
+            vec![EpisodeIds::array(&episodes), Arc::new(read)],
         )
         .unwrap();
         let mut answered = StatementAnswers::from_statement(&schema, &[batch]).unwrap();
@@ -592,14 +592,14 @@ mod tests {
     #[test]
     fn a_dataset_statement_answers_each_episode_it_measured_once() {
         let schema = Schema::new(vec![
-            EpisodeUuids::field("episode_id"),
+            EpisodeIds::field("episode_id"),
             Field::new(ANSWER, DataType::Float64, true),
         ]);
         let rows = |episodes: Vec<EpisodeId>, values: Vec<f64>| {
             RecordBatch::try_new(
                 Arc::new(schema.clone()),
                 vec![
-                    EpisodeUuids::array(&episodes).unwrap(),
+                    EpisodeIds::array(&episodes),
                     Arc::new(Float64Array::from(values)),
                 ],
             )
@@ -683,7 +683,7 @@ mod tests {
             .unwrap();
         let read = arrow_select::concat::concat_batches(&read[0].schema(), &read).unwrap();
         assert_eq!(
-            EpisodeUuids::read(read.column(0).as_ref()).unwrap(),
+            EpisodeIds::read(read.column(0).as_ref()).unwrap(),
             [episode(1), episode(2), episode(3)]
         );
         let subtasks = read

@@ -36,7 +36,7 @@ pub(crate) use selection::{
 
 /// The payload's encoding. A payload of any other encoding is refused, not
 /// converted.
-pub(crate) const CURATION_ENCODING_VERSION: u32 = 7;
+pub(crate) const CURATION_ENCODING_VERSION: u32 = 8;
 /// The root node every curation starts with.
 pub(crate) const DATASET_NODE_ID: &str = "dataset";
 /// OpenRouter id of the newest Gemini Flash as of 2026-09-21; it accepts image

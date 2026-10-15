@@ -300,7 +300,7 @@ fn imported_protobuf_decodes_as_spiral_read_it() {
     // A stream's messages keep their order in the file, and their headers.
     assert_eq!(arm.len(), 2);
     assert_eq!(arm.time_span(), Some((100, 104)));
-    let id = EpisodeId::try_from("01900000000070008000000000000001").unwrap();
+    let id = EpisodeId::new(1);
     let rows = arm.batch(&id).unwrap();
     let publish = rows
         .column_by_name("publish_time")
@@ -399,9 +399,7 @@ fn presence_oneofs_enums_and_maps_follow_protobuf() {
         types(&episode)["/status"],
         "struct<count: uint32 not null, label: string_view, mode: int32 not null, gains: list<item: struct<key: string_view not null, value: double not null> not null> not null>"
     );
-    let rows = episode.streams()[0]
-        .batch(&EpisodeId::try_from("01900000000070008000000000000001").unwrap())
-        .unwrap();
+    let rows = episode.streams()[0].batch(&EpisodeId::new(1)).unwrap();
     let value = rows.column_by_name("value").unwrap();
     let value = value
         .as_any()

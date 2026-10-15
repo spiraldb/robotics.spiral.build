@@ -250,7 +250,7 @@ A dataset is the tables under `datasets.<id>` that Studio writes itself
 
 Episode content is read with read-only SQL over those tables: `POST /queries`,
 and `POST /queries/episode` and `POST /queries/episodes`, which bind one
-episode's UUID as `$1` or listed episodes' as `$1`…`$N`; each of the two has an
+episode's number as `$1` or listed episodes' as `$1`…`$N`; each of the two has an
 `/arrow` form answering one Arrow IPC stream.
 
 Import takes a public Hugging Face repository holding MCAP files or a LeRobot

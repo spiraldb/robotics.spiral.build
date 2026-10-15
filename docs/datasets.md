@@ -35,7 +35,7 @@ by their names.
 | `datasets.<id>.topics` | stream | one recorded stream: a topic and the schema its messages use (below) |
 | `datasets.<id>.messages.<stream>` | message | the messages of one stream (below) |
 | `datasets.<id>.files` | MCAP episode | the episode's source MCAP file: `recording` (its key) and `source`, an `spql.io.Blob` holding its bytes inline, or pointing at its pinned Hugging Face URI. LeRobot datasets have none |
-| `datasets.<id>.answers.<column>` | episode asked | one answer column, what one exact model call answered: `episode_id` (UUID, `arrow.uuid`, not null) and `value`, the answer, NULL where the model could not answer. An episode with no row is not asked yet ([curation](curation.md#stored-answers)) |
+| `datasets.<id>.answers.<column>` | episode asked | one answer column, what one exact model call answered: `episode_id` (`UInt64`, not null, the episode's number) and `value`, the answer, NULL where the model could not answer. An episode with no row is not asked yet ([curation](curation.md#stored-answers)) |
 
 A dataset exists when its `episodes` table does, and is an MCAP dataset when
 it also has `files`; the catalog alone says both, so listing datasets reads no
@@ -49,7 +49,7 @@ it.
 
 | Column | Type | |
 | --- | --- | --- |
-| `id` | UUID (`arrow.uuid`), not null | the episode's identity, a UUIDv7 Studio assigns when it first imports the episode and never changes |
+| `id` | `UInt64`, not null | the episode's number in its dataset: Studio numbers episodes from 0 in the order it writes them, and an episode keeps its number |
 | `key` | text, not null | the episode's key in its source, unique in the dataset: an MCAP file's name (`<episode>.mcap`), or a LeRobot episode's `episode_<index>` with six digits |
 | `source_uri` | text | where it was read from: an MCAP file's pinned `hf://datasets/<org>/<repo>@<commit>/<path>`, or a LeRobot repository's root; null for a file Studio holds (`files`) |
 | `source_bytes` | uint64 | the MCAP file's size |
@@ -85,7 +85,7 @@ Arrow type changed, is two streams, never one coerced into the other.
 
 | Column | Type | |
 | --- | --- | --- |
-| `id` | UUID, not null | the episode |
+| `id` | `UInt64`, not null | the episode's number |
 | `log_time` | uint64, not null | MCAP log time, or the LeRobot frame's time from the episode's start, in nanoseconds |
 | `publish_time` | uint64, not null | MCAP publish time (LeRobot: `log_time`) |
 | `sequence` | uint32, not null | MCAP sequence (LeRobot: the frame index) |
@@ -110,7 +110,10 @@ transaction: every stream's message rows first, then the episodes' rows (and
 an MCAP episode's file), and last the `topics` table replaced with the updated
 counts, once per transaction, since Spiral refuses to replace a table the same
 transaction already wrote. A reader that finds an episode therefore finds all
-its messages. A failed batch commits nothing; the batches before it stay.
+its messages. A failed batch commits nothing; the batches before it stay. Each
+episode is given the number after the dataset's last, as the transaction read
+it; when another writer committed in between, the transaction conflicts and
+commits nothing, so no number is given twice.
 
 Writing episodes never touches the answer columns: a new episode has no row
 in any of them, which reads as not asked yet. Only fill runs write answers,
@@ -207,8 +210,12 @@ population and, through its `streams`, what an episode can show; `topics`
 for the dataset's streams; and `messages.<stream>` for a stream, filtered to
 the episode by `id`. `DatasetSelection` (in
 `common`) names every table, so no statement spells a table name itself.
-Episode-scoped reads bind the episode UUID as `$1`; no filename, timestamp,
-text-cast, or raw-storage filter substitutes for episode identity. They learn
+Episode-scoped reads bind the episode's number as `$1`; no filename,
+timestamp, text-cast, or raw-storage filter substitutes for episode identity.
+Every table holds an episode's rows together, since episodes are numbered in
+the order they are written, so Spiral skips every stretch of a table whose
+statistics exclude the number: a read of one episode reads that episode's
+rows alone, however large the dataset. They learn
 what a stream holds from its schema and never require Studio's own topics or
 capture types; the metadata Studio writes into its files is ordinary optional
 content. [Episode playback](episode-playback.md) describes the inspection

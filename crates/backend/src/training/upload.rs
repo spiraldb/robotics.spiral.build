@@ -227,7 +227,7 @@ impl StreamUpload {
         }
         Err(format!(
             "A stream of episode {} did not upload after {ATTEMPTS} attempts: {last_failure}",
-            self.stream.episode().episode_id().short()
+            self.stream.episode().episode_id()
         ))
     }
 }

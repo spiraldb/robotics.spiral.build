@@ -518,7 +518,7 @@ mod tests {
     /// episode's listed facts beside it as one read answers them.
     fn row(id: u32, start: u64, published: Value) -> Value {
         let mut row = json!({
-            "episode_id": EpisodeId::fixture(id).to_string(),
+            "episode_id": EpisodeId::fixture(id),
             "listed_source_uri": format!("s3://recordings/{id}.mcap"),
             "listed_message_start_time": start,
             "listed_duration_ns": 10_000_000_000_u64,

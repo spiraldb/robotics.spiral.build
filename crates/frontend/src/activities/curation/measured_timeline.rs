@@ -4,7 +4,7 @@
 //! next one, so the timeline is a run of moments, which a Select keeps
 //! stretches of exactly as its SQL does (`select/step.rs`).
 use super::population::EpisodeSample;
-use arrow_array::{Array, FixedSizeBinaryArray, Float64Array, Int64Array};
+use arrow_array::{Array, Float64Array, Int64Array, UInt64Array};
 use arrow_schema::DataType;
 use spiral_robotics_common::datasets::EpisodeId;
 use std::collections::BTreeMap;
@@ -73,7 +73,7 @@ impl MeasuredTimeline {
     ) -> Result<BTreeMap<EpisodeId, Self>, String> {
         let reader = arrow_ipc::reader::StreamReader::try_new(Cursor::new(stream), None)
             .map_err(|error| error.to_string())?;
-        let mut episodes = BTreeMap::<[u8; 16], (i64, Vec<TimelineEntry>)>::new();
+        let mut episodes = BTreeMap::<EpisodeId, (i64, Vec<TimelineEntry>)>::new();
         for batch in reader {
             let batch = batch.map_err(|error| error.to_string())?;
             let column = |name: &str| {
@@ -90,7 +90,7 @@ impl MeasuredTimeline {
                 cast("value", &DataType::Float64)?,
             );
             let (Some(ids), Some(times), Some(values)) = (
-                ids.as_any().downcast_ref::<FixedSizeBinaryArray>(),
+                ids.as_any().downcast_ref::<UInt64Array>(),
                 times.as_any().downcast_ref::<Int64Array>(),
                 values.as_any().downcast_ref::<Float64Array>(),
             ) else {
@@ -100,12 +100,11 @@ impl MeasuredTimeline {
                 if ids.is_null(row) || times.is_null(row) {
                     return Err("An entry of the preview has no episode or time.".into());
                 }
-                let id = <[u8; 16]>::try_from(ids.value(row))
-                    .map_err(|_| "An entry's episode is not an episode UUID.".to_owned())?;
+                let id = EpisodeId::new(ids.value(row));
                 let (origin, entries) = match episodes.get_mut(&id) {
                     Some(episode) => episode,
                     None => {
-                        let origin = sample.origin_ns(&EpisodeId::from(id)).ok_or(
+                        let origin = sample.origin_ns(&id).ok_or(
                             "An episode of the preview has no recorded start time to place its timeline by.",
                         )?;
                         episodes.entry(id).or_insert((origin, Vec::new()))
@@ -119,7 +118,7 @@ impl MeasuredTimeline {
         }
         Ok(episodes
             .into_iter()
-            .map(|(id, (_, entries))| (EpisodeId::from(id), Self::new(entries)))
+            .map(|(id, (_, entries))| (id, Self::new(entries)))
             .collect())
     }
 
@@ -240,23 +239,13 @@ mod tests {
     #[test]
     fn a_preview_reads_back_each_episode_from_its_first_message() {
         let schema = Arc::new(Schema::new(vec![
-            Field::new("episode_id", DataType::FixedSizeBinary(16), false),
+            Field::new("episode_id", DataType::UInt64, false),
             Field::new("timestamp_ns", DataType::Int64, false),
             Field::new("value", DataType::UInt64, true),
         ]));
-        let uuid = |ordinal: u8| {
-            let mut bytes = [0_u8; 16];
-            bytes[15] = ordinal;
-            bytes
-        };
         let start = 1_000_000_000_i64;
         let columns: Vec<ArrayRef> = vec![
-            Arc::new(
-                arrow_array::FixedSizeBinaryArray::try_from_iter(
-                    [uuid(1), uuid(2), uuid(1)].into_iter(),
-                )
-                .unwrap(),
-            ),
+            Arc::new(arrow_array::UInt64Array::from(vec![1, 2, 1])),
             Arc::new(Int64Array::from(vec![start + 200_000_000, start, start])),
             Arc::new(arrow_array::UInt64Array::from(vec![Some(2), Some(5), None])),
         ];

@@ -301,7 +301,7 @@ mod tests {
     fn episode() -> EpisodeSelection {
         EpisodeSelection::new(
             DatasetSelection::new("default").unwrap(),
-            EpisodeId::try_from("01a0989fb65870a7a5459902f9e3e090").unwrap(),
+            EpisodeId::fixture(1),
         )
     }
 

@@ -282,7 +282,7 @@ impl StorageManager {
 mod tests {
     use super::*;
     use crate::datasets::fixtures::RolloutFixture;
-    use crate::datasets::{DatasetImport, EpisodeUuids, McapFile, TestJournal};
+    use crate::datasets::{DatasetImport, EpisodeIds, McapFile, TestJournal};
     use crate::db::MemoryDatabase;
     use spiral_robotics_common::datasets::{DatasetFormat, EpisodeId};
 
@@ -326,7 +326,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let filmed = EpisodeUuids::read(batches[0].column(0).as_ref()).unwrap()[0].clone();
+        let filmed = EpisodeIds::read(batches[0].column(0).as_ref()).unwrap()[0].clone();
         let topics = storage
             .episode_topics(EpisodeSelection::new(dataset.clone(), filmed))
             .await
@@ -337,7 +337,7 @@ mod tests {
             (held.revision(), held.members(), held.samples()),
             (camera.revision(), 1, 8)
         );
-        let stranger = EpisodeId::try_from("01900000000070008000000000000001").unwrap();
+        let stranger = EpisodeId::new(u64::MAX);
         assert!(
             storage
                 .episode_topics(EpisodeSelection::new(dataset.clone(), stranger))

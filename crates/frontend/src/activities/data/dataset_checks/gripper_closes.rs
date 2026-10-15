@@ -297,10 +297,6 @@ mod tests {
     use super::super::stream_reads::TwoArmDataset;
     use super::*;
 
-    fn episode(ordinal: u32) -> EpisodeId {
-        EpisodeId::try_from(format!("{ordinal:032x}")).unwrap()
-    }
-
     #[test]
     fn each_grippers_closes_are_judged_where_it_was_logged_together() {
         let dataset = TwoArmDataset::new();
@@ -332,9 +328,9 @@ mod tests {
             "part": "left",
             "counts": {"shut": 13, "nearly": 1, "holding": 2},
             "most_shut": [
-                {"episode_id": episode(6).to_string(), "shut": 2, "first_shut_at": 1.5},
-                {"episode_id": episode(5).to_string(), "shut": 6, "first_shut_at": 1.0},
-                {"episode_id": episode(1).to_string(), "shut": 4, "first_shut_at": null},
+                {"episode_id": EpisodeId::fixture(6), "shut": 2, "first_shut_at": 1.5},
+                {"episode_id": EpisodeId::fixture(5), "shut": 6, "first_shut_at": 1.0},
+                {"episode_id": EpisodeId::fixture(1), "shut": 4, "first_shut_at": null},
             ],
         }]))
         .unwrap();

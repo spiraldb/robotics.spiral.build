@@ -21,8 +21,7 @@ impl QueryRequest {
 }
 
 /// A read-only statement scoped to one exact dataset member: `$1` binds the
-/// episode's UUID as an Arrow parameter, since Spiral compares member ids
-/// only against bound UUIDs, never against text literals.
+/// episode's number as an Arrow parameter.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EpisodeQueryRequest {
@@ -54,7 +53,7 @@ impl EpisodeQueryRequest {
 }
 
 /// A read-only statement scoped to listed members of one dataset: `$1`
-/// through `$N` bind their UUIDs, in the order listed. `max_rows` bounds the
+/// through `$N` bind their numbers, in the order listed. `max_rows` bounds the
 /// rows of each listed member.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

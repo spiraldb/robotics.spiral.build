@@ -1,7 +1,7 @@
 //! A dataset's `episodes` table, one row per episode: its identity, where it
 //! was read from, and the facts readers list it by, including the streams it
 //! holds messages of ([datasets](../../../../../docs/datasets.md#episodes)).
-use super::EpisodeUuids;
+use super::EpisodeIds;
 use super::writer::{DecodedEpisode, EpisodeOrigin};
 use arrow_array::builder::{ListBuilder, StringBuilder};
 use arrow_array::{
@@ -20,7 +20,7 @@ impl EpisodeRows {
     pub(crate) fn schema() -> SchemaRef {
         let tasks = DataType::List(Arc::new(Field::new_list_field(DataType::Utf8, false)));
         Arc::new(Schema::new(vec![
-            EpisodeUuids::field("id"),
+            EpisodeIds::field("id"),
             Field::new("key", DataType::Utf8, false),
             Field::new("source_uri", DataType::Utf8, true),
             Field::new("source_bytes", DataType::UInt64, true),
@@ -83,7 +83,7 @@ impl EpisodeRows {
             .map(|episode| episode.time_span())
             .collect::<Vec<_>>();
         let columns: Vec<ArrayRef> = vec![
-            EpisodeUuids::array(&ids)?,
+            EpisodeIds::array(&ids),
             Arc::new(StringArray::from_iter_values(
                 episodes.iter().map(|episode| episode.key()),
             )),

@@ -238,10 +238,6 @@ mod tests {
     use super::super::stream_reads::TwoArmDataset;
     use super::*;
 
-    fn episode(ordinal: u32) -> EpisodeId {
-        EpisodeId::try_from(format!("{ordinal:032x}")).unwrap()
-    }
-
     #[test]
     fn a_commanded_arms_stuck_time_is_judged_where_it_was_logged_together() {
         let dataset = TwoArmDataset::new();
@@ -266,7 +262,7 @@ mod tests {
         assert!(sql.contains("FROM logged WHERE stuck_s > 0.5 GROUP BY part"));
         let judged: Vec<JudgedArm> = serde_json::from_value(serde_json::json!([{
             "part": "left", "most": 30,
-            "flagged": [{"episode_id": episode(1).to_string(), "stuck_s": 1.0, "first_at": 2.5}],
+            "flagged": [{"episode_id": EpisodeId::fixture(1), "stuck_s": 1.0, "first_at": 2.5}],
         }]))
         .unwrap();
         let stuck = StuckJoints::of(dataset.arms(), judged);

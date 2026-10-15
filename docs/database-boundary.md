@@ -12,9 +12,10 @@ Storage features depend on `Database`, `DatabaseSession`,
 
 `SpiralSdkDatabase` reaches Spiral through `spiral-sdk` (library `spiral`) and
 `spiral-datafusion`, Git dependencies on the private SpiralDB repository pinned
-to one commit in the workspace `Cargo.toml` (currently
-[spiraldb#7867](https://github.com/spiraldb/spiraldb/pull/7867), which adds
-table drops and renames). Cargo fetches it with the system's git and its credentials
+to one `develop` commit in the workspace `Cargo.toml`. Spiral's hosted
+services deploy from `develop`, so keep that commit recent: an older SDK can
+lose a service endpoint, which surfaces as a catalog request failing with
+`401 Unauthorized` on every commit. Cargo fetches it with the system's git and its credentials
 (`.cargo/config.toml`); CI loads the read-only `SPIRALDB_DEPLOY_KEY` first.
 
 The SDK reads and writes through Spiral's data-plane runtime, a shared library
@@ -47,10 +48,11 @@ statement quotes the whole name as one identifier. `RelationName` holds such a
 name.
 
 - **Statements** are DataFusion SQL, planned by `spiral-datafusion` over the
-  project's tables on `main` as committed when the statement starts. Studio
+  project's tables on `main` as committed when the statement starts, or, in a
+  transaction, when the transaction began. Studio
   uses DataFusion's own functions and no SPQL ones. Parameters bind as `$1`
-  onwards, each keeping its field's metadata, so an episode's UUID compares as
-  one. Results stream as they are computed and outlive their connection; a
+  onwards; a plain value binds without metadata, so Spiral filters its scan
+  by it and skips what its statistics exclude. Results stream as they are computed and outlive their connection; a
   connection holds any number at once.
 - **Writes** publish through SDK transactions. An autocommit `ingest` or
   `drop_table` is one commit. In a transaction, ingestion and drops are held
@@ -60,10 +62,13 @@ name.
   change per table in a transaction. Schema inspection in a transaction sees
   what it holds before what is committed; statements see only what is
   committed.
-- A commit is made on top of `main` as it is then. When another writer has
-  moved `main` in between, nothing is published and the write fails with
-  `Conflict`. Studio serializes its own writers per project
-  (`connect_exclusive`), so only another process can cause one.
+- An autocommit write is made on top of `main` as it is then; a transaction's
+  commit on top of the commit it began on. When another writer has moved
+  `main` in between, nothing is published and the write fails with
+  `Conflict`, so what a transaction wrote from what it read (an episode's
+  number, a dataset's topic counts) never races another writer. Studio
+  serializes the writers of one session's project (`connect_exclusive`);
+  another session or process writing the same project at once can conflict.
 
 The SDK keeps no disk cache: every read fetches its data from SPFS. Reading one
 episode's first 30 camera packets takes about 3–5 s each time, where the ADBC

@@ -347,10 +347,6 @@ mod tests {
     use spiral_robotics_common::curation::AnswerSource;
     use spiral_robotics_common::datasets::DatasetSelection;
 
-    fn episode(ordinal: u32) -> EpisodeId {
-        EpisodeId::try_from(format!("{ordinal:032x}")).unwrap()
-    }
-
     #[test]
     fn the_judgment_counts_missing_frames_at_each_cameras_median_interval_in_spiral() {
         let sql = CameraFrames::judgment("(parts)");
@@ -420,10 +416,10 @@ mod tests {
 
         let judged: Vec<CameraGaps> = serde_json::from_value(serde_json::json!([{
             "part": "/top-camera", "period_ns": 33.39e6, "missing": 15.0, "expected": 2_994.9, "late": 3,
-            "longest": {"episode_id": episode(2).to_string(), "gap_ns": 133_900_000, "at": 12.5},
+            "longest": {"episode_id": EpisodeId::fixture(2), "gap_ns": 133_900_000, "at": 12.5},
             "flagged": [
-                {"episode_id": episode(1).to_string(), "share": 0.012, "at": 3.0},
-                {"episode_id": episode(3).to_string(), "share": 0.018, "at": null}
+                {"episode_id": EpisodeId::fixture(1), "share": 0.012, "at": 3.0},
+                {"episode_id": EpisodeId::fixture(3), "share": 0.018, "at": null}
             ]
         }]))
         .unwrap();

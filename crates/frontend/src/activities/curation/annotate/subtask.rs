@@ -180,9 +180,9 @@ impl SubtaskReading {
     ) -> Result<SubtaskRow, String> {
         let episode = row
             .get("episode_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "A subtask of the preview names no episode.".to_owned())
-            .and_then(EpisodeId::try_from)?;
+            .and_then(Value::as_u64)
+            .map(EpisodeId::new)
+            .ok_or("A subtask of the preview names no episode.")?;
         let origin = sample
             .origin_ns(&episode)
             .ok_or("A subtask of the preview belongs to an episode the sample does not list.")?;
@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn an_answer_reads_back_as_subtasks_with_the_judgment_the_node_made() {
-        let id = EpisodeId::fixture(1).to_string();
+        let id = EpisodeId::fixture(1);
         let start = 1_000_000_000_i64;
         let rows = SubtaskReading::Category
             .read(
@@ -276,7 +276,7 @@ mod tests {
         assert_eq!(similar[0].similarity(), Some(0.9));
         assert!(
             SubtaskReading::Described
-                .read(&answer(vec![json!({"episode_id": EpisodeId::fixture(2).to_string(), "subtask_index": 0, "start_ns": 0, "end_ns": 1, "description": "x"})]), &sample())
+                .read(&answer(vec![json!({"episode_id": EpisodeId::fixture(2), "subtask_index": 0, "start_ns": 0, "end_ns": 1, "description": "x"})]), &sample())
                 .unwrap_err()
                 .contains("does not list")
         );

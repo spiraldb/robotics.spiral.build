@@ -630,7 +630,7 @@ of MCAP files and each file is one episode. The canonical layout at
 ```text
 ┌────────────────────── 44px top bar ─────────────────────────────────────┐
 ├── 21% ────┬── Overview │ E episode × │ E episode × ─────────────────────┤
-│ Datasets  │ D dataset / Episode …id   0:39.9 · 2025-04-14      J K step │
+│ Datasets  │ D dataset / Episode 12    0:39.9 · 2025-04-14      J K step │
 │ Filter [/]│ camera · top │ camera · left-wrist │ camera · right │ Scene │ │
 │ Import    │              │                     │                │ Plots │ │
 │ D name  40├───────────────────────────────────────────────────────────────┤
@@ -674,7 +674,7 @@ of MCAP files and each file is one episode. The canonical layout at
   without explanation.
 - **Episode subject:** the Episode Heading every inspection is headed by
   (`activities/episode/heading.rs`), here at 40px and led by the way back:
-  the D mark and dataset, "/", the "Episode …id" subject at 13px/560, the
+  the D mark and dataset, "/", the "Episode 12" subject at 13px/560, the
   mono facts, and the J K step hint at right. Curation's evidence column
   uses the same heading at 34px, where it meets the index bar's hairline,
   with a part's words ("Grasp the bottle") and its episode's id when the
@@ -1385,7 +1385,7 @@ node's index: a subtask, a whole episode, a stretch of one — is one anatomy
 camera mat, the name over a mono facts line, and the measure in a fixed
 right-hand column. A Curation index row is 96×54 at 62px; the rail's is
 64×36 inside its tree item. A row is read aloud as one name with commas
-between its parts ("…daa7587d, 0:14.4").
+between its parts ("#12, 0:14.4").
 
 - **Still:** a subtask's, an episode's, or a stretch's middle, cut on demand
   on the camera its node read (else the configured camera, else the dataset's
@@ -1396,8 +1396,7 @@ between its parts ("…daa7587d, 0:14.4").
   Waiting is a shimmer on the recess; failure says why on the mat.
 - **Name:** a subtask's words, clamped to two lines in a Curation index and
   one line in the rail; a recording's label, starting with a capital as its
-  tab does, when its path gives one; otherwise its id tail ("…206c08ff") in
-  mono.
+  tab does, when its path gives one; otherwise its number ("#12") in mono.
 - **Facts line:** 11px mono, with one small drawing before the facts: an
   episode's length against the longest listed (square-root scale, as Data's
   rail), where a stretch sits in its episode, or an episode's pace across
