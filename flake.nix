@@ -138,9 +138,10 @@
               pkgs.pkg-config
               pkgs.perl
               pkgs.cmake
-            ]
-            ++ nativeBuildInputs;
-            LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
+              # The runtime's build script generates bindings for its C header,
+              # which includes the C library's; the hook gives libclang its paths.
+              spiralRustPlatform.bindgenHook
+            ];
             preBuild = restoreVortexReadme "${spiralSource}/Cargo.lock";
             doCheck = false;
             installPhase = ''
@@ -187,9 +188,8 @@
             strictDeps = true;
             cargoExtraArgs = "--locked --package spiral-robotics-backend";
             # On Linux, Vortex's custom-labels generates its bindings with
-            # libclang.
-            inherit nativeBuildInputs;
-            LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
+            # libclang, which the hook points at the C library's headers.
+            nativeBuildInputs = [ pkgs.rustPlatform.bindgenHook ];
             doCheck = false;
           };
           studioServer = craneLib.buildPackage (
