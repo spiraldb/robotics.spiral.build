@@ -469,7 +469,7 @@ mod tests {
 
     #[test]
     fn answers_are_wrapped_so_a_failed_one_is_a_null_value_not_a_missing_row() {
-        let column = AnswerColumn::of("breakdown_task", &["m"]).unwrap();
+        let column = AnswerColumn::of("break_down", &["m"]).unwrap();
         let mut answers = ColumnAnswers::default();
         let answered = EpisodeAnswer::listing(subtasks(&["reach"]));
         let failed = EpisodeAnswer::failed(answered.0.data_type());

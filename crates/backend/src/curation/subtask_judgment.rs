@@ -1,6 +1,5 @@
 //! Find similar's and Group similar's judgments of the subtasks a Break down
-//! stored for one episode, the way Spiral's `spql.ai.similarity` and
-//! `spql.ai.classify` judged them before Studio asked the model itself.
+//! stored for one episode.
 //!
 //! Both are answered by jev, TypeSafe's decision model, through
 //! OpenRouter's Decisions API, which evaluates many typed questions against

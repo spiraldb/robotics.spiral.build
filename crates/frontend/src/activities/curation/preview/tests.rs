@@ -154,7 +154,6 @@ fn every_model_node_previews_what_it_has_the_backend_answer_and_store_first() {
         let statement = plan.statement();
         assert!(statement.contains(&format!("a.{}.value", fill.column())));
         assert!(statement.contains("WHERE e.id IN ($1, $2))"));
-        assert!(!statement.contains("spql.ai."), "{statement}");
         match fill.source() {
             AnswerSource::ProgressService { .. } => assert_eq!(node, &score),
             AnswerSource::ObjectTracking {

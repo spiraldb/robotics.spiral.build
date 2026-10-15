@@ -1,7 +1,5 @@
 //! Break down subtasks: one episode's camera video split into its
-//! manipulation subtasks by a multimodal model through OpenRouter, the way
-//! Spiral's `spql.ai.breakdown_task` split it before Studio asked the model
-//! itself.
+//! manipulation subtasks by a multimodal model through OpenRouter.
 //!
 //! Pictures are sampled every `sample_interval` from the first picture,
 //! decoded by FFmpeg, and tiled twenty to a JPEG contact sheet with each

@@ -214,11 +214,9 @@ Find similar, a Choice among the categories for Group similar), as many to
 a request as its token budget carries: usually one request per episode. Its
 answer is a list aligned with the subtasks, NULL where jev did not answer or
 a subtask has no description; an episode Break down stored no subtasks for
-is its failed answer. These calls keep the models, prompts, sampling,
-checks, and answer types of Spiral's `spql.ai.breakdown_task`,
-`spql.ai.similarity`, and `spql.ai.classify`, which answered them before
-Studio made them, and each column keeps the call those functions were named
-in, so what they stored is read without asking again.
+is its failed answer. Each column is named by what it measures and a hash of
+its call: the model, what it asks (camera, sample interval and task, or the
+query or categories), and for a judgment the Break down column it judges.
 
 The models read each episode whole, so what they are asked never depends on
 anything above the node. Studio's packets carry presentation times counted
@@ -238,9 +236,8 @@ compiler keeps these rules instead.
 
 - **A published view asks no model.** It reads stored answers only. A test
   compiles every path the grammar allows up to five nodes deep and checks
-  that no view calls `spql.ai`, that each stored column is read on the
-  episode row once, and that each fill finds its episodes over the columns
-  filled before it.
+  that each stored column is read on the episode row once, and that each fill
+  finds its episodes over the columns filled before it.
 - **The reach chain reads each step once.** Re-nesting `kept` needs
   `GROUP BY`, which cannot carry other columns (Spiral has no `ANY_VALUE`),
   so the chain carries only `episode_id` and `kept`. A column is folded from

@@ -141,7 +141,7 @@ async fn object_tracking_is_admitted_only_with_its_own_service() {
 
 #[tokio::test]
 async fn model_calls_are_admitted_only_with_openrouter_and_questions_jev_takes() {
-    let subtasks = AnswerColumn::of("breakdown_task", &["m"]).unwrap();
+    let subtasks = AnswerColumn::of("break_down", &["m"]).unwrap();
     let interval = SampleInterval::from_seconds(0.5).unwrap();
     let calls = [
         (

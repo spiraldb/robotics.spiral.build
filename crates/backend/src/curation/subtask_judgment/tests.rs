@@ -59,7 +59,7 @@ fn read(descriptions: Option<&[&str]>) -> RecordBatch {
 #[test]
 fn a_judgment_reads_the_descriptions_a_break_down_stored_in_their_order() {
     let dataset = DatasetSelection::new("folding").unwrap();
-    let column = AnswerColumn::of("breakdown_task", &["m"]).unwrap();
+    let column = AnswerColumn::of("break_down", &["m"]).unwrap();
     assert_eq!(
         StoredSubtasks::statement(&dataset, &column),
         format!(

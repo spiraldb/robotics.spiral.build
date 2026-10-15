@@ -75,7 +75,7 @@ Reuse the September 23 overlay on the hook ("Hesitations in your training data c
   - At −0.10×, its left-out stretches are 0:26.5–0:27.0 (−0.23×), 0:28.5–0:29.2 (−0.18×), 0:29.9–0:30.2 (−0.16×), **0:46.5–0:49.2 (2.7 s, −0.81×)** and 0:53.0–0:53.1 (−0.19×). Its group reads "leaves out 0:04.3 of 1:00.5".
   - At 0.00×, they were 26.5–27.0, 28.4–29.5, 29.7–30.3, 46.4–49.2 (2.8 s, −0.78×) and 53.0–53.2, plus one zero-length frame at 6.5.
   - The left camera shows the gripper turning the bottle from about 45.5 s until it carries it over the bin at about 52 s. The model flags it as low progress; that is not independently labeled proof of an error.
-- **Published view** `long_demos_steady` (curation "Long bottle demos"): 40 intervals, 10 episodes, 7 min 54 s kept of 8 min 17 s, the same totals as the graph at −0.10×. The hero lists 6 kept intervals, and the gap between 0:30.2–0:46.5 and 0:49.2–0:53.0 is the stretch left out. A view reads the first 20 of the episodes the dataset's Selects keep, in recording order. `EXPLAIN` shows the plan runs `spql.ai.score_progress` above `TopK limit=20` above the duration filter, so only the selected episodes are scored. The view re-runs the model on every read; this read gave the same boundaries as Curation.
+- **Published view** `long_demos_steady` (curation "Long bottle demos"): 40 intervals, 10 episodes, 7 min 54 s kept of 8 min 17 s, the same totals as the graph at −0.10×. The hero lists 6 kept intervals, and the gap between 0:30.2–0:46.5 and 0:49.2–0:53.0 is the stretch left out. A view reads the first 20 of the episodes the dataset's Selects keep, in recording order.
 
 ## Measured timings (headless Brave, 1440 × 900 at 2×)
 

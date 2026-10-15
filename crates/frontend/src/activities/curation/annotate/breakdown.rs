@@ -42,13 +42,12 @@ impl ModelNode for SubtaskAnnotation {
             None => serde_json::Value::Null,
         };
         let call = serde_json::json!([
-            "spql.ai.breakdown_task",
             DEFAULT_ANNOTATION_MODEL,
             self.watched()?,
             self.sample_interval_seconds(),
             task,
         ]);
-        AnswerColumn::of("breakdown_task", &call).map_err(PathError::new)
+        AnswerColumn::of("break_down", &call).map_err(PathError::new)
     }
 
     fn answer_source(&self, _step: &ModelStep<'_>) -> Result<AnswerSource, PathError> {

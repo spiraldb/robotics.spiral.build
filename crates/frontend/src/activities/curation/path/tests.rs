@@ -257,7 +257,7 @@ fn a_progress_rate_narrows_kept_to_the_stretches_progressing_fast_enough() {
     assert!(scoring.ends_with(
         "\nSELECT episode_id, timestamp_ns, progress_rate AS value FROM score_progress_1_entries"
     ));
-    assert!(!scoring.contains("spql.ai.") && !scoring.contains("\"messages\""));
+    assert!(!scoring.contains("\"messages\""));
     admitted(&published, &scoring);
     let fills = CurationPath::to(&graph, &moving).unwrap().fills().unwrap();
     assert_eq!(
@@ -272,7 +272,7 @@ fn a_progress_rate_narrows_kept_to_the_stretches_progressing_fast_enough() {
 }
 
 #[test]
-fn stored_answers_keep_the_columns_they_were_stored_in() {
+fn each_call_names_the_column_it_is_stored_in() {
     let mut graph = graph();
     let score = child(
         &mut graph,
@@ -282,15 +282,15 @@ fn stored_answers_keep_the_columns_they_were_stored_in() {
     let annotate = child(&mut graph, &score, breakdown());
     let search = child(&mut graph, &annotate, searching("fold the towel"));
     let group = child(&mut graph, &annotate, grouping(&["fold", "grasp"]));
-    // The same calls as before the table had one row per episode, hashed
-    // alike, so what they stored is read without asking again.
+    // A call always hashes to the same column, so what it stored is read
+    // without asking again.
     assert_eq!(
         [&score, &annotate, &search, &group].map(|node| column(&graph, node)),
         [
             "score_progress_67aae2",
-            "breakdown_task_16f1c2",
-            "similarity_f0ec97",
-            "subtask_category_9c254b"
+            "break_down_2c3345",
+            "similarity_9f8877",
+            "subtask_category_be7603"
         ]
     );
 }
@@ -305,7 +305,7 @@ fn a_breakdown_reads_each_episode_whole_and_lists_its_subtasks_in_log_time() {
     );
     let annotate = child(&mut graph, &long, breakdown());
     let subtasks = column(&graph, &annotate);
-    assert!(subtasks.starts_with("breakdown_task_"));
+    assert!(subtasks.starts_with("break_down_"));
     let published = published(&graph, &annotate);
     for step in [
         format!(
@@ -318,7 +318,7 @@ fn a_breakdown_reads_each_episode_whole_and_lists_its_subtasks_in_log_time() {
     }
     // A model node keeps nothing, so its view is what reaches it.
     assert!(published.contains(" FROM select_1 r JOIN dataset d"));
-    assert!(!published.contains("spql.ai.") && !published.contains("\"messages\""));
+    assert!(!published.contains("\"messages\""));
     // Its fill asks the model about each episode the Select keeps whole,
     // from the chosen camera, with its first instruction as the task.
     let fills = CurationPath::to(&graph, &annotate)
@@ -349,7 +349,7 @@ fn a_breakdown_reads_each_episode_whole_and_lists_its_subtasks_in_log_time() {
     assert!(breaking.ends_with(
         "\nSELECT episode_id, description, start_ns, end_ns FROM break_down_subtasks_1_entries"
     ));
-    assert!(!breaking.contains("spql.ai.") && !breaking.contains("select_1"));
+    assert!(!breaking.contains("select_1"));
     admitted(&published, &breaking);
 
     // A dataset that records no instruction asks without a task, and that
@@ -408,7 +408,6 @@ fn a_search_lists_every_subtask_with_its_similarity_and_a_select_keeps_the_close
     assert!(asking.ends_with(
         "\nSELECT episode_id, description, start_ns, end_ns, similarity FROM find_similar_subtasks_1_entries"
     ));
-    assert!(!asking.contains("spql.ai."));
     admitted(&published, &asking);
 }
 
@@ -437,7 +436,6 @@ fn a_grouping_writes_a_column_per_category_and_a_select_keeps_the_chosen_ones() 
     ] {
         assert!(published.contains(&step), "{step}\n{published}");
     }
-    assert!(!published.contains("spql.ai."));
     // Its fill classifies each subtask the Break down stored.
     let fills = CurationPath::to(&graph, &folds).unwrap().fills().unwrap();
     let AnswerSource::Classify(call) = fills[1].source() else {
@@ -713,7 +711,6 @@ fn no_published_path_asks_a_model_and_each_fill_reads_only_what_is_filled_before
     every_path(&mut graph, (DATASET_NODE_ID, 5), &mut |graph, node| {
         paths += 1;
         let statement = published(graph, node);
-        assert!(!statement.contains("spql.ai."), "{statement}");
         let path = CurationPath::to(graph, node).unwrap();
         let fills = path.fills().unwrap();
         assert!(statement.matches(ANSWERS).count() <= 1, "{statement}");
@@ -737,7 +734,6 @@ fn no_published_path_asks_a_model_and_each_fill_reads_only_what_is_filled_before
             let FillEpisodes::Reaching(reaching) = fill.episodes() else {
                 panic!("a published fill asks what reaches the node")
             };
-            assert!(!reaching.contains("spql.ai."));
             let above = &fills[..filled];
             for later in &fills[filled..] {
                 if !above.iter().any(|fill| fill.column() == later.column()) {

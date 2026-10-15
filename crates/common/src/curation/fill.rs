@@ -263,7 +263,7 @@ mod tests {
                 column,
                 FillEpisodes::Listed(vec![EpisodeId::try_from("0".repeat(32)).unwrap()]),
                 AnswerSource::Similarity(SubtaskSimilarity::new(
-                    AnswerColumn::of("breakdown_task", &["m"]).unwrap(),
+                    AnswerColumn::of("break_down", &["m"]).unwrap(),
                     "fold the towel",
                     "typesafe/jev-1.13",
                 )),

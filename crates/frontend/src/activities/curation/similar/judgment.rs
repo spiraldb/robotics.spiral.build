@@ -28,9 +28,6 @@ const JUDGMENT_MODEL: &str = "typesafe/jev-1.13";
 trait SubtaskJudgment {
     /// What the node measures, which names its stored column.
     const MEASURE: &'static str;
-    /// The Spiral function that first answered its call, which names its
-    /// stored column, so what that stored is read without asking again.
-    const FUNCTION: &'static str;
     /// What its entries read of each subtask's judgment: every field as its
     /// expression over `judgment` and its name.
     const JUDGED: &'static [(&'static str, &'static str)];
@@ -43,18 +40,13 @@ trait SubtaskJudgment {
     /// Its columns folded from its entries.
     fn fold(&self, entries: ModelEntries, step: &ModelStep<'_>) -> ModelEntries;
 
-    /// The column the judgments are stored in: its function, its model, what
-    /// it asks, and the Break down column whose subtasks it judges.
+    /// The column the judgments are stored in: its model, what it asks, and
+    /// the Break down column whose subtasks it judges.
     fn column(&self, subtasks: Option<&AnswerColumn>) -> Result<AnswerColumn, PathError> {
         let subtasks = subtasks.ok_or_else(|| {
             PathError::new("This node reads the subtasks a Break down above it describes.")
         })?;
-        let call = serde_json::json!([
-            Self::FUNCTION,
-            JUDGMENT_MODEL,
-            self.arguments()?,
-            subtasks.as_str()
-        ]);
+        let call = serde_json::json!([JUDGMENT_MODEL, self.arguments()?, subtasks.as_str()]);
         AnswerColumn::of(Self::MEASURE, &call).map_err(PathError::new)
     }
 }
@@ -88,7 +80,6 @@ impl<J: SubtaskJudgment> ModelNode for J {
 /// How likely each subtask is the operation the query names.
 impl SubtaskJudgment for SubtaskSearch {
     const MEASURE: &'static str = "similarity";
-    const FUNCTION: &'static str = "spql.ai.similarity";
     const JUDGED: &'static [(&'static str, &'static str)] = &[("judgment", "similarity")];
 
     fn arguments(&self) -> Result<serde_json::Value, PathError> {
@@ -124,7 +115,6 @@ impl SubtaskJudgment for SubtaskSearch {
 /// The category each subtask fits best, and how probable that is.
 impl SubtaskJudgment for SubtaskGrouping {
     const MEASURE: &'static str = "subtask_category";
-    const FUNCTION: &'static str = "spql.ai.classify";
     const JUDGED: &'static [(&'static str, &'static str)] = &[
         ("judgment.category", "category"),
         ("judgment.probability", "probability"),
