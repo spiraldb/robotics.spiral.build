@@ -515,7 +515,7 @@ impl HuggingFaceFileSelection {
         if let Self::McapRecordings = self {
             tables.push(dataset.files());
         }
-        tables.iter().map(|table| table.target()).collect()
+        tables.iter().map(|table| table.name().to_owned()).collect()
     }
 
     fn select(self, entries: Vec<TreeEntry>) -> Result<Vec<HuggingFaceDatasetFile>, String> {

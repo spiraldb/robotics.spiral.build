@@ -3,6 +3,7 @@
 //! over and watch one with the Data view's own player, so a curation starts
 //! from the recording rather than from a table.
 use dioxus::prelude::*;
+use spiral_robotics_common::sql::SqlStruct;
 use spiral_robotics_ui::{
     ActionPurpose, Button, ButtonVariant, EmptyState, Notice, NoticeTone, RefreshIcon, Remount,
     TextInput, TextInputKind,
@@ -37,6 +38,11 @@ impl<'a> DatasetStep<'a> {
     pub(in crate::activities::curation) fn new(listing: &'a EpisodeListing) -> Self {
         Self(listing)
     }
+    /// One range of an episode's `kept` list, from its `start_ns` and
+    /// `end_ns` columns.
+    pub(in crate::activities::curation) fn kept_range() -> SqlStruct {
+        SqlStruct::of_columns(["start_ns", "end_ns"])
+    }
     pub(in crate::activities::curation) fn entry(&self) -> String {
         let listed = EpisodeFact::listed_by(self.0);
         let facts = listed
@@ -48,11 +54,11 @@ impl<'a> DatasetStep<'a> {
             .map(|fact| format!(", {}", fact.key()))
             .collect::<String>();
         format!(
-            "{} AS (SELECT episode_id, start_ns AS origin_ns, \
-             [STRUCT_PACK(start_ns := start_ns, end_ns := end_ns)] AS kept{keys} \
+            "{} AS (SELECT episode_id, start_ns AS origin_ns, {} AS kept{keys} \
              FROM (SELECT id AS episode_id, CAST(message_start_time AS BIGINT) AS start_ns, \
              CAST(message_start_time + duration_ns AS BIGINT) AS end_ns{facts} FROM ({}) listed) spans)",
             Self::NAME,
+            Self::kept_range().listed(),
             self.0.sql(),
         )
     }

@@ -116,6 +116,23 @@ pub(crate) struct HostedProject;
 #[cfg(test)]
 impl HostedProject {
     pub(crate) fn storage() -> (std::sync::Arc<crate::ProjectStore>, crate::StorageManager) {
+        let connection = Self::connection();
+        let store = std::sync::Arc::new(
+            crate::ProjectStore::new(
+                connection.clone(),
+                std::sync::Arc::new(crate::SpiralSdkDatabase::new(connection)),
+            )
+            .unwrap(),
+        );
+        let storage = crate::StorageManager::new(
+            store.clone(),
+            crate::StudioStore::in_memory().project(&store.connection_settings()),
+        );
+        (store, storage)
+    }
+
+    /// The project as `SPIRAL_ACCESS_TOKEN`'s user reaches it.
+    pub(crate) fn connection() -> SpiralConnection {
         use crate::settings::{ServiceEndpoint, SpiralConnectionSettings};
         let settings = SpiralConnectionSettings::new(
             ServiceEndpoint::environment_spiral().into_string(),
@@ -129,19 +146,7 @@ impl HostedProject {
         let access = SpiralAccess::fixed(
             std::env::var("SPIRAL_ACCESS_TOKEN").expect("a user access token for the test"),
         );
-        let connection = SpiralConnection::new(settings, access);
-        let store = std::sync::Arc::new(
-            crate::ProjectStore::new(
-                connection.clone(),
-                std::sync::Arc::new(crate::AdbcDatabase::new(connection)),
-            )
-            .unwrap(),
-        );
-        let storage = crate::StorageManager::new(
-            store.clone(),
-            crate::StudioStore::in_memory().project(&store.connection_settings()),
-        );
-        (store, storage)
+        SpiralConnection::new(settings, access)
     }
 }
 
@@ -181,12 +186,14 @@ impl crate::StorageManager {
             .await?
             .tables(&dataset)?;
         let mut connection = self.project_store().connect_exclusive().await?;
-        for table in tables {
-            connection
-                .execute_update_sql(&format!("DROP TABLE IF EXISTS {table}"))
-                .await?;
-        }
-        Ok(())
+        connection
+            .transaction("dataset delete", async |connection| {
+                for table in &tables {
+                    connection.drop_table(table.name()).await?;
+                }
+                Ok(())
+            })
+            .await
     }
 }
 

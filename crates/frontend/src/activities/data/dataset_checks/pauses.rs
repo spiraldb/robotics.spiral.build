@@ -6,11 +6,12 @@
 //! Spiral: the share of time still, the longest pause, and the long ones.
 use super::check_columns::{CheckColumn, CheckKind, CheckTable, PartsStatement};
 use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, Verdict};
-use super::stream_reads::{CheckedStreams, CheckedValueColumns as _, Greatest};
+use super::stream_reads::{CheckedStreams, CheckedValueColumns as _};
 use dioxus::prelude::*;
 use serde::Deserialize;
 use spiral_robotics_common::datasets::ValueColumns;
 use spiral_robotics_common::datasets::{ArmRoles, EpisodeId};
+use spiral_robotics_common::sql::SqlStruct;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Pauses {
@@ -105,12 +106,17 @@ impl Pauses {
                FROM episodes WHERE together), \
              total AS (SELECT CASE WHEN sum(measured_s) > 0 THEN sum(still_s) / sum(measured_s) END AS still_share, sum(long_pauses) AS long_pauses FROM measured), \
              ranked AS (SELECT episode_id, longest_s, longest_at, ROW_NUMBER() OVER (ORDER BY longest_s DESC, episode_id) AS rank FROM measured WHERE longest_s IS NOT NULL), \
-             lengthy AS (SELECT spql.list.collect(STRUCT_PACK(episode_id := episode_id, longest_s := longest_s, longest_at := longest_at)) AS lengthy FROM measured WHERE long_pauses > 0), \
-             apart AS (SELECT spql.list.collect(episode_id) AS apart FROM episodes WHERE NOT together) \
+             lengthy AS (SELECT {lengthy} AS lengthy FROM measured WHERE long_pauses > 0), \
+             apart AS (SELECT array_agg(episode_id) AS apart FROM episodes WHERE NOT together) \
              SELECT total.still_share AS still_share, total.long_pauses AS long_pauses, \
-               CASE WHEN ranked.episode_id IS NOT NULL THEN STRUCT_PACK(episode_id := ranked.episode_id, longest_s := ranked.longest_s, longest_at := ranked.longest_at) END AS longest, \
+               CASE WHEN ranked.episode_id IS NOT NULL THEN {longest} END AS longest, \
                lengthy.lengthy AS lengthy, apart.apart AS apart \
-             FROM total CROSS JOIN lengthy CROSS JOIN apart LEFT JOIN ranked ON ranked.rank = 1"
+             FROM total CROSS JOIN lengthy CROSS JOIN apart LEFT JOIN ranked ON ranked.rank = 1",
+            lengthy = SqlStruct::of_columns(["episode_id", "longest_s", "longest_at"]).collected(),
+            longest = SqlStruct::new()
+                .field("episode_id", "ranked.episode_id")
+                .field("longest_s", "ranked.longest_s")
+                .field("longest_at", "ranked.longest_at"),
         )
     }
 
@@ -135,11 +141,9 @@ impl Pauses {
         for (position, arm) in arms.iter().enumerate() {
             let name = format!("arm{position}");
             let columns = ValueColumns::new(arm.state(), "q");
-            ctes.extend(columns.ctes(&name, &streams.read_values(arm.state())?));
+            ctes.push(columns.cte(&name, &streams.read_values(arm.state())?));
             ctes.push(columns.motion_cte(&name));
-            speeds.extend(
-                (0..columns.count()).map(|joint| format!("spql.math.abs({name}_motion.v{joint})")),
-            );
+            speeds.extend((0..columns.count()).map(|joint| format!("abs({name}_motion.v{joint})")));
         }
         let joined = (1..arms.len())
             .map(|position| {
@@ -150,8 +154,8 @@ impl Pauses {
             .collect::<String>();
         let still = Self::STILL;
         ctes.push(format!(
-            "j AS (SELECT arm0_motion.id AS id, arm0_motion.log_time AS t, arm0_motion.dt AS dt, {} AS speed FROM arm0_motion{joined} WHERE arm0_motion.dt IS NOT NULL)",
-            Greatest::of(&speeds)
+            "j AS (SELECT arm0_motion.id AS id, arm0_motion.log_time AS t, arm0_motion.dt AS dt, greatest({}) AS speed FROM arm0_motion{joined} WHERE arm0_motion.dt IS NOT NULL)",
+            speeds.join(", ")
         ));
         ctes.push(format!(
             "k AS (SELECT id, t, dt, CASE WHEN speed < {still} THEN 1 ELSE 0 END AS still, \

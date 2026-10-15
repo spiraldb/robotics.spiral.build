@@ -29,12 +29,12 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["set-header", "trace", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-arrow-array = "58.4.0"
-arrow-buffer = "58.4.0"
-arrow-schema = "58.4.0"
-arrow-ipc = { version = "58.4.0", features = ["zstd"] }
-arrow-cast = "58.4.0"
-arrow-select = "58.4.0"
+arrow-array = "59.2.0"
+arrow-buffer = "59.2.0"
+arrow-schema = "59.2.0"
+arrow-ipc = { version = "59.2.0", features = ["zstd"] }
+arrow-cast = "59.2.0"
+arrow-select = "59.2.0"
 url = "2"
 reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
 # Draws Break down's contact sheets from the PPM pictures FFmpeg decodes.

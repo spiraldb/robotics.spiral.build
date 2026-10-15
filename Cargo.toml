@@ -23,8 +23,12 @@ dead_code = "deny"
 unreachable_pub = "deny"
 
 [workspace.dependencies]
-adbc_core = "0.24.0"
-adbc_driver_manager = "0.24.0"
+# Spiral's SDK and its DataFusion integration, from the private SpiralDB
+# repository at one commit (spiraldb#7867, table drops and renames, until it
+# merges); the data-plane runtime Studio loads is built from the same commit.
+spiral-sdk = { git = "https://github.com/spiraldb/spiraldb.git", rev = "c2ba4d92756bab8dbc3590d24c35450012a3f84b", features = ["embedded"] }
+spiral-datafusion = { git = "https://github.com/spiraldb/spiraldb.git", rev = "c2ba4d92756bab8dbc3590d24c35450012a3f84b", features = ["sql"] }
+datafusion = { version = "55", default-features = false }
 base64 = "0.22"
 spiral-robotics-common = { path = "crates/common" }
 spiral-robotics-connector = { path = "robot-connector" }

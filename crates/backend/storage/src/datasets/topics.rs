@@ -11,6 +11,7 @@ use futures::StreamExt as _;
 use spiral_robotics_common::datasets::{
     DatasetInspection, DatasetSelection, DatasetTopic, EpisodeSelection, TopicRevision,
 };
+use spiral_robotics_common::sql::ListItems;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -127,7 +128,7 @@ impl TopicCounts {
         dataset: &DatasetSelection,
     ) -> Result<(), String> {
         connection
-            .replace_or_create_batches(&dataset.topics().target(), vec![self.batch()?])
+            .replace_or_create_batches(dataset.topics().name(), vec![self.batch()?])
             .await
     }
 
@@ -231,11 +232,13 @@ impl StorageManager {
         let statement = EpisodeTopicQuery::for_episode(
             episode.episode_id(),
             format!(
-                "SELECT t.stream, t.topic, t.schema_name, t.message_encoding, s.messages \
-                 FROM (SELECT streams FROM {} WHERE id = $1) e \
-                 CROSS JOIN LATERAL UNNEST(e.streams) s \
-                 JOIN {} t ON t.stream = s.stream",
-                dataset.episodes(),
+                "SELECT t.stream, t.topic, t.schema_name, t.message_encoding, u.s.messages AS messages \
+                 FROM {} u JOIN {} t ON t.stream = u.s.stream",
+                ListItems::of(
+                    format!("(SELECT streams FROM {} WHERE id = $1)", dataset.episodes()),
+                    "streams",
+                    "s"
+                ),
                 dataset.topics()
             ),
         )?;
@@ -280,13 +283,13 @@ mod tests {
     use super::*;
     use crate::datasets::fixtures::RolloutFixture;
     use crate::datasets::{DatasetImport, EpisodeUuids, McapFile, TestJournal};
-    use crate::db::UnquotedMemory;
+    use crate::db::MemoryDatabase;
     use spiral_robotics_common::datasets::{DatasetFormat, EpisodeId};
 
     #[tokio::test]
     async fn a_dataset_and_each_episode_list_the_streams_they_hold() {
         let journal = TestJournal::start().await;
-        let (store, _) = UnquotedMemory::store_with_catalog(journal.endpoint()).await;
+        let (store, _) = MemoryDatabase::store_with_catalog(journal.endpoint()).await;
         let store = Arc::new(store);
         let storage = StorageManager::new(
             store.clone(),

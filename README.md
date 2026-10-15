@@ -36,10 +36,10 @@ their environment variables. With direnv, `.envrc` loads the same default shell.
 nix develop .
 ```
 
-The default and CI shells select the pinned published Spiral ADBC library. To
-try an unreleased upstream driver, build it and enter `nix develop .#local-driver`,
-which selects the local library automatically; see
-[database setup](docs/database-boundary.md) for the build instructions.
+The default shell builds Spiral's data-plane runtime from the SpiralDB commit
+`Cargo.toml` pins and points Studio at it; Cargo and Nix fetch that private
+repository with your git credentials. See
+[database setup](docs/database-boundary.md) to try an unreleased upstream build.
 
 Run CI commands with `nix develop .#ci --command <command>`.
 

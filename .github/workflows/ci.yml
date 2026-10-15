@@ -36,6 +36,18 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/determinate-nix-action@v3
 
+      # Spiral's SDK and data-plane runtime come from the private SpiralDB
+      # repository; cargo and Nix fetch it with git over this read-only key.
+      - name: Reach SpiralDB's repository
+        env:
+          SPIRALDB_DEPLOY_KEY: ${{ secrets.SPIRALDB_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          install -m 600 /dev/stdin ~/.ssh/spiraldb <<< "$SPIRALDB_DEPLOY_KEY"
+          printf 'Host github.com\n  IdentityFile ~/.ssh/spiraldb\n  IdentitiesOnly yes\n' >> ~/.ssh/config
+          git config --global url."git@github.com:spiraldb/spiraldb.git".insteadOf "https://github.com/spiraldb/spiraldb.git"
+
       - name: Lint workflow
         run: nix develop .#ci --command actionlint
 
@@ -59,8 +71,8 @@ jobs:
             --all-targets --locked -- \
             -D warnings -A clippy::suspicious-else-formatting
 
-      # The Nix shell supplies the pinned standalone ADBC library. Its offline
-      # contract tests exercise native execution without hosted services.
+      # Tests run Studio's SQL on DataFusion's in-memory tables, so they need
+      # neither Spiral's runtime nor hosted services.
       - name: Test without external services
         run: |
           read -r -a package_args <<< "$CI_RUST_PACKAGES"

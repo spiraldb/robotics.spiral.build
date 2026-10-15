@@ -62,7 +62,7 @@ mod tests {
 
     /// The camera's packets of the bound episode, and that episode's start,
     /// each read filtered to the episode on its own.
-    const RECORDED: &str = "(SELECT r.id, r.value.data AS payload, CAST(r.ordinal AS BIGINT) AS decode_index, CAST(r.log_time AS BIGINT) AS log_ns FROM \"datasets\".\"d\".\"messages\".\"c_00000000\" r WHERE r.id = $1) recorded CROSS JOIN (SELECT CAST(message_start_time AS BIGINT) AS start_ns FROM \"datasets\".\"d\".\"episodes\" WHERE id = $1) e";
+    const RECORDED: &str = "(SELECT r.id, r.value.data AS payload, CAST(r.ordinal AS BIGINT) AS decode_index, CAST(r.log_time AS BIGINT) AS log_ns FROM \"datasets.d.messages.c_00000000\" r WHERE r.id = $1) recorded CROSS JOIN (SELECT CAST(message_start_time AS BIGINT) AS start_ns FROM \"datasets.d.episodes\" WHERE id = $1) e";
 
     fn camera() -> (DatasetSelection, TopicRevision) {
         (
@@ -76,7 +76,7 @@ mod tests {
         let (dataset, stream) = camera();
         assert_eq!(
             CameraVideo::new(&dataset, &stream).recorded_packets(),
-            "SELECT CAST(r.log_time AS BIGINT) AS log_time_ns, r.value.data AS payload FROM \"datasets\".\"d\".\"messages\".\"c_00000000\" r WHERE r.id = $1 ORDER BY r.ordinal"
+            "SELECT CAST(r.log_time AS BIGINT) AS log_time_ns, r.value.data AS payload FROM \"datasets.d.messages.c_00000000\" r WHERE r.id = $1 ORDER BY r.ordinal"
         );
     }
 

@@ -1,4 +1,4 @@
-//! Studio's datasets: each one the tables under `datasets.<id>` that Studio
+//! Studio's datasets: each one the tables named `datasets.<id>.…` that Studio
 //! writes itself ([datasets](../../../../docs/datasets.md)), and what reading
 //! them reports.
 use super::EpisodeId;
@@ -6,7 +6,7 @@ use crate::curation::AnswerColumn;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display, Formatter};
 
-/// One Studio dataset, named by its id: the tables under `datasets.<id>`.
+/// One Studio dataset, named by its id: the tables named `datasets.<id>.…`.
 /// Every statement names a dataset's tables through it, so none spells a
 /// table name itself.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -30,7 +30,7 @@ impl TryFrom<DatasetName> for DatasetSelection {
 }
 
 impl DatasetSelection {
-    /// The namespace every dataset's tables live under.
+    /// What every dataset's table names start with.
     const NAMESPACE: &str = "datasets";
     const MAX_BYTES: usize = 96;
 
@@ -56,8 +56,8 @@ impl DatasetSelection {
     pub fn display_name(&self) -> &str {
         &self.id
     }
-    /// Its namespace as SQL names it, `datasets.<id>`: what tooltips and
-    /// footers show where SQL is the subject.
+    /// What its tables' names start with, `datasets.<id>`: what tooltips
+    /// and footers show where SQL is the subject.
     pub fn label(&self) -> String {
         format!("{}.{}", Self::NAMESPACE, self.id)
     }
@@ -84,55 +84,50 @@ impl DatasetSelection {
         self.table(&["messages", stream.stream()])
     }
 
-    /// The dataset a catalog path belongs to, and the path's part under the
-    /// dataset's namespace: `["datasets", <id>, "episodes"]` is `episodes` of
-    /// `<id>`. A path outside the convention belongs to none.
-    pub fn of_catalog_path(path: &[String]) -> Option<(Self, &[String])> {
-        match path {
-            [namespace, id, rest @ ..] if namespace == Self::NAMESPACE && !rest.is_empty() => {
-                Some((Self::new(id.clone()).ok()?, rest))
-            }
-            _ => None,
+    /// The dataset a table's name belongs to, and the name's parts after
+    /// the dataset's: `datasets.<id>.episodes` is `episodes` of `<id>`. A
+    /// name outside the convention belongs to none.
+    pub fn of_table_name(name: &str) -> Option<(Self, Vec<String>)> {
+        let mut parts = name.split('.');
+        if parts.next()? != Self::NAMESPACE {
+            return None;
         }
+        let dataset = Self::new(parts.next()?).ok()?;
+        let rest = parts.map(str::to_owned).collect::<Vec<_>>();
+        if rest.is_empty() || rest.iter().any(String::is_empty) {
+            return None;
+        }
+        Some((dataset, rest))
     }
 
     fn table(&self, parts: &[&str]) -> DatasetTable {
-        DatasetTable {
-            path: [Self::NAMESPACE, self.id.as_str()]
-                .into_iter()
-                .chain(parts.iter().copied())
-                .map(str::to_owned)
-                .collect(),
-        }
+        let name = [Self::NAMESPACE, self.id.as_str()]
+            .into_iter()
+            .chain(parts.iter().copied())
+            .collect::<Vec<_>>()
+            .join(".");
+        DatasetTable { name }
     }
 }
 
-/// One table of a dataset. It displays as a statement spells it, each part
-/// quoted; ingestion names it by [`Self::target`].
+/// One table of a dataset, at the project's root under one name whose
+/// parts are joined by dots, `datasets.<id>.messages.<stream>`: no part holds
+/// a dot. It displays as a statement spells it, the whole name quoted.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DatasetTable {
-    path: Vec<String>,
+    name: String,
 }
 
 impl DatasetTable {
-    /// Its parts in the catalog.
-    pub fn path(&self) -> &[String] {
-        &self.path
-    }
-    /// Its dotted name, as ingestion addresses a table: no part holds a dot.
-    pub fn target(&self) -> String {
-        self.path.join(".")
+    /// Its name in the catalog, as writes address it.
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 
 impl Display for DatasetTable {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        let quoted = self
-            .path
-            .iter()
-            .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
-            .collect::<Vec<_>>();
-        formatter.write_str(&quoted.join("."))
+        write!(formatter, "\"{}\"", self.name)
     }
 }
 
@@ -425,22 +420,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_dataset_names_every_table_under_its_namespace() {
+    fn a_dataset_names_every_table_by_one_dotted_name() {
         let dataset = DatasetSelection::new("pick-place").unwrap();
         assert_eq!(dataset.label(), "datasets.pick-place");
+        assert_eq!(dataset.episodes().name(), "datasets.pick-place.episodes");
         assert_eq!(
             dataset.episodes().to_string(),
-            "\"datasets\".\"pick-place\".\"episodes\""
+            "\"datasets.pick-place.episodes\""
         );
         let column = AnswerColumn::try_from("score_progress_3f9a2c".to_owned()).unwrap();
         assert_eq!(
             dataset.answers(&column).to_string(),
-            "\"datasets\".\"pick-place\".\"answers\".\"score_progress_3f9a2c\""
+            "\"datasets.pick-place.answers.score_progress_3f9a2c\""
         );
         let stream = TopicRevision::new("studio_joints_leader_3fa2c1d0").unwrap();
         assert_eq!(
             dataset.messages(&stream).to_string(),
-            "\"datasets\".\"pick-place\".\"messages\".\"studio_joints_leader_3fa2c1d0\""
+            "\"datasets.pick-place.messages.studio_joints_leader_3fa2c1d0\""
         );
     }
 
@@ -456,19 +452,22 @@ mod tests {
     }
 
     #[test]
-    fn a_catalog_path_belongs_to_the_dataset_it_names() {
-        let path = |parts: &[&str]| {
-            parts
-                .iter()
-                .map(|part| (*part).to_owned())
-                .collect::<Vec<_>>()
-        };
-        let episodes = path(&["datasets", "default", "episodes"]);
-        let (dataset, rest) = DatasetSelection::of_catalog_path(&episodes).unwrap();
+    fn a_table_name_belongs_to_the_dataset_it_names() {
+        let (dataset, rest) =
+            DatasetSelection::of_table_name("datasets.default.messages.top_00000000").unwrap();
         assert_eq!(dataset.id(), "default");
-        assert_eq!(rest, ["episodes"]);
-        assert!(DatasetSelection::of_catalog_path(&path(&["datasets", "default"])).is_none());
-        assert!(DatasetSelection::of_catalog_path(&path(&["dataset_default"])).is_none());
+        assert_eq!(rest, ["messages", "top_00000000"]);
+        for outside in [
+            "datasets.default",
+            "datasets.default.",
+            "dataset_default.episodes",
+            "datasets.a b.episodes",
+        ] {
+            assert!(
+                DatasetSelection::of_table_name(outside).is_none(),
+                "{outside}"
+            );
+        }
     }
 
     #[test]

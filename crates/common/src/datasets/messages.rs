@@ -238,9 +238,7 @@ mod tests {
     #[test]
     fn projections_quote_paths_and_leave_schema_validation_to_spiral() {
         let schema = read().sql().unwrap();
-        assert!(
-            schema.contains("FROM \"datasets\".\"test\".\"messages\".\"sensor_s_0a1b2c3d\" WHERE")
-        );
+        assert!(schema.contains("FROM \"datasets.test.messages.sensor_s_0a1b2c3d\" WHERE"));
         assert!(schema.ends_with("WHERE id = $1 LIMIT 0"));
         let window = MessageWindow::new((1, 10), vec![vec!["value".into(), "a.b\"c".into()]])
             .with_limit(2)
@@ -274,8 +272,8 @@ mod tests {
         let sql = ValueSchemaRead::new(&[read(), second]).unwrap().sql();
         assert_eq!(
             sql,
-            "SELECT * FROM (SELECT value AS value_0 FROM \"datasets\".\"test\".\"messages\".\"sensor_s_0a1b2c3d\" WHERE id = $1 LIMIT 0) read_0 \
-             CROSS JOIN (SELECT value AS value_1 FROM \"datasets\".\"test\".\"messages\".\"other_00000001\" WHERE id = $1 LIMIT 0) read_1"
+            "SELECT * FROM (SELECT value AS value_0 FROM \"datasets.test.messages.sensor_s_0a1b2c3d\" WHERE id = $1 LIMIT 0) read_0 \
+             CROSS JOIN (SELECT value AS value_1 FROM \"datasets.test.messages.other_00000001\" WHERE id = $1 LIMIT 0) read_1"
         );
         assert!(ValueSchemaRead::new(&[]).is_err());
         let elsewhere = MessageRead::schema(

@@ -39,9 +39,9 @@ pub mod ingestion {
 
 // Keep the cross-crate storage boundary flat and explicit. The modules behind
 // these exports describe implementation mechanisms, not product features.
-pub use db::AdbcDatabase;
 pub(crate) use db::ProjectConnection;
 pub use db::ProjectStore;
+pub use db::SpiralSdkDatabase;
 pub use db::{
     BatchIngestion, Database, DatabaseConnection, DatabaseError, DatabaseErrorKind, DatabaseFuture,
     DatabaseResult, DatabaseSession, DatabaseTransaction, ExecutionSummary, IngestMode,

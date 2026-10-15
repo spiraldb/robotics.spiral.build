@@ -12,25 +12,26 @@ workspace = true
 test-support = ["spiral-robotics-recording/test-support"]
 
 [dependencies]
-adbc_core.workspace = true
-adbc_driver_manager.workspace = true
-arrow-buffer = "58.4.0"
-arrow-data = "58.4.0"
+datafusion.workspace = true
+spiral-datafusion.workspace = true
+spiral-sdk.workspace = true
+arrow-buffer = "59.2.0"
+arrow-data = "59.2.0"
 spiral-robotics-common.workspace = true
 # Splits the H.264 FFmpeg encodes into access units, as the robot connector does.
 spiral-robotics-recording.workspace = true
-arrow-array = "58.4.0"
-arrow-schema = { version = "58.4.0", features = ["canonical_extension_types"] }
-arrow-ipc = { version = "58.4.0", features = ["zstd"] }
-arrow-json = "58.4.0"
-arrow-cast = "58.4.0"
-arrow-select = "58.4.0"
+arrow-array = "59.2.0"
+arrow-schema = { version = "59.2.0", features = ["canonical_extension_types"] }
+arrow-ipc = { version = "59.2.0", features = ["zstd"] }
+arrow-json = "59.2.0"
+arrow-cast = "59.2.0"
+arrow-select = "59.2.0"
 base64.workspace = true
 bytes = "1"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 image.workspace = true
 # Reads LeRobot's frame and metadata tables.
-parquet = "58.4.0"
+parquet = "59.2.0"
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde.workspace = true
 serde_json.workspace = true

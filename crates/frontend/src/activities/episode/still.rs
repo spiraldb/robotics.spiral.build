@@ -309,7 +309,7 @@ mod tests {
     fn a_still_reads_its_frame_and_the_packets_back_to_the_keyframe_before_it() {
         // The fixture's recording starts one second into its log.
         let episode = Episode::fixture(&EpisodeId::fixture(1), 30_000_000_000);
-        let messages = "\"datasets\".\"folding\".\"messages\".\"top_0a1b2c3d\"";
+        let messages = "\"datasets.folding.messages.top_0a1b2c3d\"";
         assert_eq!(
             StillMoment::at(&episode, 2.5)
                 .packets_statement(&top())

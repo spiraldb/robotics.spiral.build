@@ -327,7 +327,7 @@ mod tests {
             DatasetFacts::sql(&mcap),
             "SELECT count(*) AS episodes, sum(duration_ns) AS duration_ns, sum(source_bytes) AS bytes, \
              min(message_start_time) AS first_start, max(message_end_time) AS last_end \
-             FROM \"datasets\".\"bench\".\"episodes\""
+             FROM \"datasets.bench.episodes\""
         );
         let lerobot = EpisodeListing::new(
             DatasetSelection::new("so101").unwrap(),

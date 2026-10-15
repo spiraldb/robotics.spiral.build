@@ -107,8 +107,10 @@ impl<'a> PairedColumns<'a> {
     ) -> Result<Vec<String>, String> {
         let state = streams.read_values(self.state.values())?;
         let action = streams.read_values(self.action.values())?;
-        let mut ctes = self.state.ctes(&format!("{name}_state"), &state);
-        ctes.extend(self.action.ctes(&format!("{name}_action"), &action));
+        let mut ctes = vec![
+            self.state.cte(&format!("{name}_state"), &state),
+            self.action.cte(&format!("{name}_action"), &action),
+        ];
         let measured = self
             .state
             .names()
@@ -129,18 +131,6 @@ impl<'a> PairedColumns<'a> {
             "{name}_commands AS (SELECT id, count(*) AS commands FROM {name}_action GROUP BY id)"
         ));
         Ok(ctes)
-    }
-}
-
-/// The largest of `terms`, which Spiral spells only for two or more.
-pub(super) struct Greatest;
-
-impl Greatest {
-    pub(super) fn of(terms: &[String]) -> String {
-        match terms {
-            [one] => one.clone(),
-            _ => format!("greatest({})", terms.join(", ")),
-        }
     }
 }
 
@@ -220,16 +210,5 @@ impl TwoArmDataset {
             }
             other => panic!("a check column is filled by one dataset statement, not {other:?}"),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn greatest_is_spelled_only_for_two_or_more() {
-        assert_eq!(Greatest::of(&["x".into()]), "x");
-        assert_eq!(Greatest::of(&["x".into(), "y".into()]), "greatest(x, y)");
     }
 }

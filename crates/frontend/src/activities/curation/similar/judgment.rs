@@ -18,7 +18,7 @@ use crate::activities::curation::path::{
 use spiral_robotics_common::curation::{
     AnswerColumn, AnswerSource, CategoryDefinition, SubtaskClassification, SubtaskSimilarity,
 };
-use spiral_robotics_common::sql::SqlLiteral;
+use spiral_robotics_common::sql::{SqlLiteral, SqlStruct};
 
 /// The decision model both judgments are asked of, pinned so every published
 /// answer names the model that gave it.
@@ -104,8 +104,7 @@ impl SubtaskJudgment for SubtaskSearch {
         entries.folding(
             TableColumn::of_node(step.node(), &step.name(), ColumnMeaning::Similarities),
             (
-                "STRUCT_PACK(start_ns := start_ns, end_ns := end_ns, similarity := similarity)"
-                    .to_owned(),
+                SqlStruct::of_columns(["start_ns", "end_ns", "similarity"]),
                 None,
             ),
         )
@@ -159,7 +158,7 @@ impl SubtaskJudgment for SubtaskGrouping {
                     ColumnMeaning::Category(category.id()),
                 ),
                 (
-                    "STRUCT_PACK(start_ns := start_ns, end_ns := end_ns)".to_owned(),
+                    SqlStruct::of_columns(["start_ns", "end_ns"]),
                     Some(format!("category = {}", SqlLiteral::text(category.name()))),
                 ),
             )

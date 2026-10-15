@@ -11,6 +11,7 @@ use super::stream_reads::{CheckedStreams, PairedColumns};
 use dioxus::prelude::*;
 use serde::Deserialize;
 use spiral_robotics_common::datasets::{ArmRoles, EpisodeId, GripperRoles};
+use spiral_robotics_common::sql::SqlStruct;
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -120,13 +121,17 @@ impl GripperCloses {
         format!(
             "WITH logged AS (SELECT part, episode_id, COALESCE(shut, 0) AS shut, COALESCE(nearly, 0) AS nearly, COALESCE(holding, 0) AS holding, first_shut_at \
                FROM {parts} p WHERE {together}), \
-             counts AS (SELECT part, STRUCT_PACK(shut := sum(shut), nearly := sum(nearly), holding := sum(holding)) AS counts FROM logged GROUP BY part), \
+             counts AS (SELECT part, {counts} AS counts FROM logged GROUP BY part), \
              ranked AS (SELECT part, episode_id, shut, first_shut_at, ROW_NUMBER() OVER (PARTITION BY part ORDER BY shut DESC, episode_id) AS rank FROM logged WHERE shut > 0), \
-             most AS (SELECT part, spql.list.collect(STRUCT_PACK(episode_id := episode_id, shut := shut, first_shut_at := first_shut_at)) AS most_shut \
-               FROM ranked WHERE rank <= {most} GROUP BY part) \
+             most AS (SELECT part, {most_shut} AS most_shut FROM ranked WHERE rank <= {most} GROUP BY part) \
              SELECT counts.part AS part, counts.counts AS counts, most.most_shut AS most_shut FROM counts LEFT JOIN most ON most.part = counts.part",
             together = Pairing::together(),
             most = Self::MOST_SHUT,
+            counts = SqlStruct::new()
+                .field("shut", "sum(shut)")
+                .field("nearly", "sum(nearly)")
+                .field("holding", "sum(holding)"),
+            most_shut = SqlStruct::of_columns(["episode_id", "shut", "first_shut_at"]).collected(),
         )
     }
 
@@ -165,7 +170,7 @@ impl GripperCloses {
             "k AS (SELECT id, log_time, opening, {closing} AS closing, \
              ROW_NUMBER() OVER (PARTITION BY id ORDER BY log_time) - ROW_NUMBER() OVER (PARTITION BY id, {closing} ORDER BY log_time) AS grp FROM n)"
         ));
-        ctes.push("runs AS (SELECT id, grp, (max(CAST(log_time AS BIGINT)) - min(CAST(log_time AS BIGINT))) / 1e9 AS run_s, min(opening) AS floor, min(log_time) AS start FROM k WHERE closing = 1 GROUP BY id, grp)".into());
+        ctes.push("runs AS (SELECT id, grp, (CAST(max(log_time) AS BIGINT) - CAST(min(log_time) AS BIGINT)) / 1e9 AS run_s, min(opening) AS floor, min(log_time) AS start FROM k WHERE closing = 1 GROUP BY id, grp)".into());
         let (shut, nearly) = (Self::SHUT, Self::NEARLY);
         ctes.push(format!(
             "closes AS (SELECT id, sum(CASE WHEN floor < {shut} THEN 1 ELSE 0 END) AS shut, \
@@ -318,9 +323,11 @@ mod tests {
             "FROM (parts) p WHERE CAST(paired AS DOUBLE) >= 0.9 * CAST(commands AS DOUBLE)"
         ));
         assert!(sql.contains(
-            "STRUCT_PACK(shut := sum(shut), nearly := sum(nearly), holding := sum(holding)) AS counts"
+            "named_struct('shut', sum(shut), 'nearly', sum(nearly), 'holding', sum(holding)) AS counts"
         ));
-        assert!(sql.contains("FROM ranked WHERE rank <= 3 GROUP BY part"));
+        assert!(sql.contains(
+            "array_agg(named_struct('episode_id', episode_id, 'shut', shut, 'first_shut_at', first_shut_at)) AS most_shut FROM ranked WHERE rank <= 3 GROUP BY part"
+        ));
         let judged: Vec<JudgedArm> = serde_json::from_value(serde_json::json!([{
             "part": "left",
             "counts": {"shut": 13, "nearly": 1, "holding": 2},

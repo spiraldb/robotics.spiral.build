@@ -9,6 +9,7 @@ use dioxus::prelude::*;
 use serde::Deserialize;
 use spiral_robotics_common::datasets::ValueColumns;
 use spiral_robotics_common::datasets::{ArmRoles, EpisodeId};
+use spiral_robotics_common::sql::SqlStruct;
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -73,8 +74,8 @@ impl JointSpikes {
     /// spike, the episodes it spiked in.
     fn judgment(parts: &str) -> String {
         format!(
-            "SELECT part, spql.list.collect(STRUCT_PACK(episode_id := episode_id, spikes := spikes, first_at := first_at)) AS episodes \
-             FROM {parts} p WHERE spikes > 0 GROUP BY part"
+            "SELECT part, {} AS episodes FROM {parts} p WHERE spikes > 0 GROUP BY part",
+            SqlStruct::of_columns(["episode_id", "spikes", "first_at"]).collected()
         )
     }
 
@@ -101,7 +102,7 @@ impl JointSpikes {
 
     fn sql(streams: CheckedStreams<'_>, arm: &ArmRoles) -> Result<String, String> {
         let columns = ValueColumns::new(arm.state(), "q");
-        let mut ctes = columns.ctes("s", &streams.read_values(arm.state())?);
+        let mut ctes = vec![columns.cte("s", &streams.read_values(arm.state())?)];
         ctes.push(columns.motion_cte("s"));
         let joints = columns.count();
         let rates = (0..joints)
@@ -118,7 +119,7 @@ impl JointSpikes {
         let spike = (0..joints)
             .map(|joint| {
                 format!(
-                    "(spql.math.abs(v{joint}) > {speed} AND spql.math.abs(w{joint}) > {speed} AND v{joint} * w{joint} < 0)"
+                    "(abs(v{joint}) > {speed} AND abs(w{joint}) > {speed} AND v{joint} * w{joint} < 0)"
                 )
             })
             .collect::<Vec<_>>()

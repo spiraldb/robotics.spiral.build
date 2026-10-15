@@ -73,19 +73,21 @@ pub trait Database: Send + Sync {
 
 /// Operations shared by autocommit connections and explicit transactions.
 ///
-/// Calls and stream polling must not block the async executor. Queries return
-/// owned, bounded streams retaining their driver resources even after the
-/// connection handle is dropped. EOF, an error, or drop releases the stream.
-/// While a result is active, other operations return `InvalidState` instead of
-/// waiting for that stream to be consumed. Separate connections are independent.
+/// Calls and stream polling must not block the async executor. Queries read
+/// what is committed when they start and return owned streams that outlive
+/// the connection handle; EOF, an error, or drop releases the stream.
+/// Separate connections are independent.
 ///
-/// All operations use the caller's transaction, including ingestion and schema
-/// inspection. Dropping an operation future stops waiting, but does not promise
-/// cancellation of an in-flight write or rollback of a completed commit.
+/// In a transaction, ingestion and drops are held until it commits, each
+/// table getting one write folded from them; schema inspection sees what the
+/// transaction holds for a table before what is committed. Dropping an
+/// operation future stops waiting, but does not promise cancellation of an
+/// in-flight write or reversal of a completed commit.
 pub trait DatabaseSession: Send + 'static {
     fn query(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, RecordBatchStream>;
 
-    fn execute_update(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, ExecutionSummary>;
+    /// Remove `relation`, if it exists.
+    fn drop_table(&mut self, relation: RelationName) -> DatabaseFuture<'_, ExecutionSummary>;
 
     fn ingest(&mut self, ingestion: BatchIngestion) -> DatabaseFuture<'_, ExecutionSummary>;
 
@@ -97,10 +99,8 @@ pub trait DatabaseConnection: DatabaseSession {
     fn begin(self: Box<Self>) -> DatabaseFuture<'static, Box<dyn DatabaseTransaction>>;
 }
 
-/// An explicit transaction that has exactly one terminal action.
-/// Dropping an unfinished transaction schedules rollback without blocking the
-/// dropping thread. Cleanup waits for any active stream; resources cannot be
-/// reused before cleanup completes. Driver failures remain observable errors.
+/// An explicit transaction that has exactly one terminal action. Dropping an
+/// unfinished transaction discards what it holds.
 pub trait DatabaseTransaction: DatabaseSession {
     fn commit(self: Box<Self>) -> DatabaseFuture<'static, ExecutionSummary>;
 
@@ -143,16 +143,17 @@ impl SqlStatement {
     }
 }
 
-/// Validated dotted relation path.
+/// A table's name at the project's root: non-empty parts joined by dots,
+/// such as `datasets.default.episodes`, none holding `/` or `@`.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RelationName(String);
 
 impl RelationName {
     pub fn parse(name: impl Into<String>) -> DatabaseResult<Self> {
         let name = name.into();
-        if name.is_empty() || name.split('.').any(str::is_empty) {
+        if name.is_empty() || name.split('.').any(str::is_empty) || name.contains(['/', '@']) {
             return Err(DatabaseError::invalid_input(
-                "relation names need non-empty dot-separated components",
+                "table names need non-empty dot-separated parts without '/' or '@'",
             ));
         }
         Ok(Self(name))
@@ -160,6 +161,12 @@ impl RelationName {
 
     pub(super) fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl fmt::Display for RelationName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
     }
 }
 

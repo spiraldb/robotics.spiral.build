@@ -17,6 +17,7 @@ use crate::activities::episode::StreamCatalog;
 use dioxus::prelude::*;
 use serde::Deserialize;
 use spiral_robotics_common::datasets::{DatasetTopic, EpisodeId};
+use spiral_robotics_common::sql::SqlStruct;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ClockOffset {
@@ -126,23 +127,28 @@ impl ClockOffset {
                JOIN o theirs ON theirs.episode_id = mine.episode_id AND theirs.centi_ms = mine.centi_ms GROUP BY mine.part, theirs.part), \
              k AS (SELECT a.part AS part, min(a.peer) AS lead FROM a JOIN n mine ON mine.part = a.part JOIN n theirs ON theirs.part = a.peer \
                WHERE a.episodes = mine.episodes AND a.episodes = theirs.episodes GROUP BY a.part), \
-             g AS (SELECT lead, spql.list.collect(part) AS streams FROM k GROUP BY lead), \
+             g AS (SELECT lead, array_agg(part) AS streams FROM k GROUP BY lead), \
              e AS (SELECT o.episode_id AS episode_id, o.part AS part, o.median_ms AS median_ms, o.opening_ms AS opening_ms, o.low_ms AS low_ms, o.high_ms AS high_ms \
                FROM o JOIN g ON g.lead = o.part), \
-             t AS (SELECT part, spql.agg.approx_quantile(median_ms, 0.5) AS median_ms, min(low_ms) AS low_ms, max(high_ms) AS high_ms, count(*) AS episodes, \
+             t AS (SELECT part, approx_percentile_cont(median_ms, 0.5) AS median_ms, min(low_ms) AS low_ms, max(high_ms) AS high_ms, count(*) AS episodes, \
                max(median_ms) - min(median_ms) AS spread, max(abs(opening_ms - median_ms)) AS drift FROM e GROUP BY part), \
              j AS (SELECT part, median_ms, low_ms, high_ms, episodes, \
                CASE WHEN abs(median_ms) > {frame} OR spread > {frame} OR drift > {half} THEN true ELSE false END AS flagged FROM t), \
-             x AS (SELECT e.part AS part, spql.list.collect(STRUCT_PACK(episode_id := e.episode_id, median_ms := e.median_ms)) AS apart \
+             x AS (SELECT e.part AS part, {apart} AS apart \
                FROM e JOIN j ON j.part = e.part WHERE j.flagged AND (abs(e.median_ms) > {frame} OR abs(e.opening_ms - e.median_ms) > {half}) GROUP BY e.part), \
              r AS (SELECT e.part AS part, e.episode_id AS episode_id, e.median_ms AS median_ms, \
                ROW_NUMBER() OVER (PARTITION BY e.part ORDER BY abs(e.median_ms - t.median_ms) DESC) AS distance_rank FROM e JOIN t ON t.part = e.part), \
-             f AS (SELECT part, spql.list.collect(STRUCT_PACK(episode_id := episode_id, median_ms := median_ms)) AS furthest FROM r WHERE distance_rank <= 3 GROUP BY part) \
+             f AS (SELECT part, {furthest} AS furthest FROM r WHERE distance_rank <= 3 GROUP BY part) \
              SELECT g.streams AS streams, j.median_ms AS median_ms, j.low_ms AS low_ms, j.high_ms AS high_ms, j.episodes AS episodes, j.flagged AS flagged, \
                x.apart AS apart, f.furthest AS furthest \
              FROM g JOIN j ON j.part = g.lead JOIN f ON f.part = g.lead LEFT JOIN x ON x.part = g.lead",
             frame = period_ms,
             half = period_ms / 2.0,
+            apart = SqlStruct::new()
+                .field("episode_id", "e.episode_id")
+                .field("median_ms", "e.median_ms")
+                .collected(),
+            furthest = SqlStruct::of_columns(["episode_id", "median_ms"]).collected(),
         )
     }
 
@@ -197,8 +203,8 @@ impl ClockOffset {
              p AS (SELECT c.id AS id, (CAST(c.log_time AS BIGINT) - CAST(s.log_time AS BIGINT)) / 1e6 AS offset_ms, \
                CAST(c.log_time AS BIGINT) - min(CAST(c.log_time AS BIGINT)) OVER (PARTITION BY c.id) AS since_ns \
                FROM c JOIN s ON s.id = c.id AND s.i = c.i WHERE c.n = s.n) \
-             SELECT id, spql.agg.approx_quantile(offset_ms, 0.5) AS median_ms, \
-               spql.agg.approx_quantile(CASE WHEN since_ns < {opening} THEN offset_ms END, 0.5) AS opening_ms, \
+             SELECT id, approx_percentile_cont(offset_ms, 0.5) AS median_ms, \
+               approx_percentile_cont(CASE WHEN since_ns < {opening} THEN offset_ms END, 0.5) AS opening_ms, \
                min(offset_ms) AS low_ms, max(offset_ms) AS high_ms FROM p GROUP BY id",
             camera = streams.read(camera),
             stream = streams.read(stream),
@@ -354,7 +360,7 @@ mod tests {
             "{sql}"
         );
         assert!(
-            sql.contains("spql.agg.approx_quantile(median_ms, 0.5) AS median_ms"),
+            sql.contains("approx_percentile_cont(median_ms, 0.5) AS median_ms"),
             "{sql}"
         );
         assert!(
@@ -391,7 +397,7 @@ mod tests {
         assert!(statement.contains("'/left-arm-state' AS part"));
         assert!(statement.contains("'/left-arm-action' AS part"));
         assert!(!statement.contains("'/instruction'"));
-        assert!(statement.contains("\"messages\".\"top_camera_00000000\""));
+        assert!(statement.contains("\"datasets.folding.messages.top_camera_00000000\""));
         assert!(!statement.contains("left_wrist_camera"));
         assert!(
             ClockOffset::column(CheckedStreams::new(&dataset, &topics[2..]))

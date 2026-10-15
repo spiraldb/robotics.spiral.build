@@ -39,7 +39,7 @@ use spiral_robotics_common::datasets::{
     EpisodeTask,
 };
 use spiral_robotics_common::relations::EpisodeQueryRequest;
-use spiral_robotics_common::sql::{ReadOnlyQuery, ReadOnlyQueryMode};
+use spiral_robotics_common::sql::{ReadOnlyQuery, ReadOnlyQueryMode, SqlList};
 use spiral_robotics_storage::answers::{
     ColumnAnswers, EpisodeAnswer, StatementAnswers, StoredAnswers,
 };
@@ -487,7 +487,8 @@ impl FillWork {
                 )
             }
             EpisodeTask::Listed => format!(
-                "SELECT spql.list.get(e.tasks, 0) AS task FROM {} e WHERE e.id = $1",
+                "SELECT {} AS task FROM {} e WHERE e.id = $1",
+                SqlList::item_at("e.tasks", 0),
                 dataset.episodes()
             ),
         };
@@ -593,8 +594,8 @@ impl FillRun {
     /// Answer every episode `column` is filled for that it does not hold yet,
     /// and write what was answered, even when the run stops or fails part
     /// way; the column's table first, when it has none. Each write waits for
-    /// every Spiral read of the project to end, so it runs beside the
-    /// asking, which keeps the reads in flight moving.
+    /// the project's other writers, so it runs beside the asking, which keeps
+    /// the reads in flight moving.
     async fn fill_column(&self, column: &ColumnFill, work: &FillWork) -> Result<(), String> {
         let node = column.node();
         self.report(FillStep::new(node, 0, None));

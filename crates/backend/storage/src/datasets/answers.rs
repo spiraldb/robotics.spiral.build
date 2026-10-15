@@ -81,7 +81,7 @@ impl StoredAnswers<'_> {
         self.store
             .connect_exclusive()
             .await?
-            .create_or_append_batches(&self.table.target(), vec![RecordBatch::new_empty(schema)])
+            .create_or_append_batches(self.table.name(), vec![RecordBatch::new_empty(schema)])
             .await
     }
 
@@ -94,11 +94,11 @@ impl StoredAnswers<'_> {
         let written = self
             .written(&mut connection)
             .await?
-            .ok_or_else(|| format!("{} does not exist.", self.table.target()))?;
+            .ok_or_else(|| format!("{} does not exist.", self.table.name()))?;
         match answers.rows(&written)? {
             Some(rows) => {
                 connection
-                    .create_or_append_batches(&self.table.target(), vec![rows])
+                    .create_or_append_batches(self.table.name(), vec![rows])
                     .await
             }
             None => Ok(()),
@@ -110,7 +110,7 @@ impl StoredAnswers<'_> {
         &self,
         connection: &mut ProjectConnection,
     ) -> Result<Option<WrittenRows>, String> {
-        let Some(schema) = connection.relation_schema(&self.table.target()).await? else {
+        let Some(schema) = connection.relation_schema(self.table.name()).await? else {
             return Ok(None);
         };
         let batches = connection
@@ -162,7 +162,9 @@ impl EpisodeAnswer {
     fn alone(&self) -> Result<ArrayRef, String> {
         let read = self.0.to_data();
         let mut alone = MutableArrayData::new(vec![&read], false, 1);
-        alone.extend(0, 0, 1);
+        alone
+            .try_extend(0, 0, 1)
+            .map_err(|error| format!("copying an answer: {error}"))?;
         let alone = make_array(alone.freeze());
         let plain = Self::without_views(alone.data_type());
         arrow_cast::cast(&alone, &plain).map_err(|error| format!("copying an answer: {error}"))
@@ -633,7 +635,7 @@ mod tests {
     #[tokio::test]
     async fn a_column_is_made_empty_and_holds_one_row_per_episode_asked() {
         let journal = crate::datasets::TestJournal::start().await;
-        let (store, _) = crate::db::UnquotedMemory::store_with_catalog(journal.endpoint()).await;
+        let (store, _) = crate::db::MemoryDatabase::store_with_catalog(journal.endpoint()).await;
         let store = Arc::new(store);
         let storage = StorageManager::new(
             store.clone(),
@@ -674,7 +676,7 @@ mod tests {
             .await
             .unwrap()
             .read_batches(&format!(
-                "SELECT episode_id, CAST(spql.list.len(value) AS BIGINT) AS subtasks FROM {} ORDER BY episode_id",
+                "SELECT episode_id, CAST(cardinality(value) AS BIGINT) AS subtasks FROM {} ORDER BY episode_id",
                 dataset.answers(&column)
             ))
             .await
@@ -785,7 +787,7 @@ mod tests {
                 .connect()
                 .await?
                 .read_batches(&format!(
-                    "SELECT a.episode_id, spql.list.get(a.value, CAST(1 AS BIGINT)) AS second FROM {} a ORDER BY a.episode_id",
+                    "SELECT a.episode_id, array_element(a.value, 2) AS second FROM {} a ORDER BY a.episode_id",
                     dataset.answers(&similarity)
                 ))
                 .await?;
@@ -827,7 +829,7 @@ mod tests {
                 .connect()
                 .await?
                 .read_batches(&format!(
-                    "SELECT p.frame_index, p.timestamp_ns FROM {} a CROSS JOIN LATERAL UNNEST(a.value) p",
+                    "SELECT s.p.frame_index AS frame_index, s.p.timestamp_ns AS timestamp_ns FROM (SELECT unnest(a.value) AS p FROM {} a) s",
                     dataset.answers(&scores)
                 ))
                 .await?;
@@ -850,7 +852,7 @@ mod tests {
                 .connect()
                 .await?
                 .read_batches(&format!(
-                    "SELECT p.timestamp_ns FROM {} a CROSS JOIN LATERAL UNNEST(a.value) p",
+                    "SELECT s.p.timestamp_ns AS timestamp_ns FROM (SELECT unnest(a.value) AS p FROM {} a) s",
                     dataset.answers(&tracks)
                 ))
                 .await?;
@@ -871,7 +873,7 @@ mod tests {
         let mut connection = store.connect().await.unwrap();
         assert!(
             !connection
-                .table_exists(&dataset.answers(&similarity).target())
+                .table_exists(dataset.answers(&similarity).name())
                 .await
                 .unwrap(),
             "dropping the dataset drops its answer columns"

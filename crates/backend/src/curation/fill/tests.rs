@@ -234,8 +234,8 @@ fn hosted_storage() -> (
     Arc<StorageManager>,
 ) {
     use spiral_robotics_storage::{
-        AdbcDatabase, ServiceEndpoint, SpiralAccessPublisher, SpiralConnection,
-        SpiralConnectionSettings,
+        ServiceEndpoint, SpiralAccessPublisher, SpiralConnection, SpiralConnectionSettings,
+        SpiralSdkDatabase,
     };
     let settings = SpiralConnectionSettings::new(
         ServiceEndpoint::environment_spiral().into_string(),
@@ -248,7 +248,11 @@ fn hosted_storage() -> (
     publisher.publish(Some(std::env::var("SPIRAL_ACCESS_TOKEN").unwrap()));
     let connection = SpiralConnection::new(settings, access);
     let store = Arc::new(
-        ProjectStore::new(connection.clone(), Arc::new(AdbcDatabase::new(connection))).unwrap(),
+        ProjectStore::new(
+            connection.clone(),
+            Arc::new(SpiralSdkDatabase::new(connection)),
+        )
+        .unwrap(),
     );
     let studio = StudioStore::in_memory().project(&store.connection_settings());
     (publisher, Arc::new(StorageManager::new(store, studio)))
@@ -283,7 +287,7 @@ async fn a_run_fills_each_column_once_and_then_publishes_its_view() {
             FillEpisodes::Reaching(format!("SELECT episode_id FROM {scored}")),
             AnswerSource::DatasetStatement {
                 statement: format!(
-                    "SELECT a.episode_id, CAST(spql.list.len(a.value) AS BIGINT) AS answer FROM {scored} a"
+                    "SELECT a.episode_id, CAST(cardinality(a.value) AS BIGINT) AS answer FROM {scored} a"
                 ),
             },
         );
@@ -314,8 +318,9 @@ async fn a_run_fills_each_column_once_and_then_publishes_its_view() {
         );
         let frames_column = frames.column().clone();
         let statement = format!(
-            "SELECT a.episode_id, p.frame_index, p.velocity FROM {scored} a CROSS JOIN LATERAL UNNEST(a.value) p \
-             LEFT JOIN {unreached_table} u ON u.episode_id = a.episode_id"
+            "SELECT s.episode_id, s.p.frame_index AS frame_index, s.p.velocity AS velocity \
+             FROM (SELECT a.episode_id, unnest(a.value) AS p FROM {scored} a) s \
+             LEFT JOIN {unreached_table} u ON u.episode_id = s.episode_id"
         );
         let request = FillRequest::new(dataset.clone(), vec![scores, velocities, unreached, frames])
             .publishing(vec![PublishedView::new(view.clone(), statement)]);

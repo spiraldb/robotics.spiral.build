@@ -14,7 +14,7 @@ use super::database::{
     RecordBatchStream, RelationName, SqlStatement,
 };
 use crate::settings::SpiralConnectionSettings;
-use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard};
+use tokio::sync::OwnedMutexGuard;
 
 const SPIRAL_UNAVAILABLE_PREFIX: &str = "SpiralDB is unavailable at ";
 
@@ -44,9 +44,12 @@ enum ProjectConnectionState {
     Closed,
 }
 
+/// What a connection holds while it works: nothing to read, since reads see
+/// committed snapshots; the project's write lock to write, so Studio's own
+/// writers never conflict with each other.
 enum ProjectOperationLease {
-    Shared { _lease: OwnedRwLockReadGuard<()> },
-    Exclusive { _lease: OwnedRwLockWriteGuard<()> },
+    Read,
+    Write { _lease: OwnedMutexGuard<()> },
 }
 
 impl ProjectConnection {
@@ -191,11 +194,13 @@ impl ProjectConnection {
             .map_err(|error| format!("checking Spiral table {target}: {error}"))
     }
 
-    pub(crate) async fn execute_update_sql(&mut self, sql: &str) -> Result<(), String> {
-        self.execute_update(sql.into())
+    /// Remove the table named `target`, if it exists.
+    pub(crate) async fn drop_table(&mut self, target: &str) -> Result<(), String> {
+        let relation = RelationName::parse(target).map_err(|error| error.to_string())?;
+        DatabaseSession::drop_table(self, relation)
             .await
             .map(|_| ())
-            .map_err(|error| error.to_string())
+            .map_err(|error| format!("dropping Spiral table {target}: {error}"))
     }
 }
 
@@ -250,7 +255,7 @@ impl DatabaseSession for ProjectConnection {
     fn query(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, RecordBatchStream> {
         async move {
             let records = self.state.session()?.query(sql).await?;
-            // The project lock must cover consumption, including streams returned
+            // A writer's lock covers consumption, including streams returned
             // from helpers whose local ProjectConnection has already been dropped.
             Ok(records
                 .retain(self.operation.clone())
@@ -259,8 +264,8 @@ impl DatabaseSession for ProjectConnection {
         .boxed()
     }
 
-    fn execute_update(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, ExecutionSummary> {
-        async move { self.state.session()?.execute_update(sql).await }.boxed()
+    fn drop_table(&mut self, relation: RelationName) -> DatabaseFuture<'_, ExecutionSummary> {
+        async move { self.state.session()?.drop_table(relation).await }.boxed()
     }
 
     fn ingest(&mut self, ingestion: BatchIngestion) -> DatabaseFuture<'_, ExecutionSummary> {
@@ -277,7 +282,7 @@ pub struct ProjectStore {
     connection_settings: SpiralConnectionSettings,
     catalog: crate::datasets::DatasetCatalogClient,
     database: Arc<dyn Database>,
-    async_operation_gate: Arc<tokio::sync::RwLock<()>>,
+    writers: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl ProjectStore {
@@ -299,11 +304,11 @@ impl ProjectStore {
             catalog: crate::datasets::DatasetCatalogClient::new(&connection)?,
             connection_settings: connection.settings().clone(),
             database,
-            async_operation_gate: Arc::new(tokio::sync::RwLock::new(())),
+            writers: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
-    /// A project whose Spiral is the driver's in-memory engine and whose
+    /// A project whose Spiral is DataFusion's in-memory tables and whose
     /// catalog endpoint is unreachable, so a test never touches a real project.
     #[cfg(any(test, feature = "test-support"))]
     pub fn in_memory() -> Self {
@@ -316,9 +321,15 @@ impl ProjectStore {
         .expect("a fixed test project");
         Self::new(
             crate::SpiralConnection::new(settings, crate::SpiralAccessPublisher::new().1),
-            Arc::new(crate::AdbcDatabase::memory()),
+            Arc::new(crate::db::MemoryDatabase::default()),
         )
         .expect("a fixed test catalog client")
+    }
+
+    /// The database its connections open on.
+    #[cfg(test)]
+    pub(crate) fn database(&self) -> Arc<dyn Database> {
+        self.database.clone()
     }
 
     pub(crate) fn dataset_catalog(&self) -> &crate::datasets::DatasetCatalogClient {
@@ -344,15 +355,16 @@ impl ProjectStore {
         self.connection_settings.spfs_endpoint().to_owned()
     }
 
+    /// A connection to read with, which waits for nothing.
     pub(crate) async fn connect(&self) -> Result<ProjectConnection, String> {
-        let operation = self.async_operation_gate.clone().read_owned().await;
-        self.open_connection(ProjectOperationLease::Shared { _lease: operation })
-            .await
+        self.open_connection(ProjectOperationLease::Read).await
     }
 
+    /// A connection to write with, once no other writer of this project
+    /// holds one.
     pub(crate) async fn connect_exclusive(&self) -> Result<ProjectConnection, String> {
-        let operation = self.async_operation_gate.clone().write_owned().await;
-        self.open_connection(ProjectOperationLease::Exclusive { _lease: operation })
+        let lease = self.writers.clone().lock_owned().await;
+        self.open_connection(ProjectOperationLease::Write { _lease: lease })
             .await
     }
 
@@ -394,8 +406,19 @@ impl<'a> ProjectDatabasePersistence<'a> {
                 "Choose a Spiral project in Settings before testing the connection.".to_owned(),
             );
         }
-        match self.project_store.connect_exclusive().await {
-            Ok(_) => (true, format!("Connected to {endpoint} · project {project}")),
+        // Opening a connection loads Spiral's runtime; reading the catalog
+        // reaches the project as the signed-in user.
+        let reached = match self.project_store.connect().await {
+            Ok(_) => self
+                .project_store
+                .dataset_catalog()
+                .datasets()
+                .await
+                .map(drop),
+            Err(error) => Err(error),
+        };
+        match reached {
+            Ok(()) => (true, format!("Connected to {endpoint} · project {project}")),
             Err(error) => (false, error),
         }
     }
@@ -416,7 +439,7 @@ mod tests {
             let settings = initial.clone().with_project("project_a").unwrap();
             let connection =
                 crate::SpiralConnection::new(settings, crate::SpiralAccess::fixed("token".into()));
-            let database = Arc::new(crate::AdbcDatabase::new(connection.clone()));
+            let database = Arc::new(crate::SpiralSdkDatabase::new(connection.clone()));
             ProjectStore::new(connection, database)
         }
         .unwrap();
@@ -424,7 +447,7 @@ mod tests {
             let settings = initial.clone().with_project("project_b").unwrap();
             let connection =
                 crate::SpiralConnection::new(settings, crate::SpiralAccess::fixed("token".into()));
-            let database = Arc::new(crate::AdbcDatabase::new(connection.clone()));
+            let database = Arc::new(crate::SpiralSdkDatabase::new(connection.clone()));
             ProjectStore::new(connection, database)
         }
         .unwrap();
@@ -439,7 +462,7 @@ mod tests {
             let settings = initial;
             let connection =
                 crate::SpiralConnection::new(settings, crate::SpiralAccess::fixed("token".into()));
-            let database = Arc::new(crate::AdbcDatabase::new(connection.clone()));
+            let database = Arc::new(crate::SpiralSdkDatabase::new(connection.clone()));
             ProjectStore::new(connection, database)
         }
         .unwrap();

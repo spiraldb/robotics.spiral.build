@@ -86,8 +86,8 @@ picture held ("most bottles at once") and the episode's duration per that
 count ("duration per bottle"). An episode without the number fails the
 condition. *Lowest N%* keeps an episode whose percent rank, among the
 reaching episodes that have the number, is at most N%: its rank among them,
-from 0, over their count less one (`PERCENT_RANK`, which Spiral spells with
-`RANK` and `COUNT` windows); *highest N%* ranks from the top.
+from 0, over their count less one (`PERCENT_RANK`); *highest N%* ranks from
+the top.
 
 **Range conditions** narrow `kept`, intersected with what is already kept:
 
@@ -132,8 +132,7 @@ read each other's rows:
 
 A model node's entries are one row per thing it found in an episode
 (`{node}_entries`), and its column entry (`{node}`) folds them back into one
-list per episode with `spql.list.collect`, over the entries ordered first
-(Spiral has no ordered `ARRAY_AGG`, and `collect` keeps its input's order). A
+list per episode with `array_agg(… ORDER BY …)`, in the entries' order. A
 grouping folds one list per category with `FILTER (WHERE category = …)`. A
 Select reads the entries it needs: a timeline's to find stretches, a judgment's
 to keep subtasks, Track objects' to count. The published statement:
@@ -150,8 +149,8 @@ SELECT episode_id, kept, facts, columns   the last reach entry, joined to the fa
 Stretches are found by the difference of two `ROW_NUMBER`s and measured with
 `MIN` and `MAX` grouped per stretch. A moment's end is `LEAD`, and the last
 lasts as long as the one before it (`LAG`); a single frame has no moment.
-Spiral reads a field of a column, not of a function's result, so a listed
-subtask is named before its fields are read.
+A field is read with a dot from a column, not from a function's result, so a
+listed subtask is named before its fields are read.
 
 ### Stored answers
 
@@ -206,9 +205,9 @@ it asks — the camera, the sample interval, and where the task is read; the
 Break down column and the query or the categories — and the model. A node
 names its camera and instruction by topic, which the backend finds among the
 streams the dataset records (`DatasetStreams`). Break down's subtasks are
-listed in the view with `spql.range` and `spql.list.get`, each carrying its
-place, and a judgment reads each subtask's answer at that place; Spiral has
-no `WITH ORDINALITY`.
+listed in the view by their places, `unnest(range(cardinality(…)))`, each
+read with `array_element` (which counts from 1), and a judgment reads each
+subtask's answer at the same place.
 
 Break down (`crates/backend/src/curation/break_down.rs`) reads the
 episode's camera packets in decode order (`CameraVideo::packets`) and its
@@ -248,27 +247,25 @@ Literals in a view go through `SqlLiteral`.
 
 ### Rules the compiler keeps
 
-A CTE is a name, not a stored result: Spiral pastes a copy of a step into
-every place that reads it, so a step read twice runs twice. Having SpiralDB
-compute a CTE read in several places once is not pursued for now; the
-compiler keeps these rules instead.
+A CTE is a name, not a stored result: DataFusion plans a copy of a step into
+every place that reads it, so a step read twice runs twice. The compiler
+keeps these rules instead.
 
 - **A published view asks no model.** It reads stored answers only. A test
   compiles every path the grammar allows up to five nodes deep and checks
   that each stored column is read on the episode row once, and that each fill
   finds its episodes over the columns filled before it.
 - **The reach chain reads each step once.** Re-nesting `kept` needs
-  `GROUP BY`, which cannot carry other columns (Spiral has no `ANY_VALUE`),
-  so the chain carries only `episode_id` and `kept`. A column is folded from
+  `GROUP BY`, which carries no other column, so the chain carries only
+  `episode_id` and `kept`. A column is folded from
   the episode row, which a Select reading it reads again: a constant per
   node, never growing with the depth of the path.
 - **Change grain on the side.** Entries unnest an answer to one row per
   thing, and a column or a Select folds them back per episode; the chain and
-  the final `SELECT` stay one row per episode. Spiral has no correlated
-  `LATERAL` subqueries and no list filter or map functions (`spql.list` has
-  `contains`, `get`, `is_empty`, `len`, `sum`, and the aggregate `collect`),
-  so work over one row's list is written as unnest, then compute over the
-  rows.
+  the final `SELECT` stay one row per episode. DataFusion has no
+  `CROSS JOIN LATERAL UNNEST` and no list filter or map functions, so work
+  over one row's list is written as `unnest` in a subquery's select list
+  (`ListItems`), then compute over the rows.
 - **A model is asked only about the episodes that reach its node.** A fill
   finds them over the reach chain above it.
 
@@ -417,8 +414,8 @@ published view, since each read Spiral's retired Datasets.
 | Decision | Why | Rejected |
 | --- | --- | --- |
 | No SQL node, joins, or free-form query shapes | Curation always ends in training input; analytics is not the product | A SQL escape-hatch node |
-| Every node compiles to Spiral SQL, and a published view is the whole curation | One executable form: every reader sees exactly what was curated | Studio materializing results |
-| Per-row model work is the backend's: a call it makes through OpenRouter, or a Modal service for video models; an authoring suggestion, such as proposed categories, stays in the browser and becomes part of the call | A view reads only what Spiral stores, and Studio owns the calls its models answer | Browser-orchestrated calls per episode; Spiral's `spql.ai` functions in fill statements |
+| Every node compiles to SQL over Spiral's tables, and a published view is the whole curation | One executable form: every reader sees exactly what was curated | Studio materializing results |
+| Per-row model work is the backend's: a call it makes through OpenRouter, or a Modal service for video models; an authoring suggestion, such as proposed categories, stays in the browser and becomes part of the call | A view reads only what Spiral stores, and Studio owns the calls its models answer | Browser-orchestrated calls per episode; Spiral's AI functions in fill statements |
 | Model answers are stored per dataset, one column per exact call, filled by a backend run | A view over the whole dataset must not ask its models on every read, and identical calls share their work | Re-asking on every read over the first 20 episodes; waiting for Spiral to cache |
 | One table per answer column, written only by appending (decided 2026-10-14) | Appends need no SQL writes: plain bulk ingest now, Spiral's transactions later | One answers table per dataset, a column added and merged in per call |
 | One row per episode, with `kept` as a list of ranges (decided 2026-10-08) | Upstream SpiralDB is moving to one episode as one row; an episode's answers stay whole beside what is kept of it | One row per kept interval; one row per moment |

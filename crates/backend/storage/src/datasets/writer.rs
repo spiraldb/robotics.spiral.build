@@ -136,14 +136,14 @@ impl<'a> DatasetWrite<'a> {
         };
         connection
             .create_or_append_batches(
-                &dataset.episodes().target(),
+                dataset.episodes().name(),
                 vec![RecordBatch::new_empty(EpisodeRows::schema())],
             )
             .await?;
         if format == DatasetFormat::Mcap {
             connection
                 .create_or_append_batches(
-                    &dataset.files().target(),
+                    dataset.files().name(),
                     vec![RecordBatch::new_empty(McapFile::schema())],
                 )
                 .await?;
@@ -209,12 +209,12 @@ impl<'a> DatasetWrite<'a> {
         }
         for (name, (_, batches)) in streams {
             connection
-                .create_or_append_batches(&self.dataset.messages(&name).target(), batches)
+                .create_or_append_batches(self.dataset.messages(&name).name(), batches)
                 .await?;
         }
         connection
             .create_or_append_batches(
-                &self.dataset.episodes().target(),
+                self.dataset.episodes().name(),
                 vec![EpisodeRows::batch(&written)?],
             )
             .await?;
@@ -226,7 +226,7 @@ impl<'a> DatasetWrite<'a> {
             .filter_map(|(_, episode)| Some(episode.origin().mcap()?.row().clone()))
             .collect::<Vec<_>>();
         connection
-            .create_or_append_batches(&self.dataset.files().target(), files)
+            .create_or_append_batches(self.dataset.files().name(), files)
             .await
     }
 

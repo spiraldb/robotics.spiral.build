@@ -9,7 +9,7 @@ use axum::{
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, task::JoinHandle};
 
-use crate::{AdbcDatabase, ProjectStore, SpiralConnectionSettings};
+use crate::{ProjectStore, SpiralConnectionSettings, SpiralSdkDatabase};
 
 #[derive(Default)]
 struct CatalogState {
@@ -59,7 +59,7 @@ impl CatalogServer {
             return Json(json!({"headCommitId":state.version.to_string()})).into_response();
         }
         Json(json!({"namespace":[{
-            "parent":{"kind":"prefix", "path":["datasets", "default"]}, "name":"episodes",
+            "parent":{"kind":"projectRoot"}, "name":"datasets.default.episodes",
             "resource":{"descriptor":{"resourceId":"resource","kind":"table"},"versionId":state.version.to_string()}
         }],"nextPageToken":null})).into_response()
     }
@@ -70,7 +70,7 @@ impl CatalogServer {
             .with_project(project)
             .unwrap();
         let connection = crate::SpiralConnection::new(settings, access);
-        let database = Arc::new(AdbcDatabase::new(connection.clone()));
+        let database = Arc::new(SpiralSdkDatabase::new(connection.clone()));
         ProjectStore::new(connection, database).unwrap()
     }
 }

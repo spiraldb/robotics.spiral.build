@@ -212,7 +212,7 @@ mod tests {
         assert_eq!(
             sql,
             "SELECT id, source_uri, source_bytes, message_count, message_start_time, duration_ns, channel_count \
-             FROM \"datasets\".\"recordings\".\"episodes\" \
+             FROM \"datasets.recordings.episodes\" \
              ORDER BY message_start_time, source_uri, id LIMIT 51 OFFSET 50"
         );
     }
@@ -225,7 +225,7 @@ mod tests {
         assert_eq!(
             listing.first_sql(100),
             "SELECT id, episode_index, tasks, message_count, message_start_time, duration_ns \
-             FROM \"datasets\".\"svla_so101_pickplace\".\"episodes\" ORDER BY episode_index, id LIMIT 100"
+             FROM \"datasets.svla_so101_pickplace.episodes\" ORDER BY episode_index, id LIMIT 100"
         );
         assert!(!listing.sql().contains("channel_count") && !listing.sql().contains("source"));
         let row = serde_json::json!({

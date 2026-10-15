@@ -12,6 +12,7 @@ use super::stream_reads::CheckedStreams;
 use dioxus::prelude::*;
 use serde::Deserialize;
 use spiral_robotics_common::datasets::{DatasetTopic, EpisodeId};
+use spiral_robotics_common::sql::SqlStruct;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct CameraFrames {
@@ -117,20 +118,28 @@ impl CameraFrames {
         format!(
             "WITH f AS (SELECT episode_id, part, CAST(frames AS DOUBLE) AS frames, CAST(span_ns AS DOUBLE) AS span_ns, \
                worst_gap_ns, worst_at, late, period_ns FROM {parts} p), \
-             t AS (SELECT part, spql.agg.approx_quantile(period_ns, 0.5) AS period_ns FROM f GROUP BY part), \
+             t AS (SELECT part, approx_percentile_cont(period_ns, 0.5) AS period_ns FROM f GROUP BY part), \
              e AS (SELECT f.episode_id AS episode_id, f.part AS part, f.frames AS frames, f.worst_gap_ns AS worst_gap_ns, f.worst_at AS worst_at, f.late AS late, \
                CASE WHEN t.period_ns > 0 THEN f.span_ns / t.period_ns + 1 ELSE f.frames END AS expected FROM f JOIN t ON t.part = f.part), \
              m AS (SELECT episode_id, part, worst_gap_ns, worst_at, late, expected, greatest(round(expected - frames), 0) AS missing FROM e), \
              s AS (SELECT part, sum(missing) AS missing, sum(expected) AS expected, sum(late) AS late FROM m GROUP BY part), \
              g AS (SELECT part, episode_id, worst_gap_ns, worst_at, ROW_NUMBER() OVER (PARTITION BY part ORDER BY worst_gap_ns DESC) AS gap_rank \
                FROM m WHERE worst_gap_ns IS NOT NULL), \
-             w AS (SELECT part, STRUCT_PACK(episode_id := episode_id, gap_ns := worst_gap_ns, at := worst_at) AS longest FROM g WHERE gap_rank = 1), \
-             d AS (SELECT part, spql.list.collect(STRUCT_PACK(episode_id := episode_id, share := missing / expected, at := worst_at)) AS flagged \
-               FROM m WHERE missing / expected > {missing} GROUP BY part) \
+             w AS (SELECT part, {longest} AS longest FROM g WHERE gap_rank = 1), \
+             d AS (SELECT part, {flagged} AS flagged FROM m WHERE missing / expected > {missing} GROUP BY part) \
              SELECT t.part AS part, t.period_ns AS period_ns, s.missing AS missing, s.expected AS expected, s.late AS late, \
                w.longest AS longest, d.flagged AS flagged \
              FROM t JOIN s ON s.part = t.part LEFT JOIN w ON w.part = t.part LEFT JOIN d ON d.part = t.part",
             missing = Self::MISSING,
+            longest = SqlStruct::new()
+                .field("episode_id", "episode_id")
+                .field("gap_ns", "worst_gap_ns")
+                .field("at", "worst_at"),
+            flagged = SqlStruct::new()
+                .field("episode_id", "episode_id")
+                .field("share", "missing / expected")
+                .field("at", "worst_at")
+                .collected(),
         )
     }
 
@@ -176,7 +185,7 @@ impl CameraFrames {
             "WITH \
              g AS (SELECT id, log_time, CAST(log_time AS BIGINT) - CAST(LAG(log_time) OVER (PARTITION BY id ORDER BY log_time) AS BIGINT) AS gap FROM {camera}), \
              l AS (SELECT id, log_time, gap, LEAD(gap) OVER (PARTITION BY id ORDER BY log_time) AS next_gap, \
-               max(gap) OVER (PARTITION BY id) AS worst_gap, spql.agg.approx_quantile(gap, 0.5) OVER (PARTITION BY id) AS period FROM g), \
+               max(gap) OVER (PARTITION BY id) AS worst_gap, approx_percentile_cont(gap, 0.5) OVER (PARTITION BY id) AS period FROM g), \
              f AS (SELECT id, count(*) AS frames, max(log_time) - min(log_time) AS span_ns, max(gap) AS worst_gap_ns, \
                min(CASE WHEN gap = worst_gap THEN log_time END) AS worst_time, \
                sum(CASE WHEN gap > {slow} * period AND next_gap < {quick} * period THEN 1 ELSE 0 END) AS late, max(period) AS period_ns \
@@ -348,7 +357,7 @@ mod tests {
         assert!(sql.contains("FROM (parts) p"), "{sql}");
         assert!(
             sql.contains(
-                "spql.agg.approx_quantile(period_ns, 0.5) AS period_ns FROM f GROUP BY part"
+                "approx_percentile_cont(period_ns, 0.5) AS period_ns FROM f GROUP BY part"
             ),
             "{sql}"
         );
@@ -367,7 +376,12 @@ mod tests {
             "{sql}"
         );
         assert!(
-            sql.contains("WHERE missing / expected > 0.01 GROUP BY part"),
+            sql.contains("named_struct('episode_id', episode_id, 'gap_ns', worst_gap_ns, 'at', worst_at) AS longest FROM g WHERE gap_rank = 1"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("array_agg(named_struct('episode_id', episode_id, 'share', missing / expected, 'at', worst_at)) AS flagged \
+                 FROM m WHERE missing / expected > 0.01 GROUP BY part"),
             "{sql}"
         );
         assert!(
@@ -396,7 +410,7 @@ mod tests {
         assert!(statement.contains("'/wrist-camera' AS part"));
         assert!(!statement.contains("/joints"));
         // Late frames are judged against each episode's own interval.
-        assert!(statement.contains("approx_quantile(gap, 0.5) OVER (PARTITION BY id)"));
+        assert!(statement.contains("approx_percentile_cont(gap, 0.5) OVER (PARTITION BY id)"));
         let no_camera = [TwoArmDataset::stream("/joints", "JointState")];
         assert!(
             CameraFrames::column(CheckedStreams::new(&dataset, &no_camera))

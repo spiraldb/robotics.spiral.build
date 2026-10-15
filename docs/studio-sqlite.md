@@ -156,7 +156,7 @@ Spiral and report their own connection errors.
 Run the storage and backend tests with the configured local ADBC driver:
 
 ```sh
-nix develop .#local-driver --command cargo test \
+nix develop --command cargo test \
   -p spiral-robotics-storage -p spiral-robotics-backend --lib --locked
 ```
 

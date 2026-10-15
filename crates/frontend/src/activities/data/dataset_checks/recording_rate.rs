@@ -10,6 +10,7 @@ use super::stream_reads::CheckedStreams;
 use dioxus::prelude::*;
 use serde::Deserialize;
 use spiral_robotics_common::datasets::{DatasetTopic, EpisodeId};
+use spiral_robotics_common::sql::SqlStruct;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct RecordingRate {
@@ -98,12 +99,16 @@ impl RecordingRate {
         format!(
             "WITH r AS (SELECT episode_id, part, (CAST(messages AS DOUBLE) - 1) / ((CAST(last_ns AS DOUBLE) - CAST(first_ns AS DOUBLE)) / 1e9) AS hz \
                FROM {parts} p WHERE last_ns > first_ns), \
-             t AS (SELECT part, spql.agg.approx_quantile(hz, 0.5) AS typical FROM r GROUP BY part), \
+             t AS (SELECT part, approx_percentile_cont(hz, 0.5) AS typical FROM r GROUP BY part), \
              d AS (SELECT r.part AS part, r.episode_id AS episode_id, r.hz AS hz FROM r JOIN t ON t.part = r.part \
                WHERE abs(r.hz / t.typical - 1) > {departure}) \
-             SELECT t.part AS part, t.typical AS typical, spql.list.collect(STRUCT_PACK(episode_id := d.episode_id, hz := d.hz)) AS departures \
+             SELECT t.part AS part, t.typical AS typical, {departures} AS departures \
              FROM t LEFT JOIN d ON d.part = t.part GROUP BY t.part, t.typical",
             departure = Self::DEPARTURE,
+            departures = SqlStruct::new()
+                .field("episode_id", "d.episode_id")
+                .field("hz", "d.hz")
+                .collected(),
         )
     }
 
@@ -224,11 +229,17 @@ mod tests {
             "{sql}"
         );
         assert!(
-            sql.contains("spql.agg.approx_quantile(hz, 0.5) AS typical"),
+            sql.contains("approx_percentile_cont(hz, 0.5) AS typical"),
             "{sql}"
         );
         assert!(
             sql.contains("WHERE abs(r.hz / t.typical - 1) > 0.1"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                "array_agg(named_struct('episode_id', d.episode_id, 'hz', d.hz)) AS departures"
+            ),
             "{sql}"
         );
         assert!(

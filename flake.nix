@@ -83,53 +83,69 @@
           linuxBuildInputs = lib.optionals hostPlatform.isLinux [
             pkgs.v4l-utils
           ];
-          # Pin the official standalone release and its archive checksums here.
-          # Rust builds never compile the embedded engine.
-          adbcVersion = "0.16.48";
-          adbcArchiveHashes = {
-            aarch64-apple-darwin = "845c233f43ae1c630939ebf6ae33e749accd5df9d1a4d06ba3df7013e00e4f4e";
-            aarch64-unknown-linux-gnu = "0de1f71d45d449eed97980fa98926aae760bd63f62c463fced81d2fff19c8551";
-            x86_64-unknown-linux-gnu = "a9c0574865054cf2b186cbb9cabf09b97b50897c38d6d9c3530ef9657dc84831";
+          # Spiral's data-plane runtime, the library spiral-sdk loads: built
+          # from the SpiralDB commit Cargo.toml pins the SDK at, with that
+          # repository's own toolchain and Cargo configuration. Its private
+          # source is fetched with the caller's git credentials.
+          spiralRev = (lib.importTOML ./Cargo.toml).workspace.dependencies.spiral-sdk.rev;
+          spiralSource = builtins.fetchGit {
+            url = "https://github.com/spiraldb/spiraldb.git";
+            rev = spiralRev;
+            allRefs = true;
           };
-          adbcTarget =
-            {
-              aarch64-darwin = "aarch64-apple-darwin";
-              aarch64-linux = "aarch64-unknown-linux-gnu";
-              x86_64-linux = "x86_64-unknown-linux-gnu";
-            }
-            .${system};
-          adbcLibrary = "libadbc_driver_spiraldb${hostPlatform.extensions.sharedLibrary}";
-          # The driver loads the video runtime from its own directory.
-          videoRuntimeLibrary = "libspiral_video_runtime${hostPlatform.extensions.sharedLibrary}";
-          # The archive leaves out the FFmpeg 9 libraries the video runtime
-          # links. Headless is the smallest nixpkgs build that has them.
-          ffmpegLibraries = lib.getLib pkgs.ffmpeg_9-headless;
-          spiralAdbc = pkgs.stdenvNoCC.mkDerivation {
-            pname = "spiral-adbc";
-            version = adbcVersion;
-            src = pkgs.fetchurl {
-              url = "https://downloads.spiraldb.com/adbc/${adbcVersion}/adbc-driver-spiraldb-${adbcVersion}-${adbcTarget}.tar.gz";
-              sha256 = adbcArchiveHashes.${adbcTarget};
+          spiralToolchain = pkgs.rust-bin.fromRustupToolchainFile "${spiralSource}/rust-toolchain.toml";
+          spiralRustPlatform = pkgs.makeRustPlatform {
+            cargo = spiralToolchain;
+            rustc = spiralToolchain;
+          };
+          runtimeLibrary = "libspiral_data_plane_runtime${hostPlatform.extensions.sharedLibrary}";
+          spiralRuntime = spiralRustPlatform.buildRustPackage {
+            pname = "spiral-data-plane-runtime";
+            version = builtins.substring 0 9 spiralRev;
+            src = spiralSource;
+            cargoLock = {
+              lockFile = "${spiralSource}/Cargo.lock";
+              allowBuiltinFetchGit = true;
             };
-            nativeBuildInputs =
-              lib.optionals hostPlatform.isLinux [ pkgs.autoPatchelfHook ]
-              ++ lib.optionals hostPlatform.isDarwin [ pkgs.cctools ];
-            buildInputs = lib.optionals hostPlatform.isLinux [
-              pkgs.stdenv.cc.cc.lib
-              ffmpegLibraries
+            cargoBuildFlags = [
+              "--package"
+              "spiral-data-plane-runtime"
+              "--lib"
+              # OpenSSL is compiled into the library, so it needs none at run time.
+              "--features"
+              "bundled-openssl"
             ];
-            dontBuild = true;
-            # On Linux, autoPatchelfHook points the runtime at FFmpeg. On macOS
-            # the runtime names FFmpeg by @rpath and carries no rpath itself.
+            nativeBuildInputs = [
+              pkgs.protobuf
+              pkgs.pkg-config
+              pkgs.perl
+              pkgs.cmake
+            ]
+            ++ nativeBuildInputs;
+            LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
+            # The `vortex` crate's docs include its workspace README, which
+            # vendoring a Git crate leaves behind.
+            preBuild =
+              let
+                vortexRev = lib.head (
+                  lib.concatMap (
+                    package: lib.optional (package.name == "vortex") (lib.last (lib.splitString "#" package.source))
+                  ) (lib.importTOML "${spiralSource}/Cargo.lock").package
+                );
+                vortexSource = builtins.fetchGit {
+                  url = "https://github.com/vortex-data/vortex.git";
+                  rev = vortexRev;
+                  allRefs = true;
+                };
+              in
+              ''
+                cp ${vortexSource}/README.md "$NIX_BUILD_TOP/cargo-vendor-dir/vortex-0.1.0/README.md"
+              '';
+            doCheck = false;
             installPhase = ''
               runHook preInstall
               mkdir -p "$out/lib"
-              cp ${adbcLibrary} ${videoRuntimeLibrary} "$out/lib/"
-            ''
-            + lib.optionalString hostPlatform.isDarwin ''
-              install_name_tool -add_rpath ${ffmpegLibraries}/lib "$out/lib/${videoRuntimeLibrary}"
-            ''
-            + ''
+              cp "$(find target -path '*/release/${runtimeLibrary}' | head -n 1)" "$out/lib/"
               runHook postInstall
             '';
           };
@@ -146,9 +162,13 @@
           };
           cargoDeps = rustPlatform.importCargoLock {
             lockFile = ./Cargo.lock;
+            # Spiral's SDK and Vortex come from Git; SpiralDB's private
+            # repository through the caller's git credentials.
+            allowBuiltinFetchGit = true;
             # The patched Dioxus checkout (Cargo.toml's [patch.crates-io]),
             # one hash for every crate it provides.
-            outputHashes."const-serialize-0.8.0-alpha.0" = "sha256-1YJZcijcAXEQ//NxevLvOUfDu18jdzwOGnBztouwisE=";
+            outputHashes."const-serialize-0.8.0-alpha.0" =
+              "sha256-1YJZcijcAXEQ//NxevLvOUfDu18jdzwOGnBztouwisE=";
           };
           studioServer = rustPlatform.buildRustPackage {
             pname = "spiral-robotics-backend";
@@ -194,7 +214,7 @@
           hostedImage = pkgs.dockerTools.streamLayeredImage {
             name = "spiral-robotics-studio";
             contents = [
-              # The driver verifies TLS against the system's certificates.
+              # The Spiral SDK verifies TLS against the system's certificates.
               pkgs.dockerTools.caCertificates
               # Spiral's engine resolves named time zones, `UTC` included,
               # through a time zone database (a Location's `last_modified`).
@@ -230,7 +250,7 @@
                 "WARP_PROGRESS_URL=https://spiral-dev--warp-progress-warpprogress-web.modal.run"
                 "OBJECT_TRACKING_URL=https://spiral-dev--spiral-robotics-object-tracking-objecttracking-web.modal.run"
                 "TRAINING_SERVICE_URL=https://spiral-dev--spiral-robotics-training-control.modal.run"
-                "SPIRALDB_ADBC_DRIVER=${spiralAdbc}/lib/${adbcLibrary}"
+                "SPIRAL_DATA_PLANE_LIBRARY=${spiralRuntime}/lib/${runtimeLibrary}"
                 # LeRobot imports encode every camera again as H.264.
                 "SPIRAL_ROBOTICS_FFMPEG=${lib.getExe' pkgs.ffmpeg_9-headless "ffmpeg"}"
                 "DIOXUS_PUBLIC_PATH=${studioWeb}"
@@ -241,7 +261,7 @@
               StopSignal = "SIGINT";
               Labels = {
                 "org.opencontainers.image.revision" = self.rev or self.dirtyRev;
-                "com.spiraldb.adbc.version" = adbcVersion;
+                "com.spiraldb.sdk.rev" = spiralRev;
               };
             };
           };
@@ -260,7 +280,6 @@
             ++ linuxBuildInputs
             ++ browserTestInputs;
             NO_DOWNLOADS = "1";
-            SPIRALDB_ADBC_DRIVER = "${spiralAdbc}/lib/${adbcLibrary}";
             LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
             GECKODRIVER = lib.getExe pkgs.geckodriver;
             # Select the pinned browser instead of a host Firefox installation.
@@ -295,6 +314,8 @@
             };
           developmentShell = sharedShell // {
             SPIRAL_ROBOTICS_CLIENT_ID = "client_sQWdRwk7ZTBd";
+            # Studio reaches Spiral through this runtime; tests never load it.
+            SPIRAL_DATA_PLANE_LIBRARY = "${spiralRuntime}/lib/${runtimeLibrary}";
             packages = sharedShell.packages ++ [ pkgs.ffmpeg ] ++ webBuildInputs;
             # Studio's provider keys for local runs come from the checkout's
             # untracked .env.local, in the variables the hosted image is given.
@@ -312,7 +333,7 @@
         {
           formatter = pkgs.nixfmt;
           packages = {
-            spiral-adbc = spiralAdbc;
+            spiral-runtime = spiralRuntime;
             studio-server = studioServer;
             studio-web = studioWeb;
           }
@@ -323,26 +344,6 @@
           devShells.default = pkgs.mkShell developmentShell;
           devShells.ci = pkgs.mkShell ciShell;
 
-          # Explicit validation environment until the public release includes
-          # the upstream persistence fixes. No hand-written exports are needed.
-          devShells.local-driver = pkgs.mkShell (
-            developmentShell
-            // {
-              SPIRALDB_ADBC_DRIVER = "";
-              shellHook = developmentShell.shellHook + ''
-                if ! studio_root=$(git rev-parse --show-toplevel); then
-                  echo "Enter the local-driver shell from the Studio checkout." >&2
-                  return 1
-                fi
-                export SPIRALDB_ADBC_DRIVER="$studio_root/target/release/${adbcLibrary}"
-                unset studio_root
-                if [ ! -f "$SPIRALDB_ADBC_DRIVER" ]; then
-                  echo "Build the upstream ADBC library first; expected $SPIRALDB_ADBC_DRIVER" >&2
-                  return 1
-                fi
-              '';
-            }
-          );
         }
       );
 }

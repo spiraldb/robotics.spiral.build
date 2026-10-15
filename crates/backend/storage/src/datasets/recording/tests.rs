@@ -2,7 +2,7 @@ use super::*;
 use crate::StudioStore;
 use crate::datasets::TestJournal;
 use crate::datasets::fixtures::RolloutFixture;
-use crate::db::{ArrowColumns, UnquotedMemory};
+use crate::db::{ArrowColumns, MemoryDatabase};
 use spiral_robotics_common::datasets::{
     DatasetTopic, EpisodeId, EpisodeSelection, EpisodeTopicRequest, MessageCursor, MessageRead,
     MessageWindow,
@@ -31,7 +31,7 @@ struct RecordingProject {
 impl RecordingProject {
     async fn new() -> Self {
         let journal = TestJournal::start().await;
-        let (store, _) = UnquotedMemory::store_with_catalog(journal.endpoint()).await;
+        let (store, _) = MemoryDatabase::store_with_catalog(journal.endpoint()).await;
         let store = Arc::new(store);
         let storage = StorageManager::new(
             store.clone(),

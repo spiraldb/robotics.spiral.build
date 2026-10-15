@@ -1,6 +1,7 @@
 //! Numbers one recorded stream holds, read as columns: how a dataset check
 //! measures an arm's joints and how training reads its state and action.
 use super::RecordedValues;
+use crate::sql::{SqlList, SqlLiteral};
 
 /// Numbers of one stream as columns: `{prefix}0`, `{prefix}1`, … per
 /// message, beside the episode `id` and `log_time`.
@@ -26,60 +27,41 @@ impl<'a> ValueColumns<'a> {
             .map(|position| format!("{}{position}", self.prefix))
             .collect()
     }
-    /// The column expressions picking each number from `value`, as the
-    /// statement `read` answers it. A list item's element is a field of a
-    /// picked column, which Spiral reads only from a named column, so an
-    /// element path takes a second step.
-    pub fn ctes(&self, name: &str, read: &str) -> Vec<String> {
+    /// The entry `name` picking each number from `value`, one column each,
+    /// as the statement `read` answers it: a member or a field of `value`, or
+    /// an item of a list there, and the item's element when it is a struct.
+    pub fn cte(&self, name: &str, read: &str) -> String {
         let field = Self::path("value", self.values.field());
-        let names = self.names();
-        if !self.values.members().is_empty() {
-            let members = self
-                .values
+        let picked = if !self.values.members().is_empty() {
+            self.values
                 .members()
                 .iter()
-                .zip(&names)
-                .map(|(member, column)| {
+                .map(|member| {
                     let path = self.values.field().iter().chain([member]).cloned();
-                    format!(
-                        "{} AS {column}",
-                        Self::path("value", &path.collect::<Vec<_>>())
-                    )
+                    Self::path("value", &path.collect::<Vec<_>>())
                 })
                 .collect::<Vec<_>>()
-                .join(", ");
-            return vec![format!(
-                "{name} AS (SELECT id, log_time, {members} FROM {read})"
-            )];
-        }
-        if self.values.indices().is_empty() {
-            return vec![format!(
-                "{name} AS (SELECT id, log_time, {field} AS {} FROM {read})",
-                names[0]
-            )];
-        }
-        let picked = self
-            .values
-            .indices()
+        } else if self.values.indices().is_empty() {
+            vec![field]
+        } else {
+            self.values
+                .indices()
+                .iter()
+                .map(|index| {
+                    let item = SqlList::item_at(&field, *index);
+                    self.values.element().iter().fold(item, |picked, name| {
+                        format!("get_field({picked}, {})", SqlLiteral::text(name))
+                    })
+                })
+                .collect()
+        };
+        let columns = picked
             .iter()
-            .zip(&names)
-            .map(|(index, column)| format!("spql.list.get({field}, {index}) AS {column}"))
+            .zip(self.names())
+            .map(|(picked, column)| format!("{picked} AS {column}"))
             .collect::<Vec<_>>()
             .join(", ");
-        if self.values.element().is_empty() {
-            return vec![format!(
-                "{name} AS (SELECT id, log_time, {picked} FROM {read})"
-            )];
-        }
-        let elements = names
-            .iter()
-            .map(|column| format!("{} AS {column}", Self::path(column, self.values.element())))
-            .collect::<Vec<_>>()
-            .join(", ");
-        vec![
-            format!("{name}_items AS (SELECT id, log_time, {picked} FROM {read})"),
-            format!("{name} AS (SELECT id, log_time, {elements} FROM {name}_items)"),
-        ]
+        format!("{name} AS (SELECT id, log_time, {columns} FROM {read})")
     }
     /// `root` then each of `names`, quoted, as one field path.
     fn path(root: &str, names: &[String]) -> String {
@@ -101,34 +83,28 @@ mod tests {
     }
 
     #[test]
-    fn list_items_with_an_element_take_a_named_column_first() {
+    fn list_items_are_picked_by_position_and_their_element_by_name() {
         let wrapped = values(json!({
             "topic": "/joints", "schema": "JointSample", "field": ["state_position", "values"],
             "element": ["value"], "indices": [0, 4]
         }));
-        let ctes = ValueColumns::new(&wrapped, "q").ctes("follower", "READ");
         assert_eq!(
-            ctes,
-            [
-                "follower_items AS (SELECT id, log_time, spql.list.get(\"value\".\"state_position\".\"values\", 0) AS q0, spql.list.get(\"value\".\"state_position\".\"values\", 4) AS q1 FROM READ)",
-                "follower AS (SELECT id, log_time, \"q0\".\"value\" AS q0, \"q1\".\"value\" AS q1 FROM follower_items)",
-            ]
+            ValueColumns::new(&wrapped, "q").cte("follower", "READ"),
+            "follower AS (SELECT id, log_time, get_field(array_element(\"value\".\"state_position\".\"values\", 1), 'value') AS q0, get_field(array_element(\"value\".\"state_position\".\"values\", 5), 'value') AS q1 FROM READ)"
         );
         let plain = values(json!({
             "topic": "/arm", "schema": "RobotState", "field": ["position"], "element": [], "indices": [2]
         }));
         assert_eq!(
-            ValueColumns::new(&plain, "a").ctes("arm", "READ"),
-            [
-                "arm AS (SELECT id, log_time, spql.list.get(\"value\".\"position\", 2) AS a0 FROM READ)"
-            ]
+            ValueColumns::new(&plain, "a").cte("arm", "READ"),
+            "arm AS (SELECT id, log_time, array_element(\"value\".\"position\", 3) AS a0 FROM READ)"
         );
         let scalar = values(json!({
             "topic": "/grip", "schema": "Grip", "field": ["opening"], "element": [], "indices": []
         }));
         assert_eq!(
-            ValueColumns::new(&scalar, "q").ctes("grip", "READ"),
-            ["grip AS (SELECT id, log_time, \"value\".\"opening\" AS q0 FROM READ)"]
+            ValueColumns::new(&scalar, "q").cte("grip", "READ"),
+            "grip AS (SELECT id, log_time, \"value\".\"opening\" AS q0 FROM READ)"
         );
     }
 
@@ -141,10 +117,8 @@ mod tests {
         let columns = ValueColumns::new(&named, "q");
         assert_eq!(columns.count(), 2);
         assert_eq!(
-            columns.ctes("state", "READ"),
-            [
-                "state AS (SELECT id, log_time, \"value\".\"shoulder_pan.pos\" AS q0, \"value\".\"left_joint1\" AS q1 FROM READ)"
-            ]
+            columns.cte("state", "READ"),
+            "state AS (SELECT id, log_time, \"value\".\"shoulder_pan.pos\" AS q0, \"value\".\"left_joint1\" AS q1 FROM READ)"
         );
     }
 }

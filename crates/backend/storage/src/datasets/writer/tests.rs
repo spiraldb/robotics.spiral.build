@@ -1,6 +1,6 @@
 use super::*;
 use crate::datasets::fixtures::RolloutFixture;
-use crate::db::{ArrowColumns, UnquotedMemory};
+use crate::db::{ArrowColumns, MemoryDatabase};
 use std::sync::atomic::Ordering;
 
 /// Rollout recording `episode`: twenty joint samples of one arm, with a
@@ -31,7 +31,7 @@ async fn count(store: &ProjectStore, sql: String) -> u64 {
 
 #[tokio::test]
 async fn an_import_commits_32_episodes_a_transaction() {
-    let (store, commits) = UnquotedMemory::store().await;
+    let (store, commits) = MemoryDatabase::store().await;
     let dataset = DatasetSelection::new("demo").unwrap();
     let mut import = DatasetImport::new(&store, &dataset, DatasetFormat::Mcap);
     let episodes = (0..70)
@@ -50,7 +50,7 @@ async fn an_import_commits_32_episodes_a_transaction() {
             count(&store, format!("SELECT count(*) AS rows FROM {table}")).await,
             70,
             "{}",
-            table.target()
+            table.name()
         );
     }
     let mut connection = store.connect().await.unwrap();
@@ -103,7 +103,7 @@ async fn an_import_commits_32_episodes_a_transaction() {
 
 #[tokio::test]
 async fn an_episode_rows_hold_its_facts_and_streams() {
-    let (store, _) = UnquotedMemory::store().await;
+    let (store, _) = MemoryDatabase::store().await;
     let dataset = DatasetSelection::new("demo").unwrap();
     let mut import = DatasetImport::new(&store, &dataset, DatasetFormat::Mcap);
     import
@@ -116,7 +116,7 @@ async fn an_episode_rows_hold_its_facts_and_streams() {
         .unwrap()
         .read_batches(&format!(
             "SELECT id, key, source_uri, sha256, message_count, channel_count, message_start_time, \
-             duration_ns, spql.list.len(streams) AS stream_count FROM {} ORDER BY key",
+             duration_ns, cardinality(streams) AS stream_count FROM {} ORDER BY key",
             dataset.episodes()
         ))
         .await
@@ -160,7 +160,7 @@ async fn an_episode_rows_hold_its_facts_and_streams() {
 
 #[tokio::test]
 async fn a_write_takes_at_most_32_episodes_of_its_format() {
-    let (store, _) = UnquotedMemory::store().await;
+    let (store, _) = MemoryDatabase::store().await;
     let dataset = DatasetSelection::new("demo").unwrap();
     let mut connection = store.connect_exclusive().await.unwrap();
     let mut write = DatasetWrite::create(&mut connection, &dataset, DatasetFormat::LeRobot)

@@ -34,6 +34,18 @@ jobs:
 
       - uses: DeterminateSystems/determinate-nix-action@v3
 
+      # Spiral's SDK and data-plane runtime come from the private SpiralDB
+      # repository; cargo and Nix fetch it with git over this read-only key.
+      - name: Reach SpiralDB's repository
+        env:
+          SPIRALDB_DEPLOY_KEY: ${{ secrets.SPIRALDB_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          install -m 600 /dev/stdin ~/.ssh/spiraldb <<< "$SPIRALDB_DEPLOY_KEY"
+          printf 'Host github.com\n  IdentityFile ~/.ssh/spiraldb\n  IdentitiesOnly yes\n' >> ~/.ssh/config
+          git config --global url."git@github.com:spiraldb/spiraldb.git".insteadOf "https://github.com/spiraldb/spiraldb.git"
+
       # The result is a script that streams the image as a Docker archive.
       - name: Build the image
         run: nix build .#hosted-image --out-link hosted-image

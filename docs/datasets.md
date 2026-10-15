@@ -1,12 +1,10 @@
 # Datasets and recordings
 
-A dataset is a set of ordinary Spiral tables under one namespace,
-`datasets.<id>`, that Studio writes itself. Studio decodes every source file
+A dataset is a set of ordinary Spiral tables whose names start
+`datasets.<id>.`, that Studio writes itself. Studio decodes every source file
 when it imports it and stores each topic as rows, so reads never reopen a
 source file and never call a Spiral producer. Spiral's own Dataset resource
-kind, its producers (`spql.mcap.dataset`, `spql.lerobot.dataset`) and its
-reader functions (`spql.mcap.episodes`, `spql.mcap.read_topic`,
-`spql.mcap.read_video`, `spql.mcap.channels`) are not used.
+kind and its MCAP and LeRobot producers and readers are not used.
 
 A dataset has one of two formats, fixed when it is created:
 
@@ -25,8 +23,11 @@ Hugging Face LeRobot v3 repository @ commit → LeRobot import (FFmpeg) ──�
 ## Catalog layout
 
 `<id>` is the dataset's name: 1–96 letters, numbers, `_` or `-`. Every
-relation is a plain table; `datasets`, `datasets.<id>`, and its `messages` and
-`answers` are namespace prefixes only.
+table sits at the project's root under one name whose parts are joined by dots
+(no part holds one), since Spiral's SDK creates tables at the root only;
+statements quote the whole name as one identifier, `"datasets.<id>.episodes"`.
+Spiral's catalog itself does not group them: Studio finds a dataset's tables
+by their names.
 
 | Table | One row per | Holds |
 | --- | --- | --- |

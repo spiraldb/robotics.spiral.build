@@ -1,8 +1,8 @@
 //! The signed-in Spiral user's access token, as Studio's Spiral clients read it.
 //!
 //! The backend's account signs the user in and keeps the token fresh; every
-//! database and catalog client of every project reads the same current value,
-//! and open databases receive each replacement.
+//! database and catalog client of every project reads the same current value
+//! for each request it makes.
 
 use tokio::sync::watch;
 
@@ -67,12 +67,6 @@ impl SpiralAccess {
             .clone()
             .ok_or_else(|| "Sign in to Spiral in Settings → SpiralDB.".to_owned())
     }
-
-    /// Wait for the next replacement token. `None` once the publisher is gone.
-    pub(crate) async fn replaced(&mut self) -> Option<Option<String>> {
-        self.0.changed().await.ok()?;
-        Some(self.0.borrow_and_update().clone())
-    }
 }
 
 impl std::fmt::Debug for SpiralAccess {
@@ -88,19 +82,18 @@ impl std::fmt::Debug for SpiralAccess {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn readers_see_replacements_and_sign_out() {
+    #[test]
+    fn readers_see_replacements_and_sign_out() {
         let (publisher, access) = SpiralAccessPublisher::new();
         assert!(access.token().is_err());
-        let mut follower = access.clone();
+        let reader = access.clone();
         publisher.publish(Some("first".to_owned()));
-        assert_eq!(follower.replaced().await, Some(Some("first".to_owned())));
-        assert_eq!(access.token().unwrap(), "first");
+        assert_eq!(reader.token().unwrap(), "first");
         publisher.publish(None);
-        assert_eq!(follower.replaced().await, Some(None));
-        assert!(access.token().is_err());
+        assert!(reader.token().is_err());
+        publisher.publish(Some("second".to_owned()));
         drop(publisher);
-        assert_eq!(follower.replaced().await, None);
-        assert!(!format!("{access:?}").contains("first"));
+        assert_eq!(access.token().unwrap(), "second", "the last token stays");
+        assert!(!format!("{access:?}").contains("second"));
     }
 }

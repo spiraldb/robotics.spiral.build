@@ -13,7 +13,7 @@ use dioxus::prelude::*;
 use serde::Deserialize;
 use spiral_robotics_common::datasets::ValueColumns;
 use spiral_robotics_common::datasets::{ArmRoles, DatasetRobot, EpisodeId};
-use spiral_robotics_common::sql::SqlLiteral;
+use spiral_robotics_common::sql::{SqlList, SqlLiteral, SqlStruct};
 use spiral_robotics_viewport::RobotModel;
 use std::collections::HashMap;
 
@@ -136,19 +136,24 @@ impl JointLimits {
             "WITH p AS {parts}, \
              limits AS ({limits}), \
              reach AS (SELECT p.part AS part, p.episode_id AS episode_id, limits.position AS position, limits.lower AS lower, limits.upper AS upper, \
-               CAST(spql.list.get(p.lowest, limits.position) AS DOUBLE) AS low, CAST(spql.list.get(p.highest, limits.position) AS DOUBLE) AS high \
+               CAST({low} AS DOUBLE) AS low, CAST({high} AS DOUBLE) AS high \
                FROM p JOIN limits ON limits.part = p.part), \
              lowest AS (SELECT part, position, lower, low, episode_id, ROW_NUMBER() OVER (PARTITION BY part, position ORDER BY low, episode_id) AS rank FROM reach WHERE low IS NOT NULL), \
              highest AS (SELECT part, position, upper, high, episode_id, ROW_NUMBER() OVER (PARTITION BY part, position ORDER BY high DESC, episode_id) AS rank FROM reach WHERE high IS NOT NULL), \
              beyond AS (SELECT part, position, false AS above, low AS reached, lower AS bound, episode_id FROM lowest WHERE rank = 1 AND low < lower \
                UNION ALL SELECT part, position, true AS above, high AS reached, upper AS bound, episode_id FROM highest WHERE rank = 1 AND high > upper), \
-             past AS (SELECT part, spql.list.collect(STRUCT_PACK(position := position, above := above, reached := reached, bound := bound, episode_id := episode_id)) AS past \
+             past AS (SELECT part, {past} AS past \
                FROM beyond GROUP BY part), \
-             near AS (SELECT part, spql.list.collect(STRUCT_PACK(episode_id := episode_id, near_s := near_s, longest_at := longest_at)) AS near \
+             near AS (SELECT part, {near} AS near \
                FROM p WHERE near_s > 0 GROUP BY part), \
              arms AS (SELECT DISTINCT part FROM limits) \
              SELECT arms.part AS part, near.near AS near, past.past AS past \
-             FROM arms LEFT JOIN near ON near.part = arms.part LEFT JOIN past ON past.part = arms.part"
+             FROM arms LEFT JOIN near ON near.part = arms.part LEFT JOIN past ON past.part = arms.part",
+            low = SqlList::item("p.lowest", "limits.position"),
+            high = SqlList::item("p.highest", "limits.position"),
+            past = SqlStruct::of_columns(["position", "above", "reached", "bound", "episode_id"])
+                .collected(),
+            near = SqlStruct::of_columns(["episode_id", "near_s", "longest_at"]).collected(),
         ))
     }
 
@@ -214,7 +219,7 @@ impl JointLimits {
         limited: &[LimitedJoint],
     ) -> Result<String, String> {
         let columns = ValueColumns::new(arm.state(), "q");
-        let mut ctes = columns.ctes("s", &streams.read_values(arm.state())?);
+        let mut ctes = vec![columns.cte("s", &streams.read_values(arm.state())?)];
         ctes.push(columns.motion_cte("s"));
         let near = limited
             .iter()
@@ -252,7 +257,7 @@ impl JointLimits {
                 .join(", ")
         };
         Ok(format!(
-            "WITH {} SELECT ep.id AS id, ep.near_s AS near_s, {} AS longest_at, [{}] AS lowest, [{}] AS highest \
+            "WITH {} SELECT ep.id AS id, ep.near_s AS near_s, {} AS longest_at, make_array({}) AS lowest, make_array({}) AS highest \
              FROM ep JOIN {} e ON e.id = ep.id LEFT JOIN longest ON longest.id = ep.id AND longest.rank = 1",
             ctes.join(", "),
             CheckedStreams::since_start("longest.start"),
@@ -452,9 +457,9 @@ mod tests {
         ));
         assert!(!statement.contains("'right'"));
         assert!(statement.contains("CASE WHEN q1 < 0.1 OR q1 > 3.9 THEN 1 ELSE 0 END AS near"));
-        assert!(
-            statement.contains("[ep.low0, ep.low1, ep.low2, ep.low3, ep.low4, ep.low5] AS lowest")
-        );
+        assert!(statement.contains(
+            "make_array(ep.low0, ep.low1, ep.low2, ep.low3, ep.low4, ep.low5) AS lowest"
+        ));
         assert!(
             JointLimits::column(dataset.streams(), dataset.arms(), None)
                 .unwrap()
@@ -478,7 +483,7 @@ mod tests {
             "WITH p AS (parts), limits AS (SELECT 'left' AS part, 1 AS position, CAST(0 AS DOUBLE) AS lower, CAST(4 AS DOUBLE) AS upper), "
         ));
         assert!(sql.contains(
-            "CAST(spql.list.get(p.lowest, limits.position) AS DOUBLE) AS low, CAST(spql.list.get(p.highest, limits.position) AS DOUBLE) AS high"
+            "CAST(array_element(p.lowest, limits.position + 1) AS DOUBLE) AS low, CAST(array_element(p.highest, limits.position + 1) AS DOUBLE) AS high"
         ));
         assert!(sql.contains("FROM lowest WHERE rank = 1 AND low < lower"));
         assert!(sql.contains("FROM highest WHERE rank = 1 AND high > upper"));

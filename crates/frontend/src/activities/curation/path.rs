@@ -39,6 +39,7 @@ use super::select::SelectStep;
 use crate::activities::episode::EpisodeListing;
 use spiral_robotics_common::curation::{AnswerColumn, AnswerSource, ColumnFill, FillEpisodes};
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
+use spiral_robotics_common::sql::SqlStruct;
 
 /// Which reading of a path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -90,7 +91,7 @@ impl ModelStep<'_> {
 /// entry's element of its list, and which entries it holds when not all.
 struct FoldedColumn {
     column: TableColumn,
-    element: String,
+    element: SqlStruct,
     only: Option<String>,
 }
 
@@ -119,7 +120,7 @@ impl ModelEntries {
     pub(super) fn folding(
         mut self,
         column: TableColumn,
-        (element, only): (String, Option<String>),
+        (element, only): (SqlStruct, Option<String>),
     ) -> Self {
         self.folded.push(FoldedColumn {
             column,
@@ -129,8 +130,7 @@ impl ModelEntries {
         self
     }
     /// The entry folding every column, one row per episode: each list
-    /// collected over the entries in their order, which `spql.list.collect`
-    /// keeps (Spiral has no ordered `ARRAY_AGG`).
+    /// collected over the entries in their order.
     fn fold(&self, step: &ModelStep<'_>) -> String {
         let columns = self
             .folded
@@ -142,18 +142,17 @@ impl ModelEntries {
                     .map(|only| format!(" FILTER (WHERE {only})"))
                     .unwrap_or_default();
                 format!(
-                    "spql.list.collect({}){only} AS {}",
-                    folded.element,
+                    "{}{only} AS {}",
+                    folded.element.collected_by(self.order),
                     folded.column.name()
                 )
             })
             .collect::<Vec<_>>()
             .join(", ");
         format!(
-            "{} AS (SELECT episode_id, {columns} FROM (SELECT * FROM {} ORDER BY episode_id, {}) ordered GROUP BY episode_id)",
+            "{} AS (SELECT episode_id, {columns} FROM {} GROUP BY episode_id)",
             step.name(),
             step.entries(),
-            self.order
         )
     }
 }

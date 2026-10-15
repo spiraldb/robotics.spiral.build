@@ -25,7 +25,7 @@ use spiral_robotics_common::relations::{
 use super::database::{DatabaseSession, RecordBatchStream, SqlStatement};
 use super::project_store::{ProjectConnection, ProjectStore};
 use crate::datasets::EpisodeUuids;
-use spiral_robotics_common::sql::ReadOnlyQueryMode;
+use spiral_robotics_common::sql::{ListItems, ReadOnlyQueryMode};
 
 const MAX_QUERY_ROWS: usize = 1_000;
 const MAX_QUERY_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -312,12 +312,17 @@ impl<'a> ProjectQueries<'a> {
     /// range of its `kept` list, in episode and time order, leaving out
     /// empty ones.
     pub async fn kept_intervals(&self, view: &str) -> Result<Vec<KeptInterval>, String> {
+        let ranges = ListItems::of(
+            format!("({})", view.trim().trim_end_matches(';')),
+            "kept",
+            "k",
+        )
+        .beside(["episode_id"]);
         let sql = format!(
             "SELECT episode_id, start_ns, end_ns FROM (\
-             SELECT v.episode_id, CAST(k.start_ns AS BIGINT) AS start_ns, CAST(k.end_ns AS BIGINT) AS end_ns \
-             FROM ({}) v CROSS JOIN LATERAL UNNEST(v.kept) k) kept \
-             WHERE end_ns > start_ns ORDER BY episode_id, start_ns",
-            view.trim().trim_end_matches(';')
+             SELECT u.episode_id, CAST(u.k.start_ns AS BIGINT) AS start_ns, CAST(u.k.end_ns AS BIGINT) AS end_ns \
+             FROM {ranges} u) kept \
+             WHERE end_ns > start_ns ORDER BY episode_id, start_ns"
         );
         SpiralSql::ensure_read_only(&sql)?;
         let batches = self

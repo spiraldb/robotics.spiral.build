@@ -8,7 +8,7 @@ use tokio::task::JoinHandle;
 
 pub(crate) struct TestJournal {
     endpoint: String,
-    tables: Arc<Mutex<Vec<Vec<String>>>>,
+    tables: Arc<Mutex<Vec<String>>>,
     task: JoinHandle<()>,
 }
 
@@ -34,10 +34,10 @@ impl TestJournal {
 
     /// Name `tables` from now on, and no others.
     pub(crate) fn name(&self, tables: &[DatasetTable]) {
-        *self.tables.lock().unwrap() = tables.iter().map(|table| table.path().to_vec()).collect();
+        *self.tables.lock().unwrap() = tables.iter().map(|table| table.name().to_owned()).collect();
     }
 
-    async fn respond(State(tables): State<Arc<Mutex<Vec<Vec<String>>>>>, uri: Uri) -> Json<Value> {
+    async fn respond(State(tables): State<Arc<Mutex<Vec<String>>>>, uri: Uri) -> Json<Value> {
         if uri.path().ends_with("/branches/main") {
             return Json(json!({"headCommitId": "head"}));
         }
@@ -45,12 +45,11 @@ impl TestJournal {
             .lock()
             .unwrap()
             .iter()
-            .map(|path| {
-                let (name, parent) = path.split_last().unwrap();
+            .map(|name| {
                 json!({
-                    "parent": {"kind": "prefix", "path": parent},
+                    "parent": {"kind": "projectRoot"},
                     "name": name,
-                    "resource": {"descriptor": {"resourceId": path.join("."), "kind": "table"}, "versionId": "v"}
+                    "resource": {"descriptor": {"resourceId": name, "kind": "table"}, "versionId": "v"}
                 })
             })
             .collect::<Vec<_>>();

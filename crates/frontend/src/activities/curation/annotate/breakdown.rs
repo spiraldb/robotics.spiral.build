@@ -20,6 +20,7 @@ use spiral_robotics_common::curation::{
     AnswerColumn, AnswerSource, SampleInterval, SubtaskBreakdown,
 };
 use spiral_robotics_common::datasets::EpisodeTask;
+use spiral_robotics_common::sql::{ListItems, SqlList, SqlStruct};
 
 impl SubtaskAnnotation {
     /// The camera the model watches.
@@ -68,8 +69,7 @@ impl ModelNode for SubtaskAnnotation {
             entries.folding(
                 TableColumn::of_node(step.node(), &step.name(), ColumnMeaning::Subtasks),
                 (
-                    "STRUCT_PACK(description := description, start_ns := start_ns, end_ns := end_ns)"
-                        .to_owned(),
+                    SqlStruct::of_columns(["description", "start_ns", "end_ns"]),
                     None,
                 ),
             )
@@ -120,11 +120,19 @@ impl<'a> SubtaskListing<'a> {
     ) -> ModelEntries {
         let (step, subtasks, origin) = (self.step, self.subtasks, EpisodeRow::ORIGIN);
         let listed = format!("{}_listed", step.name());
+        let mut lists = vec![subtasks.as_str()];
         let judgment = if self.judged.is_empty() {
             String::new()
         } else {
-            format!(", spql.list.get(r.{}, g._) AS judgment", step.column())
+            lists.push(step.column().as_str());
+            format!(
+                ", {} AS judgment",
+                SqlList::item(&format!("g.{}", step.column()), "g.subtask_index")
+            )
         };
+        let positions =
+            ListItems::positions(EpisodeRow::EPISODES, subtasks.as_str(), "subtask_index")
+                .beside(["episode_id", origin].into_iter().chain(lists));
         let judged = self
             .judged
             .iter()
@@ -132,10 +140,9 @@ impl<'a> SubtaskListing<'a> {
             .collect::<String>();
         let entries = vec![
             format!(
-                "{listed} AS (SELECT r.episode_id, r.{origin}, g._ AS subtask_index, \
-                 spql.list.get(r.{subtasks}, g._) AS listed{judgment} FROM {} r \
-                 CROSS JOIN LATERAL spql.range(CAST(spql.list.len(r.{subtasks}) AS BIGINT)) g)",
-                EpisodeRow::EPISODES,
+                "{listed} AS (SELECT g.episode_id, g.{origin}, g.subtask_index, \
+                 {} AS listed{judgment} FROM {positions} g)",
+                SqlList::item(&format!("g.{subtasks}"), "g.subtask_index"),
             ),
             format!(
                 "{} AS (SELECT l.episode_id, l.subtask_index, l.listed.description AS description, \

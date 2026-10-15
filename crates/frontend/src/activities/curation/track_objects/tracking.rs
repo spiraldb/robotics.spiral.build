@@ -13,6 +13,7 @@ use crate::activities::curation::path::{
     ColumnMeaning, EpisodeRow, ModelEntries, ModelNode, ModelStep, PathError, TableColumn,
 };
 use spiral_robotics_common::curation::{AnswerColumn, AnswerSource};
+use spiral_robotics_common::sql::{ListItems, SqlStruct};
 
 /// The released SAM 3.1 checkpoint on the Modal service, and the service
 /// revision whose tracks the answers store. A service that runs another
@@ -73,25 +74,22 @@ impl ModelNode for ObjectTracking {
     /// objects tracked on it. A preview reads only how many it holds; the
     /// boxes are read for the one episode opened.
     fn entries(&self, step: &ModelStep<'_>) -> Result<ModelEntries, PathError> {
+        let pictures = ListItems::of(EpisodeRow::EPISODES, step.column().as_str(), "p")
+            .beside(["episode_id", EpisodeRow::ORIGIN]);
         let entry = format!(
-            "{} AS (SELECT r.episode_id, r.{} + CAST(p.timestamp_ns AS BIGINT) AS timestamp_ns, \
-             p.objects AS objects FROM {} r CROSS JOIN LATERAL UNNEST(r.{}) p)",
+            "{} AS (SELECT u.episode_id, u.{} + CAST(u.p.timestamp_ns AS BIGINT) AS timestamp_ns, \
+             u.p.objects AS objects FROM {pictures} u)",
             step.entries(),
             EpisodeRow::ORIGIN,
-            EpisodeRow::EPISODES,
-            step.column()
         );
         Ok(ModelEntries::new(
             vec![entry],
             "timestamp_ns",
-            "episode_id, timestamp_ns, spql.list.len(objects) AS value".to_owned(),
+            "episode_id, timestamp_ns, cardinality(objects) AS value".to_owned(),
         )
         .folding(
             TableColumn::of_node(step.node(), &step.name(), ColumnMeaning::TrackedObjects),
-            (
-                "STRUCT_PACK(timestamp_ns := timestamp_ns, objects := objects)".to_owned(),
-                None,
-            ),
+            (SqlStruct::of_columns(["timestamp_ns", "objects"]), None),
         ))
     }
 }

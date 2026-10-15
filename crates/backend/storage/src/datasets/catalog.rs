@@ -1,8 +1,7 @@
-//! The project's Studio datasets as its journal names them, read through the
-//! same journal the ADBC driver uses: every table under `datasets.<id>`,
-//! grouped by dataset. A dataset exists when its `episodes` table does, and
-//! is an MCAP dataset when it also has `files`, so listing datasets reads no
-//! rows.
+//! The project's Studio datasets as its journal names them: every table at
+//! the project's root named `datasets.<id>.…`, grouped by dataset. A dataset
+//! exists when its `episodes` table does, and is an MCAP dataset when it also
+//! has `files`, so listing datasets reads no rows.
 use crate::{SpiralAccess, SpiralConnection, StorageManager};
 use serde::Deserialize;
 use serde_json::json;
@@ -10,7 +9,7 @@ use spiral_robotics_common::curation::AnswerColumn;
 use spiral_robotics_common::datasets::{
     DatasetFormat, DatasetSelection, DatasetSummary, DatasetTable, TopicRevision,
 };
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 /// Reads a project's journal as the signed-in user.
@@ -83,7 +82,7 @@ impl DatasetCatalogClient {
             token = page.next_page_token;
             if token.is_none() {
                 return Ok(CatalogDatasets::new(
-                    DatasetNamespace::new(namespace).tables()?,
+                    DatasetNamespace::new(namespace).tables(),
                 ));
             }
         }
@@ -116,9 +115,8 @@ struct NamespaceEntry {
 )]
 enum NamespaceParent {
     ProjectRoot,
-    Resource {
-        resource_id: String,
-    },
+    /// Under another resource, which Studio never names a table under.
+    Resource {},
     /// Implicit name segments relative to the project root or a resource.
     Prefix {
         resource_id: Option<String>,
@@ -126,18 +124,12 @@ enum NamespaceParent {
     },
 }
 impl NamespaceParent {
-    fn resource_id(&self) -> Option<&str> {
+    /// Whether the entry is bound at the project's root.
+    fn is_root(&self) -> bool {
         match self {
-            Self::ProjectRoot => None,
-            Self::Resource { resource_id } => Some(resource_id),
-            Self::Prefix { resource_id, .. } => resource_id.as_deref(),
-        }
-    }
-
-    fn path(&self) -> &[String] {
-        match self {
-            Self::ProjectRoot | Self::Resource { .. } => &[],
-            Self::Prefix { path, .. } => path,
+            Self::ProjectRoot => true,
+            Self::Resource {} => false,
+            Self::Prefix { resource_id, path } => resource_id.is_none() && path.is_empty(),
         }
     }
 }
@@ -154,10 +146,10 @@ struct ResourceDescriptor {
     kind: String,
 }
 
-/// One table the journal names: its full path, and its resource and
+/// One table bound at the project's root: its name, and its resource and
 /// version.
 struct CatalogTable {
-    path: Vec<String>,
+    name: String,
     identity: (String, String),
 }
 
@@ -171,49 +163,30 @@ impl DatasetNamespace {
         Self { entries }
     }
 
-    /// Every table the namespace holds, each at its full path: entries are
-    /// named relative to their parent resource, walked from the project root.
-    fn tables(self) -> Result<Vec<CatalogTable>, String> {
-        let mut queue = VecDeque::from([(None::<String>, Vec::<String>::new())]);
-        let mut visited = BTreeSet::new();
-        let mut tables = Vec::new();
-        while let Some((parent, prefix)) = queue.pop_front() {
-            for entry in &self.entries {
-                if entry.parent.resource_id() != parent.as_deref() {
-                    continue;
-                }
-                let mut path = prefix.clone();
-                path.extend_from_slice(entry.parent.path());
-                path.push(entry.name.clone());
-                if path.len() > 32 {
-                    return Err("The Spiral catalog exceeds the nesting limit".to_owned());
-                }
-                let resource = &entry.resource;
-                if resource.descriptor.kind == Self::TABLE {
-                    tables.push(CatalogTable {
-                        path: path.clone(),
-                        identity: (
-                            resource.descriptor.resource_id.clone(),
-                            resource.version_id.clone(),
-                        ),
-                    });
-                }
-                if visited.insert(resource.descriptor.resource_id.clone()) {
-                    queue.push_back((Some(resource.descriptor.resource_id.clone()), path));
-                }
-            }
-        }
-        Ok(tables)
+    /// Every table bound at the project's root, where Studio names its
+    /// datasets' tables.
+    fn tables(self) -> Vec<CatalogTable> {
+        self.entries
+            .into_iter()
+            .filter(|entry| entry.parent.is_root() && entry.resource.descriptor.kind == Self::TABLE)
+            .map(|entry| CatalogTable {
+                name: entry.name,
+                identity: (
+                    entry.resource.descriptor.resource_id,
+                    entry.resource.version_id,
+                ),
+            })
+            .collect()
     }
 }
 
-/// The Studio datasets a catalog holds, each with every table under its
-/// namespace.
+/// The Studio datasets a catalog holds, each with every table its name
+/// gives it.
 pub(crate) struct CatalogDatasets {
     datasets: BTreeMap<DatasetSelection, DatasetTables>,
 }
 
-/// The tables under one dataset's namespace, by their path under it.
+/// The tables of one dataset, by their names' parts after the dataset's.
 #[derive(Default)]
 struct DatasetTables {
     tables: BTreeMap<Vec<String>, (String, String)>,
@@ -229,18 +202,18 @@ impl CatalogDatasets {
     fn new(tables: Vec<CatalogTable>) -> Self {
         let mut datasets = BTreeMap::<DatasetSelection, DatasetTables>::new();
         for table in tables {
-            if let Some((dataset, rest)) = DatasetSelection::of_catalog_path(&table.path) {
+            if let Some((dataset, rest)) = DatasetSelection::of_table_name(&table.name) {
                 datasets
                     .entry(dataset)
                     .or_default()
                     .tables
-                    .insert(rest.to_vec(), table.identity);
+                    .insert(rest, table.identity);
             }
         }
         Self { datasets }
     }
 
-    /// Every dataset, by name: each namespace holding an `episodes` table.
+    /// Every dataset, by name: each one with an `episodes` table.
     pub(crate) fn summaries(&self) -> Vec<DatasetSummary> {
         self.datasets
             .keys()
@@ -274,12 +247,12 @@ impl CatalogDatasets {
             .collect()
     }
 
-    /// Whether any table lives under `dataset`'s namespace.
+    /// Whether `dataset` has any table.
     pub(crate) fn holds(&self, dataset: &DatasetSelection) -> bool {
         self.datasets.contains_key(dataset)
     }
 
-    /// Every table under `dataset`'s namespace, as statements name it.
+    /// Every table of `dataset`, as statements name it.
     pub(crate) fn tables(&self, dataset: &DatasetSelection) -> Result<Vec<DatasetTable>, String> {
         let Some(tables) = self.datasets.get(dataset) else {
             return Ok(Vec::new());
@@ -352,38 +325,32 @@ mod tests {
 
     fn namespace(entries: serde_json::Value) -> CatalogDatasets {
         let entries: Vec<NamespaceEntry> = serde_json::from_value(entries).unwrap();
-        CatalogDatasets::new(DatasetNamespace::new(entries).tables().unwrap())
+        CatalogDatasets::new(DatasetNamespace::new(entries).tables())
     }
 
-    fn table(parent: serde_json::Value, name: &str, id: &str) -> serde_json::Value {
-        json!({"parent": parent, "name": name,
+    fn table(name: &str, id: &str) -> serde_json::Value {
+        json!({"parent": {"kind": "projectRoot"}, "name": name,
             "resource": {"descriptor": {"resourceId": id, "kind": "table"}, "versionId": format!("{id}-v")}})
     }
 
     #[test]
-    fn a_dataset_is_the_tables_under_its_namespace_and_named_by_its_episodes() {
-        let prefix = |id: &str| json!({"kind": "prefix", "path": ["datasets", id]});
+    fn a_dataset_is_the_tables_its_name_starts_and_named_by_its_episodes() {
         let datasets = namespace(json!([
-            table(prefix("pick-place"), "episodes", "episodes-1"),
-            table(prefix("pick-place"), "topics", "topics-1"),
-            table(prefix("pick-place"), "files", "files-1"),
-            table(
-                json!({"kind": "prefix", "path": ["datasets", "pick-place", "messages"]}),
-                "top_0a1b2c3d",
-                "stream-1"
-            ),
-            table(prefix("svla"), "episodes", "episodes-2"),
-            table(
-                json!({"kind": "prefix", "path": ["datasets", "svla", "answers"]}),
-                "similarity_3f9a2c",
-                "answers-2"
-            ),
-            // A namespace whose episodes are gone is no dataset, but its
+            table("datasets.pick-place.episodes", "episodes-1"),
+            table("datasets.pick-place.topics", "topics-1"),
+            table("datasets.pick-place.files", "files-1"),
+            table("datasets.pick-place.messages.top_0a1b2c3d", "stream-1"),
+            table("datasets.svla.episodes", "episodes-2"),
+            table("datasets.svla.answers.similarity_3f9a2c", "answers-2"),
+            // A dataset whose episodes are gone is no dataset, but its
             // tables are still there.
-            table(prefix("leftover"), "topics", "topics-3"),
-            table(json!({"kind": "projectRoot"}), "dataset_default", "old"),
-            json!({"parent": {"kind": "projectRoot"}, "name": "datasets.view",
+            table("datasets.leftover.topics", "topics-3"),
+            table("dataset_default", "old"),
+            json!({"parent": {"kind": "projectRoot"}, "name": "datasets.view.episodes",
                 "resource": {"descriptor": {"resourceId": "view", "kind": "view"}, "versionId": "v"}}),
+            // A table nested under a prefix is no Studio table.
+            json!({"parent": {"kind": "prefix", "path": ["datasets", "nested"]}, "name": "episodes",
+                "resource": {"descriptor": {"resourceId": "nested", "kind": "table"}, "versionId": "v"}}),
         ]));
         let summaries = datasets.summaries();
         assert_eq!(
@@ -400,12 +367,13 @@ mod tests {
         let leftover = DatasetSelection::new("leftover").unwrap();
         assert!(datasets.holds(&leftover) && datasets.summary(&leftover).is_none());
         assert!(!datasets.holds(&DatasetSelection::new("default").unwrap()));
+        assert!(!datasets.holds(&DatasetSelection::new("nested").unwrap()));
         assert_eq!(
             datasets
                 .tables(&summaries[0].selection().clone())
                 .unwrap()
                 .iter()
-                .map(DatasetTable::target)
+                .map(|table| table.name().to_owned())
                 .collect::<Vec<_>>(),
             [
                 "datasets.pick-place.episodes",
@@ -426,44 +394,5 @@ mod tests {
             BTreeSet::from([similarity])
         );
         assert!(datasets.answer_columns(&leftover).unwrap().is_empty());
-    }
-
-    #[test]
-    fn tables_are_found_under_prefixes_and_resource_anchors() {
-        let datasets = namespace(json!([
-            json!({"parent": {"kind": "projectRoot"}, "name": "datasets",
-                "resource": {"descriptor": {"resourceId": "namespace", "kind": "namespace"}, "versionId": "v"}}),
-            table(
-                json!({"kind": "prefix", "resourceId": "namespace", "path": ["default"]}),
-                "episodes",
-                "episodes"
-            ),
-            table(
-                json!({"kind": "resource", "resourceId": "episodes"}),
-                "answers",
-                "nested"
-            ),
-        ]));
-        let summaries = datasets.summaries();
-        assert_eq!(summaries.len(), 1);
-        assert_eq!(summaries[0].selection().id(), "default");
-        assert!(
-            datasets.tables(summaries[0].selection()).is_err(),
-            "episodes.answers is no table of Studio's"
-        );
-    }
-
-    #[test]
-    fn prefix_segments_count_toward_the_nesting_limit() {
-        let entries: Vec<NamespaceEntry> = serde_json::from_value(json!([table(
-            json!({"kind": "prefix", "path": vec!["nested"; 32]}),
-            "episodes",
-            "data"
-        )]))
-        .unwrap();
-        assert_eq!(
-            DatasetNamespace::new(entries).tables().err().unwrap(),
-            "The Spiral catalog exceeds the nesting limit"
-        );
     }
 }

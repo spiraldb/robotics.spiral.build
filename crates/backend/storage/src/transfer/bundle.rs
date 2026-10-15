@@ -230,9 +230,7 @@ impl ProjectBundle {
         let summary = connection
             .transaction("project import", async move |connection| {
                 for table in &replaced {
-                    connection
-                        .execute_update_sql(&format!("DROP TABLE IF EXISTS {table}"))
-                        .await?;
+                    connection.drop_table(table.name()).await?;
                 }
                 let mut summary = ProjectImportSummary::default();
                 for (table, batches) in archive.tables {

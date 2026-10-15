@@ -86,10 +86,9 @@ impl ProjectFactory {
         access: SpiralAccess,
     ) -> Result<Arc<OpenProject>, OperationError> {
         let connection = SpiralConnection::new(settings, access);
-        let database = Arc::new(
-            spiral_robotics_storage::AdbcDatabase::new(connection.clone())
-                .with_provider_keys(&self.data.keys),
-        );
+        let database = Arc::new(spiral_robotics_storage::SpiralSdkDatabase::new(
+            connection.clone(),
+        ));
         let store =
             Arc::new(ProjectStore::new(connection, database).map_err(OperationError::External)?);
         Ok(self.create_from_store(store))

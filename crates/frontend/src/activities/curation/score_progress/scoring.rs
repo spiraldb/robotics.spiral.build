@@ -13,6 +13,7 @@ use crate::activities::curation::path::{
     ColumnMeaning, EpisodeRow, ModelEntries, ModelNode, ModelStep, PathError, TableColumn,
 };
 use spiral_robotics_common::curation::{AnswerColumn, AnswerSource};
+use spiral_robotics_common::sql::{ListItems, SqlStruct};
 use spiral_robotics_common::training::PublishedModel;
 
 /// The progress model a node scores with. Its velocity is progress per unit
@@ -121,14 +122,14 @@ impl ModelNode for ProgressScoring {
     /// Every scored frame of the episode, at its log time, with its progress
     /// rate; a frame the scorer had no support for has none.
     fn entries(&self, step: &ModelStep<'_>) -> Result<ModelEntries, PathError> {
+        let scores = ListItems::of(EpisodeRow::EPISODES, step.column().as_str(), "p")
+            .beside(["episode_id", EpisodeRow::ORIGIN]);
         let entry = format!(
-            "{} AS (SELECT r.episode_id, r.{} + CAST(p.timestamp_ns AS BIGINT) AS timestamp_ns, \
-             CASE WHEN p.support > 0 AND NOT isnan(p.velocity) THEN p.velocity END AS progress_rate \
-             FROM {} r CROSS JOIN LATERAL UNNEST(r.{}) p)",
+            "{} AS (SELECT u.episode_id, u.{} + CAST(u.p.timestamp_ns AS BIGINT) AS timestamp_ns, \
+             CASE WHEN u.p.support > 0 AND NOT isnan(u.p.velocity) THEN u.p.velocity END AS progress_rate \
+             FROM {scores} u)",
             step.entries(),
             EpisodeRow::ORIGIN,
-            EpisodeRow::EPISODES,
-            step.column()
         );
         Ok(ModelEntries::new(
             vec![entry],
@@ -138,8 +139,7 @@ impl ModelNode for ProgressScoring {
         .folding(
             TableColumn::of_node(step.node(), &step.name(), ColumnMeaning::ProgressRates),
             (
-                "STRUCT_PACK(timestamp_ns := timestamp_ns, progress_rate := progress_rate)"
-                    .to_owned(),
+                SqlStruct::of_columns(["timestamp_ns", "progress_rate"]),
                 None,
             ),
         ))

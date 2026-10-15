@@ -193,7 +193,7 @@ async fn browser_dispatches_native_tools_and_repairs_a_rejected_result() {
         samples["body"]["statement"]
             .as_str()
             .unwrap()
-            .contains("FROM \"datasets\".\"demo\".\"messages\".\"joints_0a1b2c3d\" WHERE id = $1")
+            .contains("FROM \"datasets.demo.messages.joints_0a1b2c3d\" WHERE id = $1")
     );
     let saves = requests
         .iter()

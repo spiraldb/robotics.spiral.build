@@ -414,9 +414,9 @@ impl crate::DatabaseSession for FailingSpiral {
     ) -> crate::DatabaseFuture<'_, crate::RecordBatchStream> {
         panic!("import must fail before querying")
     }
-    fn execute_update(
+    fn drop_table(
         &mut self,
-        _: crate::SqlStatement,
+        _: crate::RelationName,
     ) -> crate::DatabaseFuture<'_, crate::ExecutionSummary> {
         panic!("the project holds no tables to drop")
     }
@@ -522,7 +522,7 @@ impl HeldDatasets {
         use crate::datasets::fixtures::RolloutFixture;
         use crate::datasets::{DatasetImport, DatasetWrite, DecodedEpisode, McapFile};
         let journal = crate::datasets::TestJournal::start().await;
-        let (spiral, _) = crate::db::UnquotedMemory::store_with_catalog(journal.endpoint()).await;
+        let (spiral, _) = crate::db::MemoryDatabase::store_with_catalog(journal.endpoint()).await;
         let old = DatasetSelection::new("old").unwrap();
         let take = RolloutFixture::mcap("take", false);
         DatasetImport::new(&spiral, &old, DatasetFormat::Mcap)
@@ -615,7 +615,7 @@ async fn an_import_replaces_the_mcap_datasets_and_leaves_lerobot_ones() {
             project.rows(table.clone()).await,
             Ok(expected),
             "{}",
-            table.target()
+            table.name()
         );
     }
     let old = DatasetSelection::new("old").unwrap();
@@ -713,7 +713,7 @@ async fn a_bundle_points_at_pinned_files_and_its_import_downloads_them() {
     use crate::datasets::fixtures::RolloutFixture;
     use crate::datasets::{DatasetImport, DecodedEpisode};
     let take = RolloutFixture::mcap("take", false);
-    let (source, _) = crate::db::UnquotedMemory::store().await;
+    let (source, _) = crate::db::MemoryDatabase::store().await;
     let held = DatasetSelection::new("held").unwrap();
     let pinned = DatasetSelection::new("pinned").unwrap();
     for (dataset, file) in [
@@ -755,7 +755,7 @@ async fn a_bundle_points_at_pinned_files_and_its_import_downloads_them() {
     assert_eq!(files(&pinned), [(FakeHuggingFace::FILE, pinned_take)]);
 
     let huggingface = FakeHuggingFace::serving(take.clone()).await;
-    let (target, _) = crate::db::UnquotedMemory::store().await;
+    let (target, _) = crate::db::MemoryDatabase::store().await;
     let studio = crate::StudioStore::in_memory();
     let summary = ProjectBundle
         .import(
@@ -799,7 +799,7 @@ async fn an_import_refuses_a_pinned_file_of_another_size() {
     use crate::datasets::fixtures::RolloutFixture;
     let take = RolloutFixture::mcap("take", false);
     let huggingface = FakeHuggingFace::serving(take.clone()).await;
-    let (target, _) = crate::db::UnquotedMemory::store().await;
+    let (target, _) = crate::db::MemoryDatabase::store().await;
     let studio = crate::StudioStore::in_memory();
     let project = studio.project(&target.connection_settings());
     let sources = Fixture::sources(&[(

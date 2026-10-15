@@ -12,6 +12,7 @@ use super::stream_reads::{CheckedStreams, PairedColumns};
 use dioxus::prelude::*;
 use serde::Deserialize;
 use spiral_robotics_common::datasets::{ArmRoles, EpisodeId};
+use spiral_robotics_common::sql::SqlStruct;
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -175,15 +176,13 @@ impl StateActionLag {
              lags AS (SELECT episode_id, part, together, tracking, step_ms, CASE {closest} END AS samples FROM errors), \
              logged AS (SELECT episode_id, part, samples, tracking, samples * step_ms AS delay_ms, samples IN ({earliest}, {latest}) AS at_edge \
                FROM lags WHERE together AND samples IS NOT NULL), \
-             tracked AS (SELECT part, spql.agg.approx_quantile(tracking, 0.5) AS typical, max(tracking) AS worst FROM logged GROUP BY part), \
+             tracked AS (SELECT part, approx_percentile_cont(tracking, 0.5) AS typical, max(tracking) AS worst FROM logged GROUP BY part), \
              judged AS (SELECT logged.part AS part, logged.episode_id AS episode_id, logged.samples AS samples, logged.tracking AS tracking, \
                logged.at_edge AS at_edge, logged.tracking > {worse} * tracked.typical AS worse FROM logged JOIN tracked ON tracked.part = logged.part), \
-             flagged AS (SELECT part, spql.list.collect(STRUCT_PACK(episode_id := episode_id, samples := samples, tracking := tracking, at_edge := at_edge, worse := worse)) AS flagged \
-               FROM judged WHERE at_edge OR worse GROUP BY part), \
-             settled AS (SELECT part, STRUCT_PACK(fewest := min(samples), most := max(samples), shortest_ms := min(delay_ms), longest_ms := max(delay_ms)) AS settled \
-               FROM logged WHERE NOT at_edge GROUP BY part), \
-             unpaired AS (SELECT part, spql.list.collect(episode_id) AS unpaired FROM lags WHERE NOT (together AND samples IS NOT NULL) GROUP BY part), \
-             overall AS (SELECT spql.agg.approx_quantile(tracking, 0.5) AS settled_tracking FROM logged WHERE NOT at_edge), \
+             flagged AS (SELECT part, {flagged} AS flagged FROM judged WHERE at_edge OR worse GROUP BY part), \
+             settled AS (SELECT part, {settled} AS settled FROM logged WHERE NOT at_edge GROUP BY part), \
+             unpaired AS (SELECT part, array_agg(episode_id) AS unpaired FROM lags WHERE NOT (together AND samples IS NOT NULL) GROUP BY part), \
+             overall AS (SELECT approx_percentile_cont(tracking, 0.5) AS settled_tracking FROM logged WHERE NOT at_edge), \
              arms AS (SELECT DISTINCT part FROM lags) \
              SELECT arms.part AS part, tracked.typical AS typical, tracked.worst AS worst, settled.settled AS settled, overall.settled_tracking AS settled_tracking, \
                flagged.flagged AS flagged, unpaired.unpaired AS unpaired \
@@ -193,6 +192,14 @@ impl StateActionLag {
             earliest = Self::EARLIEST,
             latest = Self::LATEST,
             worse = Self::WORSE,
+            flagged =
+                SqlStruct::of_columns(["episode_id", "samples", "tracking", "at_edge", "worse"])
+                    .collected(),
+            settled = SqlStruct::new()
+                .field("fewest", "min(samples)")
+                .field("most", "max(samples)")
+                .field("shortest_ms", "min(delay_ms)")
+                .field("longest_ms", "max(delay_ms)"),
         )
     }
 
@@ -253,7 +260,7 @@ impl StateActionLag {
             .map(|shift| {
                 let name = Self::shift_name(shift);
                 let distance = (0..joints)
-                    .map(|joint| format!("spql.math.abs(a{joint} - q{joint}_{name})"))
+                    .map(|joint| format!("abs(a{joint} - q{joint}_{name})"))
                     .collect::<Vec<_>>()
                     .join(" + ");
                 format!(
@@ -268,7 +275,7 @@ impl StateActionLag {
             "t AS (SELECT id, {commands}, {shifted}, CAST(log_time AS BIGINT) - CAST(LAG(log_time) {window} AS BIGINT) AS step_ns FROM p)"
         ));
         ctes.push(format!(
-            "r AS (SELECT id, count(*) AS paired, spql.agg.approx_quantile(step_ns, 0.5) AS step_ns, {errors} FROM t GROUP BY id)"
+            "r AS (SELECT id, count(*) AS paired, approx_percentile_cont(step_ns, 0.5) AS step_ns, {errors} FROM t GROUP BY id)"
         ));
         let names = (Self::EARLIEST..=Self::LATEST)
             .map(|shift| format!("r.{0} AS {0}", Self::error_field(shift)))
@@ -503,7 +510,7 @@ mod tests {
         ));
         assert!(sql.contains("WHEN err_ahead_10 = tracking THEN 10 END AS samples"));
         assert!(sql.contains("samples IN (-2, 10) AS at_edge"));
-        assert!(sql.contains("spql.agg.approx_quantile(tracking, 0.5) AS typical"));
+        assert!(sql.contains("approx_percentile_cont(tracking, 0.5) AS typical"));
         assert!(sql.contains("logged.tracking > 2 * tracked.typical AS worse"));
         assert!(sql.contains("FROM logged WHERE NOT at_edge GROUP BY part"));
         assert!(sql.contains("WHERE NOT (together AND samples IS NOT NULL) GROUP BY part"));

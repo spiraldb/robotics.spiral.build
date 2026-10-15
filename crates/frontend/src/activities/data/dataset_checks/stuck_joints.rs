@@ -7,10 +7,11 @@
 use super::check_columns::{CheckColumn, CheckKind, CheckTable, PartsStatement};
 use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, Plural, Verdict};
 use super::state_action_lag::Pairing;
-use super::stream_reads::{CheckedStreams, Greatest, PairedColumns};
+use super::stream_reads::{CheckedStreams, PairedColumns};
 use dioxus::prelude::*;
 use serde::Deserialize;
 use spiral_robotics_common::datasets::{ArmRoles, EpisodeId};
+use spiral_robotics_common::sql::SqlStruct;
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -92,11 +93,11 @@ impl StuckJoints {
         format!(
             "WITH logged AS (SELECT part, episode_id, samples, stuck_s, first_at FROM {parts} p WHERE {together}), \
              arm AS (SELECT part, max(samples) AS most FROM logged GROUP BY part), \
-             flagged AS (SELECT part, spql.list.collect(STRUCT_PACK(episode_id := episode_id, stuck_s := stuck_s, first_at := first_at)) AS flagged \
-               FROM logged WHERE stuck_s > {flagged} GROUP BY part) \
+             flagged AS (SELECT part, {stuck} AS flagged FROM logged WHERE stuck_s > {flagged} GROUP BY part) \
              SELECT arm.part AS part, arm.most AS most, flagged.flagged AS flagged FROM arm LEFT JOIN flagged ON flagged.part = arm.part",
             together = Pairing::together(),
             flagged = Self::FLAGGED,
+            stuck = SqlStruct::of_columns(["episode_id", "stuck_s", "first_at"]).collected(),
         )
     }
 
@@ -126,10 +127,12 @@ impl StuckJoints {
             .map(|joint| format!("dq{joint} = 0"))
             .collect::<Vec<_>>()
             .join(" AND ");
-        let moved = Greatest::of(
-            &(0..joints)
-                .map(|joint| format!("spql.math.abs(da{joint})"))
-                .collect::<Vec<_>>(),
+        let moved = format!(
+            "greatest({})",
+            (0..joints)
+                .map(|joint| format!("abs(da{joint})"))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         let mut ctes = paired.ctes("p", streams)?;
         ctes.push(format!(

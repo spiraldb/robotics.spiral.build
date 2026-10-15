@@ -299,7 +299,7 @@ impl StreamRead {
         Ok(Self {
             statement: format!(
                 "WITH {} SELECT CAST(log_time AS BIGINT) AS log_time_ns, {numbers} FROM joint ORDER BY log_time",
-                columns.ctes("joint", &read).join(", ")
+                columns.cte("joint", &read)
             ),
             shape: StreamShape::Values(columns.count()),
         })
@@ -458,7 +458,7 @@ mod tests {
         );
         assert_eq!(
             reads.action[1].statement(),
-            "WITH joint AS (SELECT id, log_time, spql.list.get(\"value\".\"position\", 0) AS v0 FROM \"datasets\".\"abc\".\"messages\".\"left_ee_action_00000006\" WHERE id = $1) SELECT CAST(log_time AS BIGINT) AS log_time_ns, CAST(v0 AS DOUBLE) AS v0 FROM joint ORDER BY log_time"
+            "WITH joint AS (SELECT id, log_time, array_element(\"value\".\"position\", 1) AS v0 FROM \"datasets.abc.messages.left_ee_action_00000006\" WHERE id = $1) SELECT CAST(log_time AS BIGINT) AS log_time_ns, CAST(v0 AS DOUBLE) AS v0 FROM joint ORDER BY log_time"
         );
         assert_eq!(reads.cameras[0].shape(), StreamShape::Camera);
         // A value read names its topic's stream by the schema it was recorded
@@ -502,7 +502,7 @@ mod tests {
             StreamRead::camera(&bench, "/top-camera")
                 .unwrap()
                 .statement(),
-            "SELECT CAST(r.log_time AS BIGINT) AS log_time_ns, r.value.data AS payload FROM \"datasets\".\"abc\".\"messages\".\"top_camera_00000001\" r WHERE r.id = $1 ORDER BY r.ordinal"
+            "SELECT CAST(r.log_time AS BIGINT) AS log_time_ns, r.value.data AS payload FROM \"datasets.abc.messages.top_camera_00000001\" r WHERE r.id = $1 ORDER BY r.ordinal"
         );
         for missing in ["/joints", "/wrist-camera"] {
             assert!(StreamRead::camera(&bench, missing).is_err(), "{missing}");
@@ -546,15 +546,15 @@ mod tests {
         );
         assert_eq!(
             reads.state[0].statement(),
-            "WITH joint AS (SELECT id, log_time, \"value\".\"shoulder_pan.pos\" AS v0, \"value\".\"elbow_flex.pos\" AS v1 FROM \"datasets\".\"so101\".\"messages\".\"observation_state_0000000b\" WHERE id = $1) SELECT CAST(log_time AS BIGINT) AS log_time_ns, CAST(v0 AS DOUBLE) AS v0, CAST(v1 AS DOUBLE) AS v1 FROM joint ORDER BY log_time"
+            "WITH joint AS (SELECT id, log_time, \"value\".\"shoulder_pan.pos\" AS v0, \"value\".\"elbow_flex.pos\" AS v1 FROM \"datasets.so101.messages.observation_state_0000000b\" WHERE id = $1) SELECT CAST(log_time AS BIGINT) AS log_time_ns, CAST(v0 AS DOUBLE) AS v0, CAST(v1 AS DOUBLE) AS v1 FROM joint ORDER BY log_time"
         );
         assert_eq!(
             reads.action[1].statement(),
-            "WITH joint AS (SELECT id, log_time, \"value\".\"gripper.pos\" AS v0 FROM \"datasets\".\"so101\".\"messages\".\"action_0000000c\" WHERE id = $1) SELECT CAST(log_time AS BIGINT) AS log_time_ns, CAST(v0 AS DOUBLE) AS v0 FROM joint ORDER BY log_time"
+            "WITH joint AS (SELECT id, log_time, \"value\".\"gripper.pos\" AS v0 FROM \"datasets.so101.messages.action_0000000c\" WHERE id = $1) SELECT CAST(log_time AS BIGINT) AS log_time_ns, CAST(v0 AS DOUBLE) AS v0 FROM joint ORDER BY log_time"
         );
         assert_eq!(
             reads.cameras[0].statement(),
-            "SELECT CAST(r.log_time AS BIGINT) AS log_time_ns, r.value.data AS payload FROM \"datasets\".\"so101\".\"messages\".\"observation_images_up_0000000a\" r WHERE r.id = $1 ORDER BY r.ordinal"
+            "SELECT CAST(r.log_time AS BIGINT) AS log_time_ns, r.value.data AS payload FROM \"datasets.so101.messages.observation_images_up_0000000a\" r WHERE r.id = $1 ORDER BY r.ordinal"
         );
     }
 

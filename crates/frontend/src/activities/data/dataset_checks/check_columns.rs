@@ -18,7 +18,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use spiral_robotics_common::curation::{AnswerColumn, AnswerSource, ColumnFill, FillEpisodes};
 use spiral_robotics_common::datasets::DatasetSelection;
-use spiral_robotics_common::sql::SqlLiteral;
+use spiral_robotics_common::sql::{ListItems, SqlLiteral, SqlStruct};
 
 /// The version of the checks a column was filled by. Changing what any
 /// check measures or keeps bumps it, and every dataset is checked again.
@@ -113,17 +113,11 @@ impl PartsStatement {
             })
             .collect::<Vec<_>>()
             .join(" UNION ALL ");
-        let packed = std::iter::once("part := part".to_owned())
-            .chain(
-                self.fields
-                    .iter()
-                    .map(|field| format!("{field} := {field}")),
-            )
-            .collect::<Vec<_>>()
-            .join(", ");
+        let cell =
+            SqlStruct::of_columns(std::iter::once("part").chain(self.fields.iter().copied()));
         Some(format!(
-            "SELECT id AS episode_id, spql.list.collect(STRUCT_PACK({packed})) AS answer \
-             FROM ({parts}) parts GROUP BY id"
+            "SELECT id AS episode_id, {} AS answer FROM ({parts}) parts GROUP BY id",
+            cell.collected()
         ))
     }
 }
@@ -179,13 +173,12 @@ impl CheckColumn {
     fn parts_in(&self, dataset: &DatasetSelection) -> String {
         let fields = std::iter::once("part")
             .chain(self.fields.iter().copied())
-            .map(|field| format!("p.{field} AS {field}"))
+            .map(|field| format!("u.p.{field} AS {field}"))
             .collect::<Vec<_>>()
             .join(", ");
-        format!(
-            "(SELECT a.episode_id AS episode_id, {fields} FROM {} a CROSS JOIN LATERAL UNNEST(a.value) p)",
-            dataset.answers(&self.column)
-        )
+        let parts =
+            ListItems::of(dataset.answers(&self.column), "value", "p").beside(["episode_id"]);
+        format!("(SELECT u.episode_id AS episode_id, {fields} FROM {parts} u)")
     }
 }
 
@@ -333,7 +326,7 @@ mod tests {
         let column = CheckColumn::of(CheckKind::Rates, parts).unwrap().unwrap();
         assert_eq!(
             column.statement,
-            "SELECT id AS episode_id, spql.list.collect(STRUCT_PACK(part := part, messages := messages, first_ns := first_ns)) AS answer \
+            "SELECT id AS episode_id, array_agg(named_struct('part', part, 'messages', messages, 'first_ns', first_ns)) AS answer \
              FROM (SELECT '/a' AS part, id, messages, first_ns FROM (SELECT id, count(*) AS messages, min(log_time) AS first_ns FROM ta GROUP BY id) x \
              UNION ALL SELECT '/b''s' AS part, id, messages, first_ns FROM (SELECT id, count(*) AS messages, min(log_time) AS first_ns FROM tb GROUP BY id) x) parts GROUP BY id"
         );
@@ -361,14 +354,14 @@ mod tests {
         let frames = AnswerColumn::try_from("check_frames_0b1c2d".to_owned()).unwrap();
         assert_eq!(
             CheckTable::counting(&dataset, &[]),
-            "SELECT count(*) AS episodes, sum(1) AS unchecked FROM \"datasets\".\"folding\".\"episodes\" e"
+            "SELECT count(*) AS episodes, sum(1) AS unchecked FROM \"datasets.folding.episodes\" e"
         );
         assert_eq!(
             CheckTable::counting(&dataset, &[rates, frames]),
             "SELECT count(*) AS episodes, sum(CASE WHEN c0.episode_id IS NULL OR c1.episode_id IS NULL THEN 1 ELSE 0 END) AS unchecked \
-             FROM \"datasets\".\"folding\".\"episodes\" e \
-             LEFT JOIN \"datasets\".\"folding\".\"answers\".\"check_rates_3f9a2c\" c0 ON c0.episode_id = e.id \
-             LEFT JOIN \"datasets\".\"folding\".\"answers\".\"check_frames_0b1c2d\" c1 ON c1.episode_id = e.id"
+             FROM \"datasets.folding.episodes\" e \
+             LEFT JOIN \"datasets.folding.answers.check_rates_3f9a2c\" c0 ON c0.episode_id = e.id \
+             LEFT JOIN \"datasets.folding.answers.check_frames_0b1c2d\" c1 ON c1.episode_id = e.id"
         );
     }
 
@@ -386,8 +379,8 @@ mod tests {
         assert_eq!(
             column.parts_in(&DatasetSelection::new("folding").unwrap()),
             format!(
-                "(SELECT a.episode_id AS episode_id, p.part AS part, p.messages AS messages, p.first_ns AS first_ns \
-                 FROM \"datasets\".\"folding\".\"answers\".\"{}\" a CROSS JOIN LATERAL UNNEST(a.value) p)",
+                "(SELECT u.episode_id AS episode_id, u.p.part AS part, u.p.messages AS messages, u.p.first_ns AS first_ns \
+                 FROM (SELECT r.episode_id, unnest(r.value) AS p FROM \"datasets.folding.answers.{}\" r) u)",
                 column.column
             )
         );
