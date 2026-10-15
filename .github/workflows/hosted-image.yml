@@ -78,6 +78,9 @@ jobs:
         env:
           ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
           RELEASE: ${{ github.ref_name }}
+          # skopeo keeps the login under /run/containers by default, which the
+          # runner's user cannot create.
+          REGISTRY_AUTH_FILE: ${{ runner.temp }}/containers-auth.json
         run: |
           set -euo pipefail
           skopeo() { nix run --inputs-from . nixpkgs#skopeo -- "$@"; }
