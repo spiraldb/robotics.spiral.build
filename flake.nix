@@ -192,8 +192,10 @@
               "spiral-robotics-backend"
             ];
             # OpenSSL's source build, which the server carries, configures
-            # itself with Perl.
-            nativeBuildInputs = [ pkgs.perl ];
+            # itself with Perl; on Linux, Vortex's custom-labels generates its
+            # bindings with libclang.
+            nativeBuildInputs = [ pkgs.perl ] ++ nativeBuildInputs;
+            LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
             preBuild = restoreVortexReadme ./Cargo.lock;
             doCheck = false;
             meta.mainProgram = "spiral-robotics-backend";
