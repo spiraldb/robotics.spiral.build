@@ -25,17 +25,21 @@ publish = false
 # and mirrors the pinned archives after re-pinning.
 [workspace.metadata.scandal-runtime]
 repository = "spiraldb/spiraldb"
-source = "83019e1c718ae0deca6048333a8c3afa937e239f"
+source = "d3b1d2d5d6ad458fe5cece6cf13e0ee9f5b68385"
 mirror = "spiraldb/spiral-robotics"
-release = "scandal-runtime-83019e1c"
+release = "scandal-runtime-d3b1d2d5"
 
 [workspace.metadata.scandal-runtime.archives.x86_64-unknown-linux-gnu]
-artifact-id = "12023494591"
-sha256 = "83dc0b74408e30ed54bbbf63d559cc0694b5c0379c37d16b37acb6b9f83dadbb"
+artifact-id = "12030390101"
+sha256 = "9c498007eb49611f3ded6e3dbc40e6e8bf8caee122ff76b9bd91f35b7c6b3ae8"
 
 [workspace.metadata.scandal-runtime.archives.aarch64-unknown-linux-gnu]
-artifact-id = "12024460694"
-sha256 = "c53852f88fec997d903cd9bcc99dba34a50e0c782fe100dc96766ad77d2ccadc"
+artifact-id = "12030430042"
+sha256 = "7ddcf4749802105f41765bc8bb9a9343c9e68dd4b8626eae0e2ece389ba7a32d"
+
+[workspace.metadata.scandal-runtime.archives.aarch64-apple-darwin]
+artifact-id = "12029841634"
+sha256 = "867b3e18ad47985df295f1b0eafff94c75d524518781448e6a3ba9193494ecff"
 
 [workspace.lints.rust]
 dead_code = "deny"
@@ -45,8 +49,8 @@ unreachable_pub = "deny"
 # Spiral's SDK and its DataFusion integration, from the private SpiralDB
 # repository at one develop commit; the ScanDAL runtime the SDK links is the
 # archive `workspace.metadata.scandal-runtime` pins for the same commit.
-spiral-sdk = { git = "https://github.com/spiraldb/spiraldb.git", rev = "83019e1c718ae0deca6048333a8c3afa937e239f", default-features = false, features = ["embedded"] }
-spiral-datafusion = { git = "https://github.com/spiraldb/spiraldb.git", rev = "83019e1c718ae0deca6048333a8c3afa937e239f", features = ["sql"] }
+spiral-sdk = { git = "https://github.com/spiraldb/spiraldb.git", rev = "d3b1d2d5d6ad458fe5cece6cf13e0ee9f5b68385", default-features = false, features = ["embedded"] }
+spiral-datafusion = { git = "https://github.com/spiraldb/spiraldb.git", rev = "d3b1d2d5d6ad458fe5cece6cf13e0ee9f5b68385", features = ["sql"] }
 datafusion = { version = "55", default-features = false }
 base64 = "0.22"
 spiral-robotics-common = { path = "crates/common" }
