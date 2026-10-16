@@ -133,11 +133,17 @@ and only by appending rows ([curation](curation.md#stored-answers)).
   of episodes, and seeking into it over HTTPS fetched its index again for
   each one (2.6 s against 0.04 s locally). FFmpeg (`SPIRAL_ROBOTICS_FFMPEG`,
   default `ffmpeg` on `PATH`) cuts each episode's frames out of the copy, all
-  of an episode's cameras at once, and encodes them again as H.264 without
-  B-frames, one access unit per frame, a keyframe every 30 frames, the
-  parameter sets repeated at every keyframe, so every episode decodes from its
-  first frame whatever codec (H.264 or AV1) and keyframe spacing the
-  repository used.
+  of an episode's cameras at once, as H.264 without B-frames, one access unit
+  per frame, the parameter sets repeated at every keyframe, the first frame a
+  keyframe, so every episode decodes from its first frame. The `ffprobe`
+  beside `ffmpeg` reads each copy once. A video that is already H.264 4:2:0
+  without B-frames is copied as it is from the episode's first keyframe on,
+  at the repository's keyframe spacing, and only the frames before that
+  keyframe are encoded again, at the video's profile and level so the episode
+  keeps one codec. A camera episode of sim-bottles-mjwarp-v1 then takes 0.09
+  CPU seconds instead of 2.6 and keeps the source's bitrate, about twice the
+  bytes encoding again made. Any other video (AV1, or H.264 with B-frames) is
+  decoded and encoded again whole, with a keyframe every 30 frames.
 
 Both imports read the next batch while the one before it commits, so
 downloads and FFmpeg overlap Spiral's writes.

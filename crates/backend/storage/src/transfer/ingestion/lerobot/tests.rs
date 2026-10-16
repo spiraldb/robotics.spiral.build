@@ -382,7 +382,7 @@ async fn cut_episodes_start_and_end_at_their_own_frames() {
             episodes.hold_videos(position).await.unwrap();
             let entry = &episodes.episodes[position];
             for (camera, (place, from_seconds)) in &entry.videos {
-                let video = episodes.videos.path(camera, *place).unwrap();
+                let video = episodes.videos.video(camera, *place).unwrap().path();
                 let units = episodes.camera(position, camera).await.unwrap();
                 let (first, last) = reader.cut(&units).await;
                 let start = (from_seconds * fps).round() as i64;

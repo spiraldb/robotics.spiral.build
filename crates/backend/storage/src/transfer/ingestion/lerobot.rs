@@ -3,8 +3,8 @@
 //! `meta/episodes` where each episode's frames and video are, and the frame
 //! tables hold one row per frame. Every feature becomes a stream with one
 //! message per frame at the frame's time, and every camera an `h264` stream
-//! FFmpeg encodes again: an episode's cameras at the same time, one episode
-//! after another.
+//! FFmpeg cuts out of its video: an episode's cameras at the same time, one
+//! episode after another.
 mod cameras;
 mod features;
 
@@ -19,7 +19,7 @@ use arrow_array::{
     StringViewArray, StructArray,
 };
 use bytes::Bytes;
-use cameras::{CameraCut, CameraEncoder, FrameSpan};
+use cameras::{CameraCut, CameraEncoder, CameraVideo, FrameSpan};
 use features::{FeatureInfo, LeRobotFeature};
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -215,19 +215,26 @@ struct FrameFile {
 }
 
 /// Each camera's video file the episodes being read lie in, copied to local
-/// disk once: FFmpeg cuts every episode of a file from the copy, and the
-/// copy goes once the episodes move on to the camera's next file.
-#[derive(Default)]
+/// disk and probed once: FFmpeg cuts every episode of a file from the copy,
+/// and the copy goes once the episodes move on to the camera's next file.
 struct LocalVideos {
+    encoder: CameraEncoder,
     copies: BTreeMap<String, LocalVideo>,
 }
 
 struct LocalVideo {
     place: FilePlace,
-    file: tempfile::NamedTempFile,
+    video: CameraVideo,
 }
 
 impl LocalVideos {
+    fn from_environment() -> Self {
+        Self {
+            encoder: CameraEncoder::from_environment(),
+            copies: BTreeMap::new(),
+        }
+    }
+
     /// Copy every video file of `entry`'s cameras this does not hold yet,
     /// all at once, dropping the copies they replace.
     async fn hold(
@@ -248,6 +255,7 @@ impl LocalVideos {
                 Ok((camera.clone(), *place, info.video_file(camera, *place)?))
             })
             .collect::<Result<Vec<_>, String>>()?;
+        let encoder = &self.encoder;
         let copied = futures::future::try_join_all(missing.into_iter().map(
             |(camera, place, path)| async move {
                 let file = tempfile::NamedTempFile::new()
@@ -257,7 +265,11 @@ impl LocalVideos {
                         .map_err(|error| format!("copying {path}: {error}"))?,
                 );
                 downloads.save(&path, &mut writer).await?;
-                Ok::<_, String>((camera, LocalVideo { place, file }))
+                let video = encoder
+                    .probe(file)
+                    .await
+                    .map_err(|error| format!("probing {path}: {error}"))?;
+                Ok::<_, String>((camera, LocalVideo { place, video }))
             },
         ))
         .await?;
@@ -266,12 +278,25 @@ impl LocalVideos {
     }
 
     /// The copy of `camera`'s video file at `place`.
-    fn path(&self, camera: &str, place: FilePlace) -> Result<&std::path::Path, String> {
+    fn video(&self, camera: &str, place: FilePlace) -> Result<&CameraVideo, String> {
         self.copies
             .get(camera)
             .filter(|copy| copy.place == place)
-            .map(|copy| copy.file.path())
+            .map(|copy| &copy.video)
             .ok_or_else(|| format!("{camera}'s video is not copied yet"))
+    }
+
+    /// `camera`'s frames of `span` in its video file at `place`, one access
+    /// unit each.
+    async fn cut(
+        &self,
+        camera: &str,
+        place: FilePlace,
+        span: FrameSpan,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        self.encoder
+            .encode(&CameraCut::new(self.video(camera, place)?, span))
+            .await
     }
 }
 
@@ -281,7 +306,6 @@ pub(super) struct LeRobotRepository<'a> {
     tasks: BTreeMap<i64, String>,
     episodes: Vec<EpisodeEntry>,
     frames: Option<FrameFile>,
-    cameras: CameraEncoder,
     videos: LocalVideos,
 }
 
@@ -319,8 +343,7 @@ impl<'a> LeRobotRepository<'a> {
             tasks,
             episodes,
             frames: None,
-            cameras: CameraEncoder::from_environment(),
-            videos: LocalVideos::default(),
+            videos: LocalVideos::from_environment(),
         })
     }
 
@@ -391,7 +414,7 @@ impl<'a> LeRobotRepository<'a> {
     }
 
     /// The episode at `position` in index order: every feature's values of
-    /// each frame, and every camera's frames encoded again.
+    /// each frame, and every camera's frames as Studio's H.264.
     pub(super) async fn episode(&mut self, position: usize) -> Result<DecodedEpisode, String> {
         let entry = &self.episodes[position];
         let (index, frames) = (entry.index, entry.frames);
@@ -449,8 +472,8 @@ impl<'a> LeRobotRepository<'a> {
                 values,
             )?);
         }
-        // Every camera of the episode is encoded at the same time, from its
-        // video copied to disk.
+        // Every camera of the episode is cut at the same time, from its video
+        // copied to disk.
         self.hold_videos(position).await?;
         let cameras = self
             .info
@@ -568,8 +591,8 @@ impl<'a> LeRobotRepository<'a> {
             .get(camera)
             .ok_or_else(|| format!("meta/episodes places no {camera} video"))?;
         let span = FrameSpan::starting(*from_seconds, self.info.fps, entry.frames);
-        self.cameras
-            .encode(&CameraCut::new(self.videos.path(camera, *place)?, span))
+        self.videos
+            .cut(camera, *place, span)
             .await
             .map_err(|error| format!("episode {}'s {camera}: {error}", entry.index))
     }
