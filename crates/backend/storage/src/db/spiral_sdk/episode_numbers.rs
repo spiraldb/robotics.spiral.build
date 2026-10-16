@@ -5,7 +5,11 @@
 //! row order as they were; `topics` and `files` name no episode and stay. An
 //! episode's number is its place in the `episodes` table, which Studio wrote
 //! in the order it wrote every other table, so each table holds an episode's
-//! rows together. A dataset moves in one commit; one whose episodes are
+//! rows together. A stream's messages are read with parallel lanes and sorted
+//! back into that order by episode and ordinal: Studio's episode UUIDs are
+//! version 7, so they sort in the order they were written, and a read in
+//! stored order would go through one lane, each request waiting on the last.
+//! A dataset moves in one commit; one whose episodes are
 //! numbered already is left alone. Run it with Studio stopped: a table
 //! created after the run lists a dataset's tables would keep its UUIDs.
 //! Delete this module once the hosted project has moved.
@@ -18,9 +22,13 @@ use arrow_array::{
     Array as _, ArrayRef, FixedSizeBinaryArray, RecordBatch, RecordBatchReader, UInt64Array,
 };
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
+use datafusion::catalog::CatalogProvider as _;
+use datafusion::execution::SessionStateBuilder;
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use futures::StreamExt as _;
 use spiral::CommitOutcome;
+use spiral_datafusion::SpiralCatalogProvider;
 use spiral_robotics_common::datasets::{DatasetSelection, DatasetTable};
 
 use super::{SpiralProject, SpiralSdkDatabase};
@@ -64,6 +72,11 @@ struct EpisodeNumbering<'a> {
 }
 
 impl EpisodeNumbering<'_> {
+    /// The lanes a stream's messages are read with.
+    const LANES: usize = 32;
+    /// What sorting a stream's messages may hold in memory before spilling.
+    const SORT_MEMORY: usize = 4 << 30;
+
     async fn run(&self) -> Result<String, String> {
         let label = self.dataset.label();
         let snapshot = self
@@ -71,11 +84,13 @@ impl EpisodeNumbering<'_> {
             .snapshot()
             .await
             .map_err(|error| error.to_string())?;
-        // One partition reads each table in the order it was written.
+        let catalog = SpiralCatalogProvider::new(snapshot.table_session());
+        // One partition reads a table in the order it was written: the
+        // episodes, whose order numbers them, and the small answer columns.
         let mut config = SessionConfig::new().with_target_partitions(1);
         config.options_mut().sql_parser.enable_ident_normalization = false;
-        let session =
-            spiral_datafusion::SpiralCatalogProvider::new(snapshot.table_session()).session(config);
+        let session = catalog.session(config);
+        let parallel = Self::parallel_session(&catalog)?;
         let Some(numbers) = self.numbers(&session).await? else {
             return Ok(format!("{label}: numbered already"));
         };
@@ -87,13 +102,21 @@ impl EpisodeNumbering<'_> {
                 .table(table.name())
                 .await
                 .map_err(|error| format!("{}: {error}", table.name()))?;
-            let stream = session
+            let all = session
                 .sql(&format!("SELECT * FROM {table}"))
                 .await
-                .map_err(|error| error.to_string())?
-                .execute_stream()
-                .await
                 .map_err(|error| error.to_string())?;
+            let stream = if all.schema().has_column_with_unqualified_name("ordinal") {
+                parallel
+                    .sql(&format!("SELECT * FROM {table} ORDER BY id, ordinal"))
+                    .await
+                    .map_err(|error| error.to_string())?
+            } else {
+                all
+            }
+            .execute_stream()
+            .await
+            .map_err(|error| error.to_string())?;
             let Some(rows) = NumberedRows::of(stream, numbers.clone(), disorder.clone())? else {
                 continue;
             };
@@ -123,6 +146,35 @@ impl EpisodeNumbering<'_> {
                 Err(format!("{label}: the project changed while numbering"))
             }
         }
+    }
+
+    /// A session over `catalog` that reads a table with many lanes, in no
+    /// order, and sorts with at most [`Self::SORT_MEMORY`], spilling the rest.
+    fn parallel_session(catalog: &SpiralCatalogProvider) -> Result<SessionContext, String> {
+        const CATALOG: &str = "project";
+        let schema = catalog
+            .schema_names()
+            .into_iter()
+            .next()
+            .ok_or("the Spiral catalog has no schema")?;
+        let mut config = SessionConfig::new()
+            .with_target_partitions(Self::LANES)
+            .with_default_catalog_and_schema(CATALOG, schema);
+        config.options_mut().sql_parser.enable_ident_normalization = false;
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_limit(Self::SORT_MEMORY, 1.0)
+            .build_arc()
+            .map_err(|error| error.to_string())?;
+        let state = spiral_datafusion::with_spiral(
+            SessionStateBuilder::new()
+                .with_default_features()
+                .with_config(config)
+                .with_runtime_env(runtime),
+        )
+        .build();
+        let session = SessionContext::new_with_state(state);
+        session.register_catalog(CATALOG, Arc::new(catalog.clone()));
+        Ok(session)
     }
 
     /// Each episode's number, by its UUID: its place in the `episodes`
