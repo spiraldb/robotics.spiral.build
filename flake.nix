@@ -81,76 +81,24 @@
           linuxBuildInputs = lib.optionals hostPlatform.isLinux [
             pkgs.v4l-utils
           ];
-          # Spiral's data-plane runtime, the library spiral-sdk loads: built
-          # from the SpiralDB commit Cargo.toml pins the SDK at, with that
-          # repository's own toolchain and Cargo configuration. Its private
-          # source is fetched with the caller's git credentials.
           spiralRev = (lib.importTOML ./Cargo.toml).workspace.dependencies.spiral-sdk.rev;
-          spiralSource = builtins.fetchGit {
-            url = "https://github.com/spiraldb/spiraldb.git";
-            rev = spiralRev;
-            allRefs = true;
-          };
-          spiralToolchain = pkgs.rust-bin.fromRustupToolchainFile "${spiralSource}/rust-toolchain.toml";
-          spiralRustPlatform = pkgs.makeRustPlatform {
-            cargo = spiralToolchain;
-            rustc = spiralToolchain;
-          };
-          runtimeLibrary = "libspiral_data_plane_runtime${hostPlatform.extensions.sharedLibrary}";
-          # The `vortex` crate's docs include its workspace README, which
-          # vendoring a Git crate leaves behind; a build step puts it back,
-          # from the Vortex commit `lockFile` pins.
-          restoreVortexReadme =
-            lockFile:
+          # spiral-sdk links Spiral's ScanDAL runtime from a prebuilt static
+          # archive: Cargo.toml pins spiraldb's archive for each target, and
+          # scripts/setup-scandal-runtime.py installs it. Shells keep it in a
+          # cache keyed by the pinned commit; a Nix build takes the directory
+          # SPIRAL_SCANDAL_NATIVE_DIR names, so it runs with --impure.
+          scandalPins = (lib.importTOML ./Cargo.toml).workspace.metadata.scandal-runtime;
+          scandalArchive =
             let
-              vortexRev = lib.head (
-                lib.concatMap (
-                  package: lib.optional (package.name == "vortex") (lib.last (lib.splitString "#" package.source))
-                ) (lib.importTOML lockFile).package
-              );
-              vortexSource = builtins.fetchGit {
-                url = "https://github.com/vortex-data/vortex.git";
-                rev = vortexRev;
-                allRefs = true;
-              };
+              directory = builtins.getEnv "SPIRAL_SCANDAL_NATIVE_DIR";
             in
-            ''
-              cp ${vortexSource}/README.md "$NIX_BUILD_TOP/cargo-vendor-dir/vortex-0.1.0/README.md"
-            '';
-          spiralRuntime = spiralRustPlatform.buildRustPackage {
-            pname = "spiral-data-plane-runtime";
-            version = builtins.substring 0 9 spiralRev;
-            src = spiralSource;
-            cargoLock = {
-              lockFile = "${spiralSource}/Cargo.lock";
-              allowBuiltinFetchGit = true;
-            };
-            cargoBuildFlags = [
-              "--package"
-              "spiral-data-plane-runtime"
-              "--lib"
-              # OpenSSL is compiled into the library, so it needs none at run time.
-              "--features"
-              "bundled-openssl"
-            ];
-            nativeBuildInputs = [
-              pkgs.protobuf
-              pkgs.pkg-config
-              pkgs.perl
-              pkgs.cmake
-              # The runtime's build script generates bindings for its C header,
-              # which includes the C library's; the hook gives libclang its paths.
-              spiralRustPlatform.bindgenHook
-            ];
-            preBuild = restoreVortexReadme "${spiralSource}/Cargo.lock";
-            doCheck = false;
-            installPhase = ''
-              runHook preInstall
-              mkdir -p "$out/lib"
-              cp "$(find target -path '*/release/${runtimeLibrary}' | head -n 1)" "$out/lib/"
-              runHook postInstall
-            '';
-          };
+            if directory == "" then
+              throw "Set SPIRAL_SCANDAL_NATIVE_DIR to the directory scripts/setup-scandal-runtime.py installs, and build with --impure"
+            else
+              builtins.path {
+                path = directory;
+                name = "scandal-runtime";
+              };
           workspaceVersion = (lib.importTOML ./Cargo.toml).workspace.package.version;
           workspaceSource = lib.fileset.toSource {
             root = ./.;
@@ -190,6 +138,7 @@
             # On Linux, Vortex's custom-labels generates its bindings with
             # libclang, which the hook points at the C library's headers.
             nativeBuildInputs = [ pkgs.rustPlatform.bindgenHook ];
+            SPIRAL_SCANDAL_NATIVE_DIR = "${scandalArchive}";
             doCheck = false;
           };
           studioServer = craneLib.buildPackage (
@@ -263,7 +212,6 @@
                 "WARP_PROGRESS_URL=https://spiral-dev--warp-progress-warpprogress-web.modal.run"
                 "OBJECT_TRACKING_URL=https://spiral-dev--spiral-robotics-object-tracking-objecttracking-web.modal.run"
                 "TRAINING_SERVICE_URL=https://spiral-dev--spiral-robotics-training-control.modal.run"
-                "SPIRAL_DATA_PLANE_LIBRARY=${spiralRuntime}/lib/${runtimeLibrary}"
                 # LeRobot imports encode every camera again as H.264.
                 "SPIRAL_ROBOTICS_FFMPEG=${lib.getExe' pkgs.ffmpeg_9-headless "ffmpeg"}"
                 "DIOXUS_PUBLIC_PATH=${studioWeb}"
@@ -286,6 +234,9 @@
               pkgs.pkg-config
               pkgs.python312
               pkgs.ruff
+              # scripts/setup-scandal-runtime.py downloads spiraldb's archive
+              # through the GitHub CLI's login.
+              pkgs.gh
               tailwind
               pkgs.uv
             ]
@@ -294,6 +245,11 @@
             ++ browserTestInputs;
             NO_DOWNLOADS = "1";
             LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
+            # Where scripts/setup-scandal-runtime.py installs the pinned ScanDAL
+            # archive and spiral-scandal-sys links it from.
+            shellHook = ''
+              export SPIRAL_SCANDAL_CACHE_DIR="''${XDG_CACHE_HOME:-$HOME/.cache}/spiral-robotics/scandal/${scandalPins.source}"
+            '';
             GECKODRIVER = lib.getExe pkgs.geckodriver;
             # Select the pinned browser instead of a host Firefox installation.
             WASM_BINDGEN_TEST_WEBDRIVER_JSON = pkgs.writeText "studio-webdriver.json" (
@@ -327,12 +283,10 @@
             };
           developmentShell = sharedShell // {
             SPIRAL_ROBOTICS_CLIENT_ID = "client_sQWdRwk7ZTBd";
-            # Studio reaches Spiral through this runtime; tests never load it.
-            SPIRAL_DATA_PLANE_LIBRARY = "${spiralRuntime}/lib/${runtimeLibrary}";
             packages = sharedShell.packages ++ [ pkgs.ffmpeg ] ++ webBuildInputs;
             # Studio's provider keys for local runs come from the checkout's
             # untracked .env.local, in the variables the hosted image is given.
-            shellHook = ''
+            shellHook = sharedShell.shellHook + ''
               if studio_env=$(git rev-parse --show-toplevel 2>/dev/null)/.env.local \
                 && [ -f "$studio_env" ]; then
                 set -a
@@ -346,7 +300,6 @@
         {
           formatter = pkgs.nixfmt;
           packages = {
-            spiral-runtime = spiralRuntime;
             studio-server = studioServer;
             studio-web = studioWeb;
           }

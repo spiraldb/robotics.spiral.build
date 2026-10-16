@@ -48,6 +48,15 @@ jobs:
           printf 'Host github.com\n  IdentityFile ~/.ssh/spiraldb\n  IdentitiesOnly yes\n' >> ~/.ssh/config
           git config --global url."git@github.com:spiraldb/spiraldb.git".insteadOf "https://github.com/spiraldb/spiraldb.git"
 
+      # spiral-sdk links the ScanDAL archive Cargo.toml pins, which this
+      # repository's pre-release mirrors. spiraldb's setup script, fetched with
+      # the deploy key, verifies it and exports SPIRAL_SCANDAL_NATIVE_DIR to the
+      # later steps.
+      - name: Install the ScanDAL runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: nix develop .#ci --command python3 scripts/setup-scandal-runtime.py
+
       - name: Lint workflow
         run: nix develop .#ci --command actionlint
 

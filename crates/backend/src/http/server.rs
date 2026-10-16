@@ -48,63 +48,6 @@ struct StudioServerArguments {
         value_name = "URL"
     )]
     public_url: String,
-
-    #[command(subcommand)]
-    one_off: Option<OneOff>,
-}
-
-/// Work run once against a project instead of serving it.
-#[derive(Debug, clap::Subcommand)]
-enum OneOff {
-    /// One-off (October 2026): number the episodes of every dataset of
-    /// `--project`, or of `--dataset`, in place of their UUIDs, as the user
-    /// whose token `SPIRAL_ACCESS_TOKEN` holds.
-    NumberEpisodes {
-        #[arg(long)]
-        project: String,
-        #[arg(long)]
-        dataset: Option<String>,
-    },
-}
-
-impl OneOff {
-    fn run(self) -> ExitCode {
-        let Self::NumberEpisodes { project, dataset } = self;
-        let Ok(token) = std::env::var("SPIRAL_ACCESS_TOKEN") else {
-            eprintln!("error: set SPIRAL_ACCESS_TOKEN to a token of the project's user");
-            return ExitCode::FAILURE;
-        };
-        let settings = SpiralConnectionSettings::new(
-            ServiceEndpoint::environment_spiral().into_string(),
-            ServiceEndpoint::environment_spiral_spfs().into_string(),
-        )
-        .and_then(|settings| settings.with_project(&project));
-        let settings = match settings {
-            Ok(settings) => settings,
-            Err(error) => {
-                eprintln!("error: {error}");
-                return ExitCode::FAILURE;
-            }
-        };
-        let (publisher, access) = spiral_robotics_storage::SpiralAccessPublisher::new();
-        publisher.publish(Some(token));
-        let connection = spiral_robotics_storage::SpiralConnection::new(settings, access);
-        let numbered = tokio::runtime::Runtime::new()
-            .map_err(|error| error.to_string())
-            .and_then(|runtime| {
-                runtime.block_on(spiral_robotics_storage::SpiralSdkDatabase::number_episodes(
-                    &connection,
-                    dataset.as_deref(),
-                ))
-            });
-        match numbered {
-            Ok(_) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("error: {error}");
-                ExitCode::FAILURE
-            }
-        }
-    }
 }
 
 /// Everything a Studio server needs before it listens: its address, its
@@ -122,9 +65,6 @@ pub struct StudioServer;
 impl StudioServer {
     pub fn run() -> ExitCode {
         let arguments = StudioServerArguments::parse();
-        if let Some(one_off) = arguments.one_off {
-            return one_off.run();
-        }
         let Some(public) = ServerStartup::dioxus_public_directory()
             .filter(|path| path.join("index.html").is_file())
         else {

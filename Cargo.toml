@@ -18,16 +18,35 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+# spiraldb's prebuilt ScanDAL archive for each target, from its
+# native-runtime workflow at the commit the SDK is pinned to, copied to a
+# pre-release of this repository that CI reads with its own token:
+# scripts/setup-scandal-runtime.py installs it where spiral-scandal-sys links it,
+# and mirrors the pinned archives after re-pinning.
+[workspace.metadata.scandal-runtime]
+repository = "spiraldb/spiraldb"
+source = "83019e1c718ae0deca6048333a8c3afa937e239f"
+mirror = "spiraldb/spiral-robotics"
+release = "scandal-runtime-83019e1c"
+
+[workspace.metadata.scandal-runtime.archives.x86_64-unknown-linux-gnu]
+artifact-id = "12023494591"
+sha256 = "83dc0b74408e30ed54bbbf63d559cc0694b5c0379c37d16b37acb6b9f83dadbb"
+
+[workspace.metadata.scandal-runtime.archives.aarch64-unknown-linux-gnu]
+artifact-id = "12024460694"
+sha256 = "c53852f88fec997d903cd9bcc99dba34a50e0c782fe100dc96766ad77d2ccadc"
+
 [workspace.lints.rust]
 dead_code = "deny"
 unreachable_pub = "deny"
 
 [workspace.dependencies]
 # Spiral's SDK and its DataFusion integration, from the private SpiralDB
-# repository at one develop commit; the data-plane runtime Studio loads is
-# built from the same commit.
-spiral-sdk = { git = "https://github.com/spiraldb/spiraldb.git", rev = "8e9f8cf141425d60c6e3fdf5f8d40662cfc1d190", default-features = false, features = ["embedded"] }
-spiral-datafusion = { git = "https://github.com/spiraldb/spiraldb.git", rev = "8e9f8cf141425d60c6e3fdf5f8d40662cfc1d190", features = ["sql"] }
+# repository at one develop commit; the ScanDAL runtime the SDK links is the
+# archive `workspace.metadata.scandal-runtime` pins for the same commit.
+spiral-sdk = { git = "https://github.com/spiraldb/spiraldb.git", rev = "83019e1c718ae0deca6048333a8c3afa937e239f", default-features = false, features = ["embedded"] }
+spiral-datafusion = { git = "https://github.com/spiraldb/spiraldb.git", rev = "83019e1c718ae0deca6048333a8c3afa937e239f", features = ["sql"] }
 datafusion = { version = "55", default-features = false }
 base64 = "0.22"
 spiral-robotics-common = { path = "crates/common" }

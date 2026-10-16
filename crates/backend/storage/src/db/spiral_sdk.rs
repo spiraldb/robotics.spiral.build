@@ -1,11 +1,9 @@
 //! Spiral through its SDK: statements planned by DataFusion over the
 //! project's tables on `main`, writes published through SDK transactions.
-//! The SDK reads and writes through Spiral's data-plane runtime, a shared
-//! library built from the same SpiralDB commit as the SDK, loaded when the
-//! first connection opens.
+//! The SDK reads and writes through Spiral's ScanDAL runtime, linked into
+//! Studio from the prebuilt archive `scandal-runtime.json` pins.
 
 use std::backtrace::Backtrace;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use arrow_schema::Schema;
@@ -26,7 +24,6 @@ use super::database::{
 use super::staged_writes::{StagedWrite, StagedWrites};
 use crate::SpiralConnection;
 
-mod episode_numbers;
 #[cfg(test)]
 mod tests;
 
@@ -81,8 +78,6 @@ struct ResolvedTables {
 
 impl SpiralProject {
     const BRANCH: &str = "main";
-    /// Where the data-plane runtime is looked for when no path is given.
-    const RUNTIME: &str = "spiral_data_plane_runtime";
 
     /// A client authenticating every request with the user's token as
     /// Studio holds it then, so long work outlives each token.
@@ -115,9 +110,7 @@ impl SpiralProject {
             local_files: false,
             provider_roots: false,
         };
-        // SAFETY: the runtime is built from the SpiralDB commit the SDK is
-        // pinned at (the flake's `spiral-runtime`), so its ABI is the SDK's.
-        let scandal = unsafe { NativeScandal::load(&Self::runtime_library()?, &storage) }
+        let scandal = NativeScandal::new(&storage)
             .map_err(|error| DatabaseError::from_spiral(error.into()))?;
         let client = Client::builder()
             .api_url(settings.endpoint())
@@ -131,29 +124,6 @@ impl SpiralProject {
                 .map_err(DatabaseError::from_spiral)?,
             resolved: Arc::default(),
         })
-    }
-
-    /// `SPIRAL_DATA_PLANE_LIBRARY`, an absolute path, or the platform's
-    /// library beside the server executable.
-    fn runtime_library() -> DatabaseResult<PathBuf> {
-        if let Some(path) = std::env::var_os("SPIRAL_DATA_PLANE_LIBRARY") {
-            let path = PathBuf::from(path);
-            if !path.is_absolute() {
-                return Err(DatabaseError::invalid_input(
-                    "SPIRAL_DATA_PLANE_LIBRARY must be an absolute library path",
-                ));
-            }
-            return Ok(path);
-        }
-        let executable = std::env::current_exe().map_err(|error| {
-            DatabaseError::new(DatabaseErrorKind::Unavailable, error.to_string())
-        })?;
-        Ok(executable.with_file_name(format!(
-            "{}{}{}",
-            std::env::consts::DLL_PREFIX,
-            Self::RUNTIME,
-            std::env::consts::DLL_SUFFIX
-        )))
     }
 
     async fn query(

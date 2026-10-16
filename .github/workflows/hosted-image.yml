@@ -60,9 +60,19 @@ jobs:
           printf 'Host github.com\n  IdentityFile ~/.ssh/spiraldb\n  IdentitiesOnly yes\n' >> ~/.ssh/config
           git config --global url."git@github.com:spiraldb/spiraldb.git".insteadOf "https://github.com/spiraldb/spiraldb.git"
 
+      # spiral-sdk links the ScanDAL archive Cargo.toml pins, which this
+      # repository's pre-release mirrors. spiraldb's setup script, fetched with
+      # the deploy key, verifies it and exports SPIRAL_SCANDAL_NATIVE_DIR to the
+      # later steps.
+      - name: Install the ScanDAL runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: nix develop .#ci --command python3 scripts/setup-scandal-runtime.py
+
       # The result is a script that streams the image as a Docker archive.
+      # --impure lets the build read the ScanDAL archive's directory.
       - name: Build the image
-        run: nix build .#hosted-image --out-link hosted-image
+        run: nix build --impure .#hosted-image --out-link hosted-image
 
       # Signed in after the build, so the token is fresh for the push.
       - id: auth

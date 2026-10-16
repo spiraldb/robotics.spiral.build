@@ -29,17 +29,22 @@ The backend HTTP API and curl examples are documented in
 ## Development
 
 Use [Nix](https://nixos.org/download.html) for development. `flake.nix` and
-`flake.lock` own the Rust toolchain, build tools, standalone ADBC driver, and
+`flake.lock` own the Rust toolchain, build tools, and
 their environment variables. With direnv, `.envrc` loads the same default shell.
 
 ```console
 nix develop .
 ```
 
-The default shell builds Spiral's data-plane runtime from the SpiralDB commit
-`Cargo.toml` pins and points Studio at it; Cargo and Nix fetch that private
-repository with your git credentials. See
-[database setup](docs/database-boundary.md) to try an unreleased upstream build.
+Studio links Spiral's ScanDAL runtime from the prebuilt archive `Cargo.toml`
+pins. Install it once per pin, in the shell, with your `gh` login:
+
+```console
+python3 scripts/setup-scandal-runtime.py
+```
+
+Cargo fetches SpiralDB's private repository with your git credentials. See
+[database setup](docs/database-boundary.md) for the archive and its pins.
 
 Run CI commands with `nix develop .#ci --command <command>`.
 

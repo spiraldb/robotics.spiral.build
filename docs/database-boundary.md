@@ -18,24 +18,36 @@ lose a service endpoint, which surfaces as a catalog request failing with
 `401 Unauthorized` on every commit. Cargo fetches it with the system's git and its credentials
 (`.cargo/config.toml`); CI loads the read-only `SPIRALDB_DEPLOY_KEY` first.
 
-The SDK reads and writes through Spiral's data-plane runtime, a shared library
-built from the same commit as the SDK: the two ship in lockstep. Set
-`SPIRAL_DATA_PLANE_LIBRARY` to an absolute path to it; without that override,
-Studio loads `libspiral_data_plane_runtime.dylib` on macOS or
-`libspiral_data_plane_runtime.so` on Linux beside the server executable. The
-library loads when the first connection opens. `nix build .#spiral-runtime`
-builds it from the commit `Cargo.toml` pins, with SpiralDB's own toolchain and
-Cargo configuration; the development shell and the hosted image set the
-variable to it. Tests never load it.
+The SDK reads and writes through Spiral's ScanDAL runtime, linked into Studio
+at build time from a prebuilt static archive (`spiral-scandal-sys`). spiraldb's
+`native-runtime` workflow builds one archive per commit and target and keeps it
+as a GitHub Actions artifact. `workspace.metadata.scandal-runtime` in
+`Cargo.toml` pins, for the commit the SDK is pinned to, each target's artifact
+ID and the archive's SHA-256. A pre-release of this repository mirrors the
+pinned archives, so CI downloads them with its own token.
 
-To try an unreleased upstream change, build the library from that SpiralDB
-checkout (outside Studio's Nix shells, so its own toolchain applies), point
-`SPIRAL_DATA_PLANE_LIBRARY` at it, and pin `Cargo.toml` to the same commit:
+`scripts/setup-scandal-runtime.py` installs the pinned archive for a target
+(the host's by default). It downloads it from the mirror and hands it to
+spiraldb's own setup script, fetched with git at the pinned commit, which
+verifies the archive's checksum and source commit and installs it under
+`SPIRAL_SCANDAL_CACHE_DIR`. Both Nix shells set that to a cache keyed by the
+pinned commit, where the build links it from. Run it once per pin, in the shell:
 
 ```sh
-# Run from the upstream Spiral checkout.
-cargo build --release --locked -p spiral-data-plane-runtime --lib --features bundled-openssl
+python3 scripts/setup-scandal-runtime.py
 ```
+
+CI installs the archive before it builds and exports
+`SPIRAL_SCANDAL_NATIVE_DIR`; the hosted image builds with `nix build
+--impure`, which reads the archive from that directory.
+
+To move to another SpiralDB commit:
+
+1. Dispatch spiraldb's `native-runtime` workflow for the commit.
+2. Pin `Cargo.toml` to the commit, a new `release` name, and each target's
+   artifact ID and the SHA-256 the run's packaging step prints.
+3. Mirror the archives with your `gh` login:
+   `python3 scripts/setup-scandal-runtime.py mirror`.
 
 Every request authenticates with the signed-in user's token as Studio holds it
 when the request is made, so long work outlives each short-lived token.
