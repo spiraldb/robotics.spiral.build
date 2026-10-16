@@ -13,7 +13,9 @@ permissions:
 jobs:
   checks:
     name: Nix / Rust / Python
-    runs-on: ubuntu-24.04
+    # A RunsOn runner, as the image build uses: the workspace's debug and test
+    # builds outgrow a GitHub runner's disk.
+    runs-on: runs-on=${{ github.run_id }}-${{ github.run_attempt }}-studio-ci/family=c8a+m7a/cpu=16/image=ubuntu24-full-x64/volume=150gb:gp3
     timeout-minutes: 90
     env:
       CI_RUST_PACKAGES: >-
