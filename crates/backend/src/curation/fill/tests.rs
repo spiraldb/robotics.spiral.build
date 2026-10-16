@@ -368,7 +368,7 @@ async fn a_run_fills_each_column_once_and_then_publishes_its_view() {
         .drop(&ViewName::try_from(view.as_str()).unwrap())
         .await
         .unwrap();
-    storage.drop_probe_dataset(&name).await.unwrap();
+    storage.delete_dataset(&dataset).await.unwrap();
     match outcome {
         Ok(outcome) => outcome.expect("fill run"),
         Err(panic) => std::panic::resume_unwind(panic),

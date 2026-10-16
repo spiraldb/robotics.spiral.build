@@ -2,16 +2,19 @@
 //! every episode's streams found.
 use super::DatasetClient;
 use super::dataset_checks::{CheckedEpisode, DatasetCheckReport};
+use super::relations::CatalogRefresh;
 use crate::activities::episode::EpisodeListing;
 use crate::format::{
     ByteCountPresentation, ClockPresentation, GroupedCountPresentation, LongDurationPresentation,
     UtcTimestampPresentation, WallClockPresentation,
 };
+use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
 use serde::Deserialize;
 use spiral_robotics_common::datasets::{DatasetFormat, DatasetSelection};
 use spiral_robotics_ui::{
-    ActionPurpose, Button, ButtonSize, ButtonVariant, Fact, FactLayout, FactList, KindMark,
+    ActionPurpose, Button, ButtonSize, ButtonVariant, ConfirmationCopy, ConfirmationDismissal,
+    ConfirmationResponse, Fact, FactLayout, FactList, InlineConfirmation, KindMark,
 };
 use std::collections::HashMap;
 
@@ -123,6 +126,9 @@ pub(in crate::activities) fn DatasetOverview(
     listing: EpisodeListing,
     /// Opens an episode a finding names, where the finding is.
     on_open: EventHandler<CheckedEpisode>,
+    /// Given, the head offers Delete, and this hears once the dataset is
+    /// gone; Data's Overview gives it, Curation's Dataset node does not.
+    on_deleted: Option<EventHandler<()>>,
 ) -> Element {
     // The totals belong to this dataset alone: choosing another one
     // re-queries, and each answer carries the dataset it was read for, since
@@ -148,12 +154,34 @@ pub(in crate::activities) fn DatasetOverview(
         .or_else(|| memory.facts(&dataset).map(Ok));
     let name = dataset.display_name();
     let label = dataset.label();
+    // The dataset Delete is asking about: the Overview shows one dataset after
+    // another, and choosing another one leaves the question unasked.
+    let mut confirming = use_signal(|| None::<DatasetSelection>);
+    let asking = confirming.read().as_ref() == Some(&dataset);
+    let delete_id = format!("data-overview-delete-{}", dataset.id());
+    let asked = dataset.clone();
     rsx! {
         section { class: "data-overview", "aria-label": "Dataset overview",
             div { class: "data-overview-body",
                 header { class: "data-overview-head",
                     KindMark { class: "data-overview-mark", letter: 'D', hue: "var(--tone-kind-dataset)", label: "Dataset" }
                     h2 { title: "{label}", "{name}" }
+                    if on_deleted.is_some() && !asking {
+                        Button { id: delete_id.clone(), purpose: ActionPurpose::Delete, variant: ButtonVariant::Link,
+                            size: ButtonSize::Compact, class: "data-overview-head-action",
+                            title: "Delete {label}",
+                            onclick: move |_| confirming.set(Some(asked.clone())), "Delete" }
+                    }
+                }
+                if let Some(on_deleted) = on_deleted.filter(|_| asking) {
+                    DeleteConfirmation { dataset: dataset.clone(), return_focus: delete_id,
+                        on_done: move |deleted: bool| {
+                            confirming.set(None);
+                            if deleted {
+                                on_deleted.call(());
+                            }
+                        },
+                    }
                 }
                 match &facts {
                     Some(Err(error)) => rsx! { p { class: "data-overview-alert", role: "alert", "{error}" } },
@@ -177,6 +205,53 @@ pub(in crate::activities) fn DatasetOverview(
                     DatasetCheckReport { listing: listing.clone(), on_open }
                 }
             }
+        }
+    }
+}
+
+/// Whether to delete the dataset, asked under its head: confirmed, every
+/// table of it is dropped, and the catalog is read again. `on_done` says
+/// whether it was deleted.
+#[component]
+fn DeleteConfirmation(
+    dataset: DatasetSelection,
+    return_focus: String,
+    on_done: EventHandler<bool>,
+) -> Element {
+    let studio = StudioProjectState::current();
+    let mut pending = use_signal(|| false);
+    let name = dataset.display_name().to_owned();
+    rsx! {
+        InlineConfirmation {
+            id: "data-overview-delete-confirmation",
+            class: "data-overview-confirmation",
+            copy: ConfirmationCopy::new(
+                format!("Delete dataset {name}? Its episodes, recordings and answers will be permanently removed."),
+                if pending() { "Deleting…" } else { "Delete dataset" },
+                "Keep dataset",
+            ),
+            response: ConfirmationResponse::new(
+                ActionPurpose::Delete,
+                move |_| {
+                    pending.set(true);
+                    let dataset = dataset.clone();
+                    spawn(async move {
+                        let outcome = DatasetClient::current().delete_dataset(&dataset).await;
+                        pending.set(false);
+                        let deleted = outcome.is_ok();
+                        match outcome {
+                            Ok(()) => {
+                                CatalogRefresh::request();
+                                studio.report_success(format!("Deleted {}", dataset.display_name()));
+                            }
+                            Err(error) => studio.report(error.to_string()),
+                        }
+                        on_done.call(deleted);
+                    });
+                },
+                move |_| on_done.call(false),
+            ),
+            dismissal: ConfirmationDismissal::new(return_focus).with_pending(pending()),
         }
     }
 }

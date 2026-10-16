@@ -58,6 +58,7 @@ impl DatasetQueryEndpoints {
                 post(Self::save_dataset_joint_roles),
             )
             .route("/datasets/imports", post(Self::start_import))
+            .route("/datasets/delete", post(Self::delete_dataset))
     }
     /// Every dataset of the project, each at the version it is at now.
     async fn datasets(
@@ -110,6 +111,18 @@ impl DatasetQueryEndpoints {
         project
             .storage()
             .save_dataset_joint_roles(save)
+            .await
+            .map_err(OperationError::External)?;
+        Ok(Json(()))
+    }
+    /// Drop every table of the dataset; one already gone stays deleted.
+    async fn delete_dataset(
+        Project(project): Project,
+        ApiJson(dataset): ApiJson<DatasetSelection>,
+    ) -> Result<Json<()>, OperationError> {
+        project
+            .storage()
+            .delete_dataset(&dataset)
             .await
             .map_err(OperationError::External)?;
         Ok(Json(()))

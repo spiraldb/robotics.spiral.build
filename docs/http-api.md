@@ -247,6 +247,10 @@ A dataset is the tables under `datasets.<id>` that Studio writes itself
 - `POST /datasets/episode-topics` (`EpisodeSelection`, `{dataset,
   episode_id}`) lists the streams one episode holds, each with its message
   count.
+- `POST /datasets/delete` (`DatasetSelection`) drops every table under
+  `datasets.<id>` in one transaction, answers and recordings included, and
+  any table Studio no longer writes; a dataset with no tables is already
+  deleted.
 
 Episode content is read with read-only SQL over those tables: `POST /queries`,
 and `POST /queries/episode` and `POST /queries/episodes`, which bind one

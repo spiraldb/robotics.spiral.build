@@ -330,7 +330,7 @@ pub(super) fn CuratedViewSubject(
                 }
                 if !confirming() {
                     Button { id: unpublish_id.clone(), purpose: ActionPurpose::Remove, variant: ButtonVariant::Link,
-                        size: ButtonSize::Compact, class: "data-curated-unpublish",
+                        size: ButtonSize::Compact, class: "data-overview-head-action",
                         title: "Drop this view",
                         onclick: move |_| confirming.set(true), "Unpublish" }
                 }
@@ -386,7 +386,7 @@ fn UnpublishConfirmation(
     rsx! {
         InlineConfirmation {
             id: "data-curated-unpublish-confirmation",
-            class: "data-curated-confirmation",
+            class: "data-overview-confirmation",
             copy: ConfirmationCopy::new(
                 format!(
                     "Unpublish {name}? The view is dropped; the curation “{}” keeps its recipe and can publish it again.",

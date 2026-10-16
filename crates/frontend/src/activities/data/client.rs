@@ -62,6 +62,14 @@ impl DatasetClient {
         self.project
             .request(HttpRequest::new("POST", "/api/datasets/imports").json(request))
     }
+    /// Drop every table of `dataset`: its episodes, recordings and answers.
+    pub(super) fn delete_dataset(
+        &self,
+        dataset: &DatasetSelection,
+    ) -> impl Future<Output = Result<(), CommandError>> + use<> {
+        self.project
+            .request(HttpRequest::new("POST", "/api/datasets/delete").json(dataset))
+    }
     /// Where the import run `id` has got.
     pub(super) fn import_status(
         &self,

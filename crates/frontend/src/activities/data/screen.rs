@@ -159,6 +159,18 @@ impl DataSelection {
             None => self.open_episode(opened),
         }
     }
+    /// A deleted dataset leaves the Overview, and the tabs of its episodes
+    /// and of the curated views over it close.
+    fn forget_dataset(mut self, dataset: &DatasetSelection) {
+        if self.dataset.peek().as_ref() == Some(dataset) {
+            self.dataset.set(None);
+        }
+        self.episodes
+            .write()
+            .retain(|open| open.episode().dataset() != dataset);
+        self.views.write().retain(|view| view.dataset() != dataset);
+        self.activate(PanelId::new(OVERVIEW_PANEL));
+    }
     fn start_import(mut self) {
         self.importing.set(true);
         self.activate(PanelId::new(IMPORT_PANEL));
@@ -369,10 +381,14 @@ fn DataPanels() -> Element {
     // which its inspection says.
     let overview = match dataset {
         Some(_) => match &dataset_inspection {
-            Some(Ok(inspection)) => rsx! {
-                DatasetOverview { listing: EpisodeListing::of(inspection.dataset()),
-                    on_open: move |checked| selection.open_episode(OpenedEpisode::checked(checked)) }
-            },
+            Some(Ok(inspection)) => {
+                let deleted = inspection.dataset().selection().clone();
+                rsx! {
+                    DatasetOverview { listing: EpisodeListing::of(inspection.dataset()),
+                        on_open: move |checked| selection.open_episode(OpenedEpisode::checked(checked)),
+                        on_deleted: move |()| selection.forget_dataset(&deleted) }
+                }
+            }
             Some(Err(error)) => {
                 rsx! { p { class: "data-overview-alert", role: "alert", "{error}" } }
             }

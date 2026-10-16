@@ -279,6 +279,18 @@ impl CatalogDatasets {
             .collect()
     }
 
+    /// The catalog name of every table under `dataset`, including any Studio
+    /// no longer writes: everything deleting the dataset drops.
+    fn table_names(&self, dataset: &DatasetSelection) -> Vec<String> {
+        self.datasets.get(dataset).map_or_else(Vec::new, |tables| {
+            tables
+                .tables
+                .keys()
+                .map(|path| format!("{}.{}", dataset.label(), path.join(".")))
+                .collect()
+        })
+    }
+
     /// Every answer column `dataset` holds a table for.
     pub(crate) fn answer_columns(
         &self,
@@ -309,6 +321,29 @@ impl StorageManager {
             .datasets()
             .await?
             .summaries())
+    }
+
+    /// Drop every table of `dataset` in one transaction, its answers and
+    /// recordings with it; a dataset with no tables is already gone.
+    pub async fn delete_dataset(&self, dataset: &DatasetSelection) -> Result<(), String> {
+        let tables = self
+            .project_store()
+            .dataset_catalog()
+            .datasets()
+            .await?
+            .table_names(dataset);
+        if tables.is_empty() {
+            return Ok(());
+        }
+        let mut connection = self.project_store().connect_exclusive().await?;
+        connection
+            .transaction("dataset delete", async |connection| {
+                for table in &tables {
+                    connection.drop_table(table).await?;
+                }
+                Ok(())
+            })
+            .await
     }
 }
 
@@ -345,6 +380,8 @@ mod tests {
             // A dataset whose episodes are gone is no dataset, but its
             // tables are still there.
             table("datasets.leftover.topics", "topics-3"),
+            // A table Studio no longer writes still belongs to its dataset.
+            table("datasets.leftover.answers", "answers-3"),
             table("dataset_default", "old"),
             json!({"parent": {"kind": "projectRoot"}, "name": "datasets.view.episodes",
                 "resource": {"descriptor": {"resourceId": "view", "kind": "view"}, "versionId": "v"}}),
@@ -394,5 +431,22 @@ mod tests {
             BTreeSet::from([similarity])
         );
         assert!(datasets.answer_columns(&leftover).unwrap().is_empty());
+        // Deleting a dataset drops every table under its name.
+        assert_eq!(
+            datasets.table_names(&leftover),
+            ["datasets.leftover.answers", "datasets.leftover.topics"]
+        );
+        assert_eq!(
+            datasets.table_names(svla),
+            [
+                "datasets.svla.answers.similarity_3f9a2c",
+                "datasets.svla.episodes"
+            ]
+        );
+        assert!(
+            datasets
+                .table_names(&DatasetSelection::new("default").unwrap())
+                .is_empty()
+        );
     }
 }

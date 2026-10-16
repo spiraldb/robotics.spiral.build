@@ -869,7 +869,7 @@ mod tests {
             Ok::<_, String>(())
         }))
         .await;
-        storage.drop_probe_dataset(&name).await.unwrap();
+        storage.delete_dataset(&dataset).await.unwrap();
         let mut connection = store.connect().await.unwrap();
         assert!(
             !connection

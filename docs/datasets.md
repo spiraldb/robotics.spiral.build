@@ -151,7 +151,10 @@ committed stay, and a new import under the same name is refused, so delete
 the dataset first. Downloads send the deployment's `HF_TOKEN` when it is set,
 and the repository must be public. Rollout recording appends only to an
 MCAP dataset. Browser uploads carry bytes, never filesystem paths for the
-server to open. Deleting a dataset drops every table under `datasets.<id>`.
+server to open. Delete, at the head of a dataset's Overview in Data, drops
+every table under `datasets.<id>` in one transaction once confirmed: its
+answers and the recordings Studio holds go with it, since no source holds
+them again.
 
 ## LeRobot datasets
 

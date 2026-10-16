@@ -279,7 +279,10 @@ async fn stored_recordings_read_back_by_episode_and_stream() {
     }
     .await;
     for probe in [&name, &other_name] {
-        storage.drop_probe_dataset(probe).await.unwrap();
+        storage
+            .delete_dataset(&DatasetSelection::new(probe.clone()).unwrap())
+            .await
+            .unwrap();
     }
     outcome.expect("stored recordings");
 }

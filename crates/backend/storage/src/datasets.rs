@@ -166,26 +166,6 @@ impl crate::StorageManager {
         self.store_recording(&crate::EpisodeName::new(dataset, episode)?, &bytes)
             .await
     }
-
-    /// Drop the probe dataset `name`: every table under its namespace.
-    pub async fn drop_probe_dataset(&self, name: &str) -> Result<(), String> {
-        let dataset = spiral_robotics_common::datasets::DatasetSelection::new(name)?;
-        let tables = self
-            .project_store()
-            .dataset_catalog()
-            .datasets()
-            .await?
-            .tables(&dataset)?;
-        let mut connection = self.project_store().connect_exclusive().await?;
-        connection
-            .transaction("dataset delete", async |connection| {
-                for table in &tables {
-                    connection.drop_table(table.name()).await?;
-                }
-                Ok(())
-            })
-            .await
-    }
 }
 
 #[cfg(test)]
