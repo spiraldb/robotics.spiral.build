@@ -109,6 +109,7 @@ impl SpiralProject {
             spfs_endpoint: Some(spfs),
             local_files: false,
             provider_roots: false,
+            refuse_custom_endpoints: false,
         };
         let scandal = NativeScandal::new(&storage)
             .map_err(|error| DatabaseError::from_spiral(error.into()))?;
