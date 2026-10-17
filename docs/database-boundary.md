@@ -11,43 +11,38 @@ Storage features depend on `Database`, `DatabaseSession`,
 ## Spiral's SDK
 
 `SpiralSdkDatabase` reaches Spiral through `spiral-sdk` (library `spiral`) and
-`spiral-datafusion`, Git dependencies on the private SpiralDB repository pinned
-to one `develop` commit in the workspace `Cargo.toml`. Spiral's hosted
-services deploy from `develop`, so keep that commit recent: an older SDK can
-lose a service endpoint, which surfaces as a catalog request failing with
-`401 Unauthorized` on every commit. Cargo fetches it with the system's git and its credentials
-(`.cargo/config.toml`); CI loads the read-only `SPIRALDB_DEPLOY_KEY` first.
+`spiral-datafusion`, Git dependencies on a Rust SDK release of the private
+SpiralDB repository: the `rust-sdk/X.Y.Z` tag the workspace `Cargo.toml`
+names. Spiral's hosted services deploy from `develop`, so keep the release
+recent: an older SDK can lose a service endpoint, which surfaces as a catalog
+request failing with `401 Unauthorized` on every commit. Cargo fetches it with
+the system's git and its credentials (`.cargo/config.toml`); CI loads the
+read-only `SPIRALDB_DEPLOY_KEY` first.
 
 The SDK reads and writes through Spiral's ScanDAL runtime, linked into Studio
-at build time from a prebuilt static archive (`spiral-scandal-sys`). spiraldb's
-`native-runtime` workflow builds one archive per commit and target and keeps it
-as a GitHub Actions artifact. `workspace.metadata.scandal-runtime` in
-`Cargo.toml` pins, for the commit the SDK is pinned to, each target's artifact
-ID and the archive's SHA-256. A pre-release of this repository mirrors the
-pinned archives, so CI downloads them with its own token.
-
-`scripts/setup-scandal-runtime.py` installs the pinned archive for a target
-(the host's by default). It downloads it from the mirror and hands it to
-spiraldb's own setup script, fetched with git at the pinned commit, which
-verifies the archive's checksum and source commit and installs it under
-`SPIRAL_SCANDAL_CACHE_DIR`. Both Nix shells set that to a cache keyed by the
-pinned commit, where the build links it from. Run it once per pin, in the shell:
+at build time from the release's prebuilt static archive (`spiral-scandal-sys`).
+Each target's archive is an asset of the release's private GitHub
+pre-release, and the release commit records its SHA-256.
+`scripts/setup-spiral-sdk.sh` runs the release's own setup script from Cargo's
+checkout of the tag. That script downloads the host's archive (or
+`--target`'s) with `GH_TOKEN`, `GITHUB_TOKEN` or your `gh` login, any of which
+must read spiraldb/spiraldb, verifies it, and installs it under
+`~/.cache/spiral/scandal/<version>/<target>` (`SPIRAL_SCANDAL_CACHE_DIR`
+replaces `~/.cache/spiral/scandal`), where the build links it from. The default
+Nix shell runs it on entry when the locked release's archive is missing;
+otherwise run it once per release:
 
 ```sh
-python3 scripts/setup-scandal-runtime.py
+scripts/setup-spiral-sdk.sh
 ```
 
-CI installs the archive before it builds and exports
-`SPIRAL_SCANDAL_NATIVE_DIR`; the hosted image builds with `nix build
---impure`, which reads the archive from that directory.
+CI runs it with the `SPIRAL_SDK_TOKEN` secret, a token with contents read
+access to spiraldb/spiraldb, and it exports `SPIRAL_SCANDAL_NATIVE_DIR`; the
+hosted image builds with `nix build --impure`, which reads the archive from
+that directory.
 
-To move to another SpiralDB commit:
-
-1. Dispatch spiraldb's `native-runtime` workflow for the commit.
-2. Pin `Cargo.toml` to the commit, a new `release` name, and each target's
-   artifact ID and the SHA-256 the run's packaging step prints.
-3. Mirror the archives with your `gh` login:
-   `python3 scripts/setup-scandal-runtime.py mirror`.
+To move to another release, change both dependencies' tag in `Cargo.toml`,
+update `Cargo.lock` (`cargo fetch`), and run `scripts/setup-spiral-sdk.sh`.
 
 Every request authenticates with the signed-in user's token as Studio holds it
 when the request is made, so long work outlives each short-lived token.

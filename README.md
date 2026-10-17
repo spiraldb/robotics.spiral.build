@@ -36,15 +36,17 @@ their environment variables. With direnv, `.envrc` loads the same default shell.
 nix develop .
 ```
 
-Studio links Spiral's ScanDAL runtime from the prebuilt archive `Cargo.toml`
-pins. Install it once per pin, in the shell, with your `gh` login:
+Studio builds on a Spiral Rust SDK release, which Cargo fetches from
+SpiralDB's private repository with your git credentials. The SDK links that
+release's native ScanDAL runtime, a private release asset: the default shell
+installs it on entry, once per release, with `GH_TOKEN` or your `gh` login
+(either must read spiraldb/spiraldb). Outside the shell, install it with:
 
 ```console
-python3 scripts/setup-scandal-runtime.py
+scripts/setup-spiral-sdk.sh
 ```
 
-Cargo fetches SpiralDB's private repository with your git credentials. See
-[database setup](docs/database-boundary.md) for the archive and its pins.
+See [database setup](docs/database-boundary.md) for the release and its archive.
 
 Run CI commands with `nix develop .#ci --command <command>`.
 

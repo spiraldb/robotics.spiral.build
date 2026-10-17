@@ -114,7 +114,7 @@ class PictureEncoder:
 
     def precision(self) -> torch.autocast:
         """fp16 autocast on CUDA, about 3x faster on a T4; full precision elsewhere, the closest
-        match to the Rust for local parity runs."""
+        match to SpiralDB's Rust `warp_rm`."""
         return torch.autocast(self._device.type, dtype=torch.float16, enabled=self._device.type == "cuda")
 
     @contextmanager
