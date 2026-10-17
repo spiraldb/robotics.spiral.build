@@ -1,7 +1,7 @@
 //! Spiral through its SDK: statements planned by DataFusion over the
 //! project's tables on `main`, writes published through SDK transactions.
 //! The SDK reads and writes through Spiral's ScanDAL runtime, linked into
-//! Studio from the prebuilt archive `scandal-runtime.json` pins.
+//! Studio from the native archive of the SDK release `Cargo.toml` names.
 
 use std::backtrace::Backtrace;
 use std::sync::{Arc, Mutex};
