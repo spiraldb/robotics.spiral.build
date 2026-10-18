@@ -136,8 +136,8 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "apps-api"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "async-trait",
  "futures",
@@ -159,8 +159,8 @@ dependencies = [
 
 [[package]]
 name = "arbor-api"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "arbor-types",
  "async-trait",
@@ -174,8 +174,8 @@ dependencies = [
 
 [[package]]
 name = "arbor-types"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "serde",
  "serde_json",
@@ -649,8 +649,8 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "authz-api"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "serde",
  "spid",
@@ -1060,8 +1060,8 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "catalog-api"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "async-trait",
  "serde",
@@ -3483,8 +3483,8 @@ dependencies = [
 
 [[package]]
 name = "external-connection-api"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "async-trait",
  "filesystem-api",
@@ -3578,8 +3578,8 @@ checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "filesystem-api"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "object_store",
  "reqwest 0.13.5",
@@ -5117,8 +5117,8 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "location-api"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "async-trait",
  "external-connection-api",
@@ -6074,8 +6074,8 @@ dependencies = [
 
 [[package]]
 name = "organization-api"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "chrono",
  "filesystem-api",
@@ -6575,8 +6575,8 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
 name = "project-api"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "authz-api",
  "serde",
@@ -8011,8 +8011,8 @@ dependencies = [
 
 [[package]]
 name = "spid"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "serde",
  "strum 0.28.0",
@@ -8031,8 +8031,8 @@ dependencies = [
 
 [[package]]
 name = "spiral-auth"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "async-trait",
  "futures",
@@ -8053,8 +8053,8 @@ dependencies = [
 
 [[package]]
 name = "spiral-authz-spec"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "chrono",
  "serde",
@@ -8066,13 +8066,13 @@ dependencies = [
 
 [[package]]
 name = "spiral-build-info"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 
 [[package]]
 name = "spiral-config"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "arc-swap",
  "config",
@@ -8089,8 +8089,8 @@ dependencies = [
 
 [[package]]
 name = "spiral-contract"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -8102,8 +8102,8 @@ dependencies = [
 
 [[package]]
 name = "spiral-datafusion"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "async-trait",
  "datafusion",
@@ -8118,8 +8118,8 @@ dependencies = [
 
 [[package]]
 name = "spiral-error"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "arrow-schema",
  "async-trait",
@@ -8145,8 +8145,8 @@ dependencies = [
 
 [[package]]
 name = "spiral-http-client"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -8404,8 +8404,8 @@ dependencies = [
 
 [[package]]
 name = "spiral-scandal"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "arrow-array",
  "arrow-ipc",
@@ -8435,24 +8435,24 @@ dependencies = [
 
 [[package]]
 name = "spiral-scandal-sys"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "arrow-array",
 ]
 
 [[package]]
 name = "spiral-scopes"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "strum 0.28.0",
 ]
 
 [[package]]
 name = "spiral-sdk"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "apps-api",
  "arbor-api",
@@ -8495,8 +8495,8 @@ dependencies = [
 
 [[package]]
 name = "spiral-session"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -8517,8 +8517,8 @@ dependencies = [
 
 [[package]]
 name = "spiral-task-types"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "catalog-api",
  "serde",
@@ -8529,8 +8529,8 @@ dependencies = [
 
 [[package]]
 name = "spiral-token"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "jsonwebtoken",
  "secrecy",
@@ -8944,8 +8944,8 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "task-api"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "async-trait",
  "catalog-api",
@@ -9586,8 +9586,8 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "vector-index-api"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "arbor-types",
  "async-trait",
@@ -9794,8 +9794,8 @@ dependencies = [
 
 [[package]]
 name = "vortex-case-when"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "prost",
  "vortex-array",
@@ -10260,8 +10260,8 @@ dependencies = [
 
 [[package]]
 name = "vortex-turboquant"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -11188,8 +11188,8 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "workloads-api"
-version = "0.1.1"
-source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.1#392976317a20c6e845f0923c792b5d18c38eb219"
+version = "0.1.2"
+source = "git+https://github.com/spiraldb/spiraldb.git?tag=rust-sdk%2F0.1.2#75668bdf06cea0e684043ba45cdfeb08a07c3662"
 dependencies = [
  "percent-encoding",
  "serde",
