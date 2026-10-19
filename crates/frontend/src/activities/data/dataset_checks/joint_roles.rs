@@ -43,6 +43,7 @@ impl JointRoleDiscovery {
                     "streams": episode.topics(),
                     "robot_bindings": self.bindings()?,
                     "documentation": episode.documentation(),
+                    "lerobot_features": episode.lerobot_features().await?,
                 })
                 .to_string(),
             ),
@@ -248,14 +249,16 @@ impl<'a> IdentifiedJoints<'a> {
                     Self::read(arm.state()),
                     arm.action().map_or_else(|| "—".to_owned(), Self::read),
                     arm.gripper().map(|gripper| {
-                        let (open, closed) = gripper.range();
                         (
                             format!(
                                 "{} → {}",
                                 Self::read(gripper.state()),
                                 Self::read(gripper.action())
                             ),
-                            format!("open {open} · closed {closed}"),
+                            gripper.range().map_or_else(
+                                || "ends unknown".to_owned(),
+                                |(open, closed)| format!("open {open} · closed {closed}"),
+                            ),
                         )
                     }),
                 )

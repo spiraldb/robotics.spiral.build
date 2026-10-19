@@ -36,7 +36,7 @@ impl QueryCommand {
         Self::new(statement, max_rows).validated()
     }
 
-    /// One exact dataset member's query, with its statement admitted the same way.
+    /// One exact episode's query, with its statement admitted the same way.
     pub(crate) fn admitted_for_episode(
         request: EpisodeQueryRequest,
     ) -> Result<EpisodeQueryRequest, OperationError> {

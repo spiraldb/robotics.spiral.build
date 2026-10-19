@@ -8,6 +8,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     flake-utils.url = "github:numtide/flake-utils";
+    crane.url = "github:ipetkov/crane";
   };
 
   outputs =
@@ -16,6 +17,7 @@
       nixpkgs,
       rust-overlay,
       flake-utils,
+      crane,
       ...
     }:
     flake-utils.lib.eachSystem
@@ -57,10 +59,6 @@
           # components: with rust-src installed, panic locations name the
           # toolchain's store path, which would put all of it in the image.
           packageRustToolchain = pkgs.rust-bin.fromRustupToolchain (rustPin // { profile = "minimal"; });
-          rustPlatform = pkgs.makeRustPlatform {
-            cargo = packageRustToolchain;
-            rustc = packageRustToolchain;
-          };
           # nixpkgs kept Tailwind 3 under the unsuffixed name for a while.
           tailwind = pkgs.tailwindcss_4 or pkgs.tailwindcss;
           # `dx` builds the web client and native server as one fullstack app,
@@ -83,56 +81,26 @@
           linuxBuildInputs = lib.optionals hostPlatform.isLinux [
             pkgs.v4l-utils
           ];
-          # Pin the official standalone release and its archive checksums here.
-          # Rust builds never compile the embedded engine.
-          adbcVersion = "0.16.47";
-          adbcArchiveHashes = {
-            aarch64-apple-darwin = "6a60f7a8665f9fc7538b80bf1df9a36e13daa43c4913f4b3b712c77e5870782c";
-            aarch64-unknown-linux-gnu = "b38bb60fdb134707ede4f8407a2c101fb91868198deccce7dac4e25d6b93502d";
-            x86_64-unknown-linux-gnu = "37e217bd1002b6c6f8945f1c86e7174b216f1bd626fcd811e120fae23f1deb86";
-          };
-          adbcTarget =
-            {
-              aarch64-darwin = "aarch64-apple-darwin";
-              aarch64-linux = "aarch64-unknown-linux-gnu";
-              x86_64-linux = "x86_64-unknown-linux-gnu";
-            }
-            .${system};
-          adbcLibrary = "libadbc_driver_spiraldb${hostPlatform.extensions.sharedLibrary}";
-          # The driver loads the video runtime from its own directory.
-          videoRuntimeLibrary = "libspiral_video_runtime${hostPlatform.extensions.sharedLibrary}";
-          # The archive leaves out the FFmpeg 9 libraries the video runtime
-          # links. Headless is the smallest nixpkgs build that has them.
-          ffmpegLibraries = lib.getLib pkgs.ffmpeg_9-headless;
-          spiralAdbc = pkgs.stdenvNoCC.mkDerivation {
-            pname = "spiral-adbc";
-            version = adbcVersion;
-            src = pkgs.fetchurl {
-              url = "https://downloads.spiraldb.com/adbc/${adbcVersion}/adbc-driver-spiraldb-${adbcVersion}-${adbcTarget}.tar.gz";
-              sha256 = adbcArchiveHashes.${adbcTarget};
-            };
-            nativeBuildInputs =
-              lib.optionals hostPlatform.isLinux [ pkgs.autoPatchelfHook ]
-              ++ lib.optionals hostPlatform.isDarwin [ pkgs.cctools ];
-            buildInputs = lib.optionals hostPlatform.isLinux [
-              pkgs.stdenv.cc.cc.lib
-              ffmpegLibraries
-            ];
-            dontBuild = true;
-            # On Linux, autoPatchelfHook points the runtime at FFmpeg. On macOS
-            # the runtime names FFmpeg by @rpath and carries no rpath itself.
-            installPhase = ''
-              runHook preInstall
-              mkdir -p "$out/lib"
-              cp ${adbcLibrary} ${videoRuntimeLibrary} "$out/lib/"
-            ''
-            + lib.optionalString hostPlatform.isDarwin ''
-              install_name_tool -add_rpath ${ffmpegLibraries}/lib "$out/lib/${videoRuntimeLibrary}"
-            ''
-            + ''
-              runHook postInstall
-            '';
-          };
+          # The Spiral Rust SDK release Cargo.lock pins.
+          spiralSdkVersion =
+            (lib.findFirst (package: package.name == "spiral-sdk") null
+              (lib.importTOML ./Cargo.lock).package
+            ).version;
+          # spiral-sdk links its release's native ScanDAL runtime, a static
+          # archive that scripts/setup-spiral-sdk.sh installs in a cache by
+          # release and target. A Nix build takes the directory
+          # SPIRAL_SCANDAL_NATIVE_DIR names, so it runs with --impure.
+          scandalArchive =
+            let
+              directory = builtins.getEnv "SPIRAL_SCANDAL_NATIVE_DIR";
+            in
+            if directory == "" then
+              throw "Set SPIRAL_SCANDAL_NATIVE_DIR to the directory scripts/setup-spiral-sdk.sh installs, and build with --impure"
+            else
+              builtins.path {
+                path = directory;
+                name = "scandal-runtime";
+              };
           workspaceVersion = (lib.importTOML ./Cargo.toml).workspace.package.version;
           workspaceSource = lib.fileset.toSource {
             root = ./.;
@@ -144,47 +112,63 @@
               ./robot-connector
             ];
           };
-          cargoDeps = rustPlatform.importCargoLock {
-            lockFile = ./Cargo.lock;
-            # The patched Dioxus checkout (Cargo.toml's [patch.crates-io]),
-            # one hash for every crate it provides.
-            outputHashes."const-serialize-0.8.0-alpha.0" = "sha256-1YJZcijcAXEQ//NxevLvOUfDu18jdzwOGnBztouwisE=";
+          # Studio's packages build with crane, which builds a package's
+          # dependencies as a derivation of their own: a release that changes
+          # only Studio's code takes them from the Nix cache.
+          craneLib = (crane.mkLib pkgs).overrideToolchain (_: packageRustToolchain);
+          # Every crate Cargo.lock names. Git ones (Spiral's SDK, Vortex, the
+          # patched Dioxus) come through the caller's git credentials, which
+          # reach SpiralDB's private repository.
+          cargoVendorDir = craneLib.vendorCargoDeps {
+            src = workspaceSource;
+            # The `vortex` crate's docs include its workspace README, which
+            # vendoring a Git crate leaves behind.
+            overrideVendorGitCheckout =
+              packages: checkout:
+              if lib.any (package: package.name == "vortex") packages then
+                checkout.overrideAttrs { postPatch = "cp README.md vortex/README.md"; }
+              else
+                checkout;
           };
-          studioServer = rustPlatform.buildRustPackage {
+          serverArgs = {
             pname = "spiral-robotics-backend";
             version = workspaceVersion;
             src = workspaceSource;
-            inherit cargoDeps;
-            cargoBuildFlags = [
-              "--package"
-              "spiral-robotics-backend"
-            ];
+            inherit cargoVendorDir;
+            strictDeps = true;
+            cargoExtraArgs = "--locked --package spiral-robotics-backend";
+            # On Linux, Vortex's custom-labels generates its bindings with
+            # libclang, which the hook points at the C library's headers.
+            nativeBuildInputs = [ pkgs.rustPlatform.bindgenHook ];
+            SPIRAL_SCANDAL_NATIVE_DIR = "${scandalArchive}";
             doCheck = false;
-            meta.mainProgram = "spiral-robotics-backend";
           };
+          studioServer = craneLib.buildPackage (
+            serverArgs
+            // {
+              cargoArtifacts = craneLib.buildDepsOnly serverArgs;
+              meta.mainProgram = "spiral-robotics-backend";
+            }
+          );
           # The `public/` directory the server serves the web interface from.
-          studioWeb = pkgs.stdenv.mkDerivation {
+          studioWeb = craneLib.mkCargoDerivation {
             pname = "spiral-robotics-web";
             version = workspaceVersion;
             src = workspaceSource;
-            inherit cargoDeps;
+            inherit cargoVendorDir;
+            cargoArtifacts = null;
+            doInstallCargoArtifacts = false;
             nativeBuildInputs = [
-              rustPlatform.cargoSetupHook
-              packageRustToolchain
               tailwind
               pkgs.wasm-bindgen-cli_0_2_126
             ]
             ++ webBuildInputs;
-            buildPhase = ''
-              runHook preBuild
+            buildPhaseCargoCommand = ''
               dx bundle --web --release --debug-symbols false --frozen \
                 --package spiral-robotics-frontend --out-dir bundle
-              runHook postBuild
             '';
-            installPhase = ''
-              runHook preInstall
+            installPhaseCommand = ''
               cp -r bundle/public "$out"
-              runHook postInstall
             '';
           };
           # Studio as a Linux server for the hosted VM. The `studio` user owns
@@ -194,7 +178,7 @@
           hostedImage = pkgs.dockerTools.streamLayeredImage {
             name = "spiral-robotics-studio";
             contents = [
-              # The driver verifies TLS against the system's certificates.
+              # The Spiral SDK verifies TLS against the system's certificates.
               pkgs.dockerTools.caCertificates
               # Spiral's engine resolves named time zones, `UTC` included,
               # through a time zone database (a Location's `last_modified`).
@@ -223,14 +207,15 @@
                 "SPIRAL_ROBOTICS_STUDIO_DB=${studioHome}/studio.sqlite3"
                 # Spiral's sign-in returns browsers to this address's /callback.
                 "SPIRAL_ROBOTICS_PUBLIC_URL=https://robotics.spiral.build"
-                "SPIRAL_ROBOTICS_CLIENT_ID=client_PiwYy0njXU92"
+                "SPIRAL_ROBOTICS_CLIENT_ID=client_3CMizYLaPa3h"
                 # The Modal services Score progress, Track objects, and
                 # training run on, in the spiral-dev workspace; their shared
                 # token is a deployment secret.
                 "WARP_PROGRESS_URL=https://spiral-dev--warp-progress-warpprogress-web.modal.run"
                 "OBJECT_TRACKING_URL=https://spiral-dev--spiral-robotics-object-tracking-objecttracking-web.modal.run"
                 "TRAINING_SERVICE_URL=https://spiral-dev--spiral-robotics-training-control.modal.run"
-                "SPIRALDB_ADBC_DRIVER=${spiralAdbc}/lib/${adbcLibrary}"
+                # LeRobot imports encode every camera again as H.264.
+                "SPIRAL_ROBOTICS_FFMPEG=${lib.getExe' pkgs.ffmpeg_9-headless "ffmpeg"}"
                 "DIOXUS_PUBLIC_PATH=${studioWeb}"
               ];
               Volumes.${studioHome} = { };
@@ -239,7 +224,7 @@
               StopSignal = "SIGINT";
               Labels = {
                 "org.opencontainers.image.revision" = self.rev or self.dirtyRev;
-                "com.spiraldb.adbc.version" = adbcVersion;
+                "com.spiraldb.sdk.version" = spiralSdkVersion;
               };
             };
           };
@@ -251,6 +236,9 @@
               pkgs.pkg-config
               pkgs.python312
               pkgs.ruff
+              # scripts/setup-spiral-sdk.sh downloads the SDK's native runtime
+              # with the GitHub CLI's login when GH_TOKEN is unset.
+              pkgs.gh
               tailwind
               pkgs.uv
             ]
@@ -258,7 +246,6 @@
             ++ linuxBuildInputs
             ++ browserTestInputs;
             NO_DOWNLOADS = "1";
-            SPIRALDB_ADBC_DRIVER = "${spiralAdbc}/lib/${adbcLibrary}";
             LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
             GECKODRIVER = lib.getExe pkgs.geckodriver;
             # Select the pinned browser instead of a host Firefox installation.
@@ -282,15 +269,22 @@
           # graphics adapter on a Linux runner without a GPU.
           ciShell =
             sharedShell
+            // {
+              # The storage tests encode camera video with FFmpeg, as LeRobot
+              # imports do.
+              packages = sharedShell.packages ++ [ pkgs.ffmpeg_9-headless ];
+            }
             // lib.optionalAttrs hostPlatform.isLinux {
               LD_LIBRARY_PATH = lib.makeLibraryPath [ pkgs.vulkan-loader ];
               VK_ICD_FILENAMES = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.${hostPlatform.parsed.cpu.name}.json";
             };
           developmentShell = sharedShell // {
-            SPIRAL_ROBOTICS_CLIENT_ID = "client_aRm8njLb18Px";
+            SPIRAL_ROBOTICS_CLIENT_ID = "client_sQWdRwk7ZTBd";
             packages = sharedShell.packages ++ [ pkgs.ffmpeg ] ++ webBuildInputs;
             # Studio's provider keys for local runs come from the checkout's
             # untracked .env.local, in the variables the hosted image is given.
+            # The first shell on a new SDK release installs its native runtime
+            # where spiral-scandal-sys links it from.
             shellHook = ''
               if studio_env=$(git rev-parse --show-toplevel 2>/dev/null)/.env.local \
                 && [ -f "$studio_env" ]; then
@@ -299,13 +293,15 @@
                 set +a
               fi
               unset studio_env
+              if [ ! -f "''${SPIRAL_SCANDAL_CACHE_DIR:-''${XDG_CACHE_HOME:-$HOME/.cache}/spiral/scandal}/${spiralSdkVersion}/${hostPlatform.rust.rustcTarget}/libspiral_scandal_runtime.a" ]; then
+                "$(git rev-parse --show-toplevel)/scripts/setup-spiral-sdk.sh"
+              fi
             '';
           };
         in
         {
           formatter = pkgs.nixfmt;
           packages = {
-            spiral-adbc = spiralAdbc;
             studio-server = studioServer;
             studio-web = studioWeb;
           }
@@ -316,26 +312,6 @@
           devShells.default = pkgs.mkShell developmentShell;
           devShells.ci = pkgs.mkShell ciShell;
 
-          # Explicit validation environment until the public release includes
-          # the upstream persistence fixes. No hand-written exports are needed.
-          devShells.local-driver = pkgs.mkShell (
-            developmentShell
-            // {
-              SPIRALDB_ADBC_DRIVER = "";
-              shellHook = developmentShell.shellHook + ''
-                if ! studio_root=$(git rev-parse --show-toplevel); then
-                  echo "Enter the local-driver shell from the Studio checkout." >&2
-                  return 1
-                fi
-                export SPIRALDB_ADBC_DRIVER="$studio_root/target/release/${adbcLibrary}"
-                unset studio_root
-                if [ ! -f "$SPIRALDB_ADBC_DRIVER" ]; then
-                  echo "Build the upstream ADBC library first; expected $SPIRALDB_ADBC_DRIVER" >&2
-                  return 1
-                fi
-              '';
-            }
-          );
         }
       );
 }

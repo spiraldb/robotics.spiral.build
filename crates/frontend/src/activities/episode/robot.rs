@@ -155,10 +155,9 @@ impl JointSamples {
         }
         let mut samples = Vec::new();
         for ((topic, schema), bindings) in groups {
-            let mut matching = streams
-                .streams()
-                .iter()
-                .filter(|stream| stream.name() == topic && stream.schemas().contains(&schema));
+            let mut matching = streams.streams().iter().filter(|stream| {
+                stream.name() == topic && stream.schema() == Some(schema.as_str())
+            });
             let stream = matching
                 .next()
                 .ok_or("Recorded joint stream is unavailable")?;

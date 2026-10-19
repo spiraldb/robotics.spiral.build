@@ -1,62 +1,44 @@
-//! How a dataset lists its episodes. `spql.mcap.episodes` lists different
-//! facts for each producer — an MCAP file's path, size and channels; a
-//! LeRobot episode's index and tasks — so a listing is written for the
-//! dataset's producer, and a fact the producer does not record is absent
-//! rather than an error.
+//! How a dataset lists its episodes. Its `episodes` table records different
+//! facts for each format — an MCAP file's path, size and channels; a LeRobot
+//! episode's index and tasks — so a listing is written for the dataset's
+//! format, and a fact the format does not record is absent rather than an
+//! error.
 use super::identity::{Episode, EpisodePage};
 use crate::activities::data::DatasetClient;
 use serde::{Deserialize, Serialize};
 use spiral_robotics_common::datasets::{
-    DatasetInspection, DatasetProducer, DatasetSelection, EpisodeSelection,
+    DatasetFormat, DatasetSelection, DatasetSummary, EpisodeSelection,
 };
 use spiral_robotics_common::relations::EpisodeQueryRequest;
-use spiral_robotics_common::sql::SqlLiteral;
 
-/// One dataset and the producer that made it, which decide how its episodes
-/// are listed. A curation keeps it as the dataset it reads.
+/// One dataset and its format, which decide how its episodes are listed. A
+/// curation keeps it as the dataset it reads.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct EpisodeListing {
     #[serde(flatten)]
     dataset: DatasetSelection,
-    /// A curation saved before Studio read LeRobot datasets names no
-    /// producer; its dataset is one of MCAP recordings.
-    #[serde(default = "EpisodeListing::recorded_before_producers")]
-    producer: DatasetProducer,
+    format: DatasetFormat,
 }
 
 impl EpisodeListing {
-    pub(crate) fn new(dataset: DatasetSelection, producer: DatasetProducer) -> Self {
-        Self { dataset, producer }
+    pub(crate) fn new(dataset: DatasetSelection, format: DatasetFormat) -> Self {
+        Self { dataset, format }
     }
-    /// The listing of the dataset `inspection` read.
-    pub(in crate::activities) fn of(inspection: &DatasetInspection) -> Self {
-        Self::new(
-            inspection.dataset().selection().clone(),
-            inspection.producer(),
-        )
-    }
-    /// The listing of `dataset`, asking the catalog which producer made it.
-    pub(in crate::activities) async fn read(dataset: &DatasetSelection) -> Result<Self, String> {
-        DatasetClient::current()
-            .inspect_dataset(dataset.clone())
-            .await
-            .map(|inspection| Self::of(&inspection))
-            .map_err(|error| error.to_string())
-    }
-    fn recorded_before_producers() -> DatasetProducer {
-        DatasetProducer::Mcap
+    /// The listing of the dataset `summary` names.
+    pub(in crate::activities) fn of(summary: &DatasetSummary) -> Self {
+        Self::new(summary.selection().clone(), summary.format())
     }
     pub(crate) fn dataset(&self) -> &DatasetSelection {
         &self.dataset
     }
-    pub(crate) fn producer(&self) -> DatasetProducer {
-        self.producer
+    pub(crate) fn format(&self) -> DatasetFormat {
+        self.format
     }
 
     /// The facts listed beside each episode's id.
     fn listed_facts(&self) -> &'static [&'static str] {
-        match self.producer {
-            DatasetProducer::Mcap => &[
+        match self.format {
+            DatasetFormat::Mcap => &[
                 "source_uri",
                 "source_bytes",
                 "message_count",
@@ -64,7 +46,7 @@ impl EpisodeListing {
                 "duration_ns",
                 "channel_count",
             ],
-            DatasetProducer::LeRobot => &[
+            DatasetFormat::LeRobot => &[
                 "episode_index",
                 "tasks",
                 "message_count",
@@ -77,26 +59,18 @@ impl EpisodeListing {
     /// recording started, or a LeRobot dataset's own order, whose episodes
     /// each start at zero.
     fn recording_order(&self) -> &'static str {
-        match self.producer {
-            DatasetProducer::Mcap => "message_start_time, source_uri, id",
-            DatasetProducer::LeRobot => "episode_index, id",
+        match self.format {
+            DatasetFormat::Mcap => "message_start_time, source_uri, id",
+            DatasetFormat::LeRobot => "episode_index, id",
         }
     }
 
     /// Every episode of the dataset with the facts every surface shows.
     pub(in crate::activities) fn sql(&self) -> String {
-        let facts = match self.producer {
-            DatasetProducer::Mcap => {
-                "source.uri AS source_uri, source.size AS source_bytes, message_count, \
-                 message_start_time, duration_ns, channel_count"
-            }
-            DatasetProducer::LeRobot => {
-                "episode_index, tasks, message_count, message_start_time, duration_ns"
-            }
-        };
         format!(
-            "SELECT id, {facts} FROM spql.mcap.episodes({})",
-            SqlLiteral::text(&self.dataset.sql_name())
+            "SELECT id, {} FROM {}",
+            self.listed_facts().join(", "),
+            self.dataset.episodes()
         )
     }
 
@@ -209,8 +183,8 @@ impl EpisodeListing {
     #[cfg(test)]
     pub(crate) fn mcap_fixture(name: &str) -> Self {
         Self::new(
-            DatasetSelection::new(vec![name.into()]).expect("a dataset name"),
-            DatasetProducer::Mcap,
+            DatasetSelection::new(name).expect("a dataset name"),
+            DatasetFormat::Mcap,
         )
     }
 }
@@ -223,8 +197,8 @@ mod tests {
 
     fn lerobot() -> EpisodeListing {
         EpisodeListing::new(
-            DatasetSelection::new(vec!["lerobot_svla_so101_pickplace".into()]).unwrap(),
-            DatasetProducer::LeRobot,
+            DatasetSelection::new("svla_so101_pickplace").unwrap(),
+            DatasetFormat::LeRobot,
         )
     }
 
@@ -234,25 +208,28 @@ mod tests {
         assert!(mcap.episode(Default::default()).is_err());
         let named = serde_json::json!({ "id": "Episode 7" });
         assert!(mcap.episode(named.as_object().unwrap().clone()).is_err());
-        let owned = EpisodeListing::mcap_fixture("owner's recordings");
-        let sql = owned.page_sql(50, 50);
-        assert!(sql.contains("spql.mcap.episodes('owner''s recordings')"));
-        assert!(sql.ends_with("ORDER BY message_start_time, source_uri, id LIMIT 51 OFFSET 50"));
+        let sql = mcap.page_sql(50, 50);
+        assert_eq!(
+            sql,
+            "SELECT id, source_uri, source_bytes, message_count, message_start_time, duration_ns, channel_count \
+             FROM \"datasets.recordings.episodes\" \
+             ORDER BY message_start_time, source_uri, id LIMIT 51 OFFSET 50"
+        );
     }
 
-    /// The columns `spql.mcap.episodes` has for a LeRobot dataset, and no
-    /// other: no channel count, and a source that is not the episode's own.
+    /// The facts a LeRobot episode records, and no other: no channel
+    /// summary, and no source of its own, its repository being its dataset's.
     #[test]
     fn a_lerobot_dataset_lists_its_index_and_tasks_in_its_own_order() {
         let listing = lerobot();
         assert_eq!(
             listing.first_sql(100),
             "SELECT id, episode_index, tasks, message_count, message_start_time, duration_ns \
-             FROM spql.mcap.episodes('lerobot_svla_so101_pickplace') ORDER BY episode_index, id LIMIT 100"
+             FROM \"datasets.svla_so101_pickplace.episodes\" ORDER BY episode_index, id LIMIT 100"
         );
         assert!(!listing.sql().contains("channel_count") && !listing.sql().contains("source"));
         let row = serde_json::json!({
-            "id": "01a1181263837279a03b89d481c7ed9b", "episode_index": 0,
+            "id": EpisodeId::fixture(0), "episode_index": 0,
             "tasks": ["pink lego brick into the transparent box"], "message_count": 1212,
             "message_start_time": 0, "duration_ns": 10_066_666_603_u64,
         });
@@ -270,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn rows_beside_the_listing_carry_each_producers_facts() {
+    fn rows_beside_the_listing_carry_each_formats_facts() {
         let sql = lerobot().beside_sql("SELECT episode_id FROM kept", "listed_");
         assert!(sql.starts_with(
             "SELECT named.*, listed.episode_index AS listed_episode_index, listed.tasks AS listed_tasks,"
@@ -286,17 +263,17 @@ mod tests {
         assert_eq!(episode.recording_place().0, Some(3));
     }
 
-    /// A curation keeps its dataset with the producer, and one saved before
-    /// producers were kept reads as MCAP recordings.
+    /// A curation keeps its dataset with its format.
     #[test]
-    fn a_curation_keeps_the_producer_beside_the_dataset() {
+    fn a_curation_keeps_the_format_beside_the_dataset() {
         let json = serde_json::to_value(lerobot()).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({"path": ["lerobot_svla_so101_pickplace"], "producer": "spql.lerobot.dataset"})
+            serde_json::json!({"id": "svla_so101_pickplace", "format": "lerobot"})
         );
-        let saved: EpisodeListing =
-            serde_json::from_value(serde_json::json!({"path": ["dataset_abc130k"]})).unwrap();
-        assert_eq!(saved, EpisodeListing::mcap_fixture("dataset_abc130k"));
+        assert_eq!(
+            serde_json::from_value::<EpisodeListing>(json).unwrap(),
+            lerobot()
+        );
     }
 }

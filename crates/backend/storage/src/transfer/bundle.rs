@@ -1,19 +1,25 @@
-//! Format 4 project ZIP: a manifest, a project-scoped SQLite snapshot, and
+//! Format 6 project ZIP: a manifest, a project-scoped SQLite snapshot, and
 //! one Arrow IPC stream per Spiral data relation.
-use crate::datasets::{McapDatasetDefinition, McapSources};
+use super::ingestion::PinnedMcapFiles;
+use crate::datasets::{
+    BundledFile, BundledSource, DatasetWrite, DecodedEpisode, McapFile, McapSources,
+};
 use crate::db::{self as spiral, ProjectConnection, Table};
 use crate::studio::StudioSnapshot;
 use arrow_array::RecordBatch;
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use futures::StreamExt as _;
 use serde::{Deserialize, Serialize};
-use spiral_robotics_common::datasets::ProjectImportSummary;
+use spiral_robotics_common::datasets::{
+    DatasetFormat, DatasetSelection, DatasetTable, ProjectImportSummary,
+};
 use std::collections::BTreeSet;
 use std::io::{self, Cursor, Read, Write};
 
 const PROJECT_FORMAT: &str = "spiral-robotics-project";
-/// Format 5 dropped the training checkpoints, which now live on Modal.
-const FORMAT_VERSION: u32 = 5;
+/// Format 6 carries a file its dataset points at on Hugging Face by its
+/// pinned URI, never its bytes.
+const FORMAT_VERSION: u32 = 6;
 const MANIFEST_ENTRY: &str = "manifest.json";
 const STUDIO_ENTRY: &str = "studio.sqlite3";
 const MAX_ARROW_MESSAGE_METADATA_BYTES: usize = 1024 * 1024;
@@ -29,10 +35,11 @@ impl ProjectBundle {
 
 pub(super) struct ProjectBundleExport<'a> {
     studio: &'a crate::StudioProject,
-    datasets: Vec<String>,
+    datasets: Vec<DatasetSelection>,
 }
 impl<'a> ProjectBundleExport<'a> {
-    pub(super) fn new(studio: &'a crate::StudioProject, datasets: Vec<String>) -> Self {
+    /// The project's Studio records and its MCAP `datasets`.
+    pub(super) fn new(studio: &'a crate::StudioProject, datasets: Vec<DatasetSelection>) -> Self {
         Self { studio, datasets }
     }
 }
@@ -40,21 +47,32 @@ impl<'a> ProjectBundleExport<'a> {
 pub(super) struct ProjectBundleImport<'a> {
     studio: &'a crate::StudioProject,
     archive: DecodedBundle,
-    current_datasets: Vec<String>,
+    replaced: Vec<DatasetTable>,
+    pinned: PinnedMcapFiles,
 }
 impl<'a> ProjectBundleImport<'a> {
-    pub(super) fn new(studio: &'a crate::StudioProject, bytes: &[u8]) -> Result<Self, String> {
+    /// `bytes` restored into `studio`'s project, downloading the files the
+    /// bundle names by their pinned URIs from `pinned`.
+    pub(super) fn new(
+        studio: &'a crate::StudioProject,
+        bytes: &[u8],
+        pinned: PinnedMcapFiles,
+    ) -> Result<Self, String> {
         Ok(Self {
             studio,
             archive: ProjectBundle::decode(bytes)?,
-            current_datasets: Vec::new(),
+            replaced: Vec::new(),
+            pinned,
         })
     }
-    pub(super) fn dataset_names(&self) -> &[String] {
+    /// The MCAP datasets the bundle carries.
+    pub(super) fn datasets(&self) -> &[DatasetSelection] {
         &self.archive.datasets
     }
-    pub(super) fn with_current_datasets(mut self, names: Vec<String>) -> Self {
-        self.current_datasets = names;
+    /// The same import, dropping `tables`, every table of the project's
+    /// MCAP datasets, before it restores the bundle's.
+    pub(super) fn replacing(mut self, tables: Vec<DatasetTable>) -> Self {
+        self.replaced = tables;
         self
     }
 }
@@ -62,7 +80,7 @@ impl<'a> ProjectBundleImport<'a> {
 struct DecodedBundle {
     studio: Vec<u8>,
     tables: Vec<(Table, Vec<RecordBatch>)>,
-    datasets: Vec<String>,
+    datasets: Vec<DatasetSelection>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -98,15 +116,21 @@ impl Manifest {
                 spiral::SCHEMA_VERSION
             ));
         }
-        let datasets = self.mcap_datasets.iter().collect::<BTreeSet<_>>();
-        if datasets.len() != self.mcap_datasets.len()
-            || datasets
-                .iter()
-                .any(|name| !spiral::StorageSchema::is_dataset_id(name) || name.contains('.'))
-        {
-            return Err("Project manifest contains invalid or duplicate MCAP datasets".into());
+        self.datasets().map(|_| ())
+    }
+
+    /// The MCAP datasets it names, each once.
+    fn datasets(&self) -> Result<Vec<DatasetSelection>, String> {
+        let invalid = || "Project manifest contains invalid or duplicate MCAP datasets".to_owned();
+        let datasets = self
+            .mcap_datasets
+            .iter()
+            .map(|name| DatasetSelection::new(name.clone()).map_err(|_| invalid()))
+            .collect::<Result<Vec<_>, _>>()?;
+        if datasets.iter().collect::<BTreeSet<_>>().len() != datasets.len() {
+            return Err(invalid());
         }
-        Ok(())
+        Ok(datasets)
     }
 }
 
@@ -118,7 +142,13 @@ impl ProjectBundle {
     ) -> Result<Vec<u8>, String> {
         let snapshot = StudioSnapshot::capture(source.studio).await?;
         let mut bundle = BundleWriter::new(
-            &Manifest::current(source.datasets.clone()),
+            &Manifest::current(
+                source
+                    .datasets
+                    .iter()
+                    .map(|dataset| dataset.id().to_owned())
+                    .collect(),
+            ),
             &snapshot.bytes()?,
         )?;
         for table in Table::ALL {
@@ -135,19 +165,19 @@ impl ProjectBundle {
     /// Every dataset's files in one stream, each row naming its dataset.
     async fn export_sources(
         connection: &mut ProjectConnection,
-        datasets: &[String],
+        datasets: &[DatasetSelection],
         bundle: &mut BundleWriter,
     ) -> Result<(), String> {
         let mut writer = StreamWriter::try_new(bundle, &Table::DatasetSources.schema())
             .map_err(|error| error.to_string())?;
-        for name in datasets {
+        for dataset in datasets {
             let mut records = connection
-                .execute_query(McapDatasetDefinition::new(name).bundle_sql())
+                .execute_query(McapSources::export_sql(dataset))
                 .await?;
             while let Some(batch) = records.next().await {
                 let batch = batch.map_err(|error| error.to_string())?;
                 writer
-                    .write(&McapSources::bundled(name, &batch)?)
+                    .write(&McapSources::bundled(dataset, &batch)?)
                     .map_err(|error| error.to_string())?;
             }
         }
@@ -180,7 +210,7 @@ impl ProjectBundle {
         Ok(DecodedBundle {
             studio,
             tables,
-            datasets: manifest.mcap_datasets,
+            datasets: manifest.datasets()?,
         })
     }
 
@@ -192,13 +222,16 @@ impl ProjectBundle {
         let ProjectBundleImport {
             studio,
             archive,
-            current_datasets,
+            replaced,
+            pinned,
         } = source;
         let snapshot = StudioSnapshot::open(&archive.studio, studio).await?;
         let local_transaction = snapshot.stage(studio).await?;
         let summary = connection
             .transaction("project import", async move |connection| {
-                McapSources::retire(connection, &current_datasets).await?;
+                for table in &replaced {
+                    connection.drop_table(table.name()).await?;
+                }
                 let mut summary = ProjectImportSummary::default();
                 for (table, batches) in archive.tables {
                     summary.record_relation(
@@ -206,7 +239,8 @@ impl ProjectBundle {
                     );
                     match table {
                         Table::DatasetSources => {
-                            McapSources::restore(connection, &batches, &archive.datasets).await?;
+                            Self::restore_sources(connection, &batches, &archive.datasets, &pinned)
+                                .await?;
                         }
                     }
                 }
@@ -215,6 +249,51 @@ impl ProjectBundle {
             .await?;
         local_transaction.commit().await.map_err(|error| format!("Spiral data was restored, but committing Studio records failed: {error}. Retry the same project import before continuing."))?;
         Ok(summary)
+    }
+}
+
+impl ProjectBundle {
+    /// Every dataset `datasets` names, made again from the files the bundle
+    /// carries of it, each episode under a new identity, a file its dataset
+    /// pointed at downloaded from `pinned`; a dataset without files is made
+    /// empty.
+    async fn restore_sources(
+        connection: &mut ProjectConnection,
+        batches: &[RecordBatch],
+        datasets: &[DatasetSelection],
+        pinned: &PinnedMcapFiles,
+    ) -> Result<(), String> {
+        for (dataset, files) in McapSources::files(batches, datasets)? {
+            let mut write = DatasetWrite::create(connection, &dataset, DatasetFormat::Mcap).await?;
+            for files in files.chunks(DatasetWrite::MAX_EPISODES) {
+                let mut episodes = Vec::with_capacity(files.len());
+                for file in files {
+                    episodes.push(Self::episode(file, pinned).await?);
+                }
+                write.write(connection, episodes).await?;
+            }
+            write.finish(connection).await?;
+        }
+        Ok(())
+    }
+
+    /// `file` decoded as one episode: its bytes held inline again, or
+    /// downloaded from `pinned` and pointed at by the same pinned URI.
+    async fn episode(
+        file: &BundledFile<'_>,
+        pinned: &PinnedMcapFiles,
+    ) -> Result<DecodedEpisode, String> {
+        match file.source() {
+            BundledSource::Held(bytes) => {
+                let (key, bytes) = (file.key().to_owned(), bytes.to_vec());
+                tokio::task::spawn_blocking(move || {
+                    DecodedEpisode::of_mcap(McapFile::held(&key, &bytes)?, &bytes)
+                })
+                .await
+                .map_err(|error| format!("decoding a bundled file failed: {error}"))?
+            }
+            BundledSource::Pinned { uri, size } => pinned.episode(file.key(), uri, size).await,
+        }
     }
 }
 

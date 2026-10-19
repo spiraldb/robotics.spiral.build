@@ -1,5 +1,6 @@
-//! Driver-independent behavioral checks. Each adapter supplies a database;
-//! the suite never inspects engine handles or reaches around the async traits.
+//! Behaviour every Studio database keeps, checked through the async traits
+//! alone: on DataFusion's in-memory tables here, and on a hosted Spiral
+//! project by the ignored test.
 
 use std::sync::Arc;
 
@@ -8,20 +9,16 @@ use arrow_schema::{DataType, Field, Schema};
 use futures::{FutureExt as _, StreamExt as _, TryStreamExt as _};
 
 use super::database::{
-    BatchIngestion, Database, DatabaseErrorKind, DatabaseResult, DatabaseSession, IngestMode,
-    RecordBatchStream, RelationName,
+    BatchIngestion, Database, DatabaseResult, DatabaseSession, IngestMode, RecordBatchStream,
+    RelationName,
 };
 
-pub(super) struct DatabaseContract {
+struct DatabaseContract {
     database: Arc<dyn Database>,
 }
 
 impl DatabaseContract {
-    pub(super) fn new(database: Arc<dyn Database>) -> Self {
-        Self { database }
-    }
-
-    pub(super) async fn query_streams(&self) -> DatabaseResult<()> {
+    async fn query_streams(&self) -> DatabaseResult<()> {
         let mut connection = self.database.connect().await?;
         let mut empty = connection
             .query("SELECT CAST(1 AS BIGINT) AS id WHERE false".into())
@@ -31,101 +28,33 @@ impl DatabaseContract {
         while let Some(batch) = empty.next().await {
             assert_eq!(batch?.num_rows(), 0);
         }
-        // EOF releases the connection, even if the exhausted stream stays alive.
-        let records = connection.query("SELECT 1 AS id".into()).await?;
-        assert_eq!(
-            connection
-                .query("SELECT 2".into())
-                .await
-                .err()
-                .unwrap()
-                .kind(),
-            DatabaseErrorKind::InvalidState
-        );
-        assert_eq!(
-            connection
-                .execute_update("CREATE VIEW must_not_run AS SELECT 1".into())
-                .await
-                .err()
-                .unwrap()
-                .kind(),
-            DatabaseErrorKind::InvalidState
-        );
-        assert_eq!(
-            connection
-                .table_schema(RelationName::parse("missing")?)
-                .await
-                .err()
-                .unwrap()
-                .kind(),
-            DatabaseErrorKind::InvalidState
-        );
-        assert_eq!(
-            connection
-                .ingest(Self::input(
-                    "must_not_run",
-                    IngestMode::CreateOrAppend,
-                    &[1]
-                )?)
-                .await
-                .err()
-                .unwrap()
-                .kind(),
-            DatabaseErrorKind::InvalidState
-        );
-
-        let mut independent = self.database.connect().await?;
-        assert_eq!(Self::row_count(independent.as_mut(), "SELECT 2").await?, 1);
-        drop(records);
-        assert_eq!(Self::row_count(connection.as_mut(), "SELECT 3").await?, 1);
-        let records = connection.query("SELECT 4 AS id".into()).await?;
+        // One connection holds several results at once, each outliving it.
+        let first = connection.query("SELECT 1 AS id".into()).await?;
+        let second = connection.query("SELECT 2 AS id".into()).await?;
         drop(connection);
-        assert_eq!(
-            records
-                .try_collect::<Vec<_>>()
-                .await?
-                .iter()
-                .map(RecordBatch::num_rows)
-                .sum::<usize>(),
-            1
-        );
-
+        for records in [first, second] {
+            assert_eq!(Self::rows(records).await?, 1);
+        }
         let mut connection = self.database.connect().await?;
         assert!(connection.query("SELECT FROM".into()).await.is_err());
         assert_eq!(Self::row_count(connection.as_mut(), "SELECT 5").await?, 1);
-
-        let mut transaction = connection.begin().await?;
-        let records = transaction.query("SELECT 6".into()).await?;
-        assert_eq!(
-            transaction.commit().await.err().unwrap().kind(),
-            DatabaseErrorKind::InvalidState
-        );
-        // Rejecting completion must not destroy an already returned result.
-        assert_eq!(
-            records
-                .try_collect::<Vec<_>>()
-                .await?
-                .iter()
-                .map(RecordBatch::num_rows)
-                .sum::<usize>(),
-            1
-        );
         Ok(())
     }
 
-    /// Requires a writable, transactional catalog; each run owns unique names.
-    pub(super) async fn ingestion_and_transactions(&self) -> DatabaseResult<()> {
+    /// Requires a writable project; each run owns unique names.
+    async fn ingestion_and_transactions(&self) -> DatabaseResult<()> {
         let table = format!("database_contract_{}", uuid::Uuid::new_v4().simple());
-        let pending = format!("{table}_pending");
+        let pending = format!("{table}.pending");
         let result = std::panic::AssertUnwindSafe(self.verify_persistence(&table, &pending))
             .catch_unwind()
             .await;
-        let mut cleanup = self.database.connect().await?;
+        let mut cleanup = self.database.connect().await?.begin().await?;
         for name in [&table, &pending] {
             cleanup
-                .execute_update(format!("DROP TABLE IF EXISTS {name}").into())
+                .drop_table(RelationName::parse(name.as_str())?)
                 .await?;
         }
+        cleanup.commit().await?;
         match result {
             Ok(result) => result,
             Err(panic) => std::panic::resume_unwind(panic),
@@ -133,6 +62,7 @@ impl DatabaseContract {
     }
 
     async fn verify_persistence(&self, table: &str, pending: &str) -> DatabaseResult<()> {
+        let select = |name: &str| format!("SELECT * FROM \"{name}\"");
         let mut connection = self.database.connect().await?;
         connection
             .ingest(Self::input(table, IngestMode::CreateOrAppend, &[1, 2])?)
@@ -141,14 +71,14 @@ impl DatabaseContract {
             .ingest(Self::input(table, IngestMode::CreateOrAppend, &[3])?)
             .await?;
         assert_eq!(
-            Self::row_count(connection.as_mut(), &format!("SELECT * FROM {table}")).await?,
+            Self::row_count(connection.as_mut(), &select(table)).await?,
             3
         );
         connection
             .ingest(Self::input(table, IngestMode::ReplaceOrCreate, &[6, 7])?)
             .await?;
         assert_eq!(
-            Self::row_count(connection.as_mut(), &format!("SELECT * FROM {table}")).await?,
+            Self::row_count(connection.as_mut(), &select(table)).await?,
             2
         );
         let schema = connection
@@ -157,61 +87,59 @@ impl DatabaseContract {
             .unwrap();
         assert_eq!(schema.field(0).data_type(), &DataType::Int64);
 
+        // A transaction holds its writes, two to one table folded into one,
+        // and shows them only to itself until it commits.
         let mut observer = self.database.connect().await?;
         let mut transaction = connection.begin().await?;
-        transaction
-            .ingest(Self::input(table, IngestMode::CreateOrAppend, &[8])?)
-            .await?;
+        for values in [[8], [9]] {
+            transaction
+                .ingest(Self::input(table, IngestMode::CreateOrAppend, &values)?)
+                .await?;
+        }
         transaction
             .ingest(Self::input(pending, IngestMode::ReplaceOrCreate, &[9])?)
             .await?;
+        let pending_name = RelationName::parse(pending)?;
         assert!(
             transaction
-                .table_schema(RelationName::parse(pending)?)
+                .table_schema(pending_name.clone())
                 .await?
                 .is_some()
         );
-        assert!(
-            observer
-                .table_schema(RelationName::parse(pending)?)
-                .await?
-                .is_none()
-        );
-        assert_eq!(
-            Self::row_count(transaction.as_mut(), &format!("SELECT * FROM {table}")).await?,
-            3
-        );
-        assert_eq!(
-            Self::row_count(observer.as_mut(), &format!("SELECT * FROM {table}")).await?,
-            2
-        );
+        assert!(observer.table_schema(pending_name.clone()).await?.is_none());
+        assert_eq!(Self::row_count(observer.as_mut(), &select(table)).await?, 2);
         transaction.rollback().await?;
-        assert!(
-            observer
-                .table_schema(RelationName::parse(pending)?)
-                .await?
-                .is_none()
-        );
-        assert_eq!(
-            Self::row_count(observer.as_mut(), &format!("SELECT * FROM {table}")).await?,
-            2
-        );
+        assert!(observer.table_schema(pending_name.clone()).await?.is_none());
+        assert_eq!(Self::row_count(observer.as_mut(), &select(table)).await?, 2);
 
         let mut transaction = self.database.connect().await?.begin().await?;
+        for values in [[8], [9]] {
+            transaction
+                .ingest(Self::input(table, IngestMode::CreateOrAppend, &values)?)
+                .await?;
+        }
         transaction
             .ingest(Self::input(pending, IngestMode::CreateOrAppend, &[10])?)
             .await?;
         transaction.commit().await?;
-        assert!(
-            observer
-                .table_schema(RelationName::parse(pending)?)
-                .await?
-                .is_some()
-        );
+        assert_eq!(Self::row_count(observer.as_mut(), &select(table)).await?, 4);
         assert_eq!(
-            Self::row_count(observer.as_mut(), &format!("SELECT * FROM {pending}")).await?,
+            Self::row_count(observer.as_mut(), &select(pending)).await?,
             1
         );
+
+        // A drop is held like any write.
+        let mut transaction = self.database.connect().await?.begin().await?;
+        transaction.drop_table(pending_name.clone()).await?;
+        assert!(
+            transaction
+                .table_schema(pending_name.clone())
+                .await?
+                .is_none()
+        );
+        assert!(observer.table_schema(pending_name.clone()).await?.is_some());
+        transaction.commit().await?;
+        assert!(observer.table_schema(pending_name).await?.is_none());
         Ok(())
     }
 
@@ -229,12 +157,32 @@ impl DatabaseContract {
         ))
     }
 
-    async fn row_count(session: &mut dyn DatabaseSession, sql: &str) -> DatabaseResult<usize> {
-        let batches = session
-            .query(sql.into())
-            .await?
-            .try_collect::<Vec<_>>()
-            .await?;
+    async fn rows(records: RecordBatchStream) -> DatabaseResult<usize> {
+        let batches = records.try_collect::<Vec<_>>().await?;
         Ok(batches.iter().map(RecordBatch::num_rows).sum())
     }
+
+    async fn row_count(session: &mut dyn DatabaseSession, sql: &str) -> DatabaseResult<usize> {
+        Self::rows(session.query(sql.into()).await?).await
+    }
+}
+
+#[tokio::test]
+async fn the_in_memory_database_keeps_the_contract() {
+    let contract = DatabaseContract {
+        database: Arc::new(super::MemoryDatabase::default()),
+    };
+    contract.query_streams().await.unwrap();
+    contract.ingestion_and_transactions().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires SPIRAL_MCAP_TEST_PROJECT, SPIRAL_ACCESS_TOKEN and SPIRAL_DATA_PLANE_LIBRARY; creates and drops uniquely named tables"]
+async fn a_hosted_spiral_project_keeps_the_contract() {
+    let (store, _) = crate::datasets::HostedProject::storage();
+    let contract = DatabaseContract {
+        database: store.database(),
+    };
+    contract.query_streams().await.unwrap();
+    contract.ingestion_and_transactions().await.unwrap();
 }

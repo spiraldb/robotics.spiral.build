@@ -22,21 +22,57 @@ env:
 jobs:
   image:
     name: Hosted image
-    runs-on: ubuntu-24.04
+    # A RunsOn runner, as SpiralDB's own release builds use: the data-plane
+    # runtime, the server and the web interface compile at once. Its S3 cache
+    # keeps the Nix store between releases.
+    runs-on: runs-on=${{ github.run_id }}-${{ github.run_attempt }}-studio-image/family=c8a+m7a/cpu=32/image=ubuntu24-full-x64/extras=s3-cache/volume=150gb:gp3
     timeout-minutes: 90
     permissions:
       contents: read
       id-token: write
     steps:
+      # Sends `actions/cache` to RunsOn's S3 bucket, beside the runner.
+      - uses: runs-on/action@17b59092eb37ebfdbb034460892887c09100eaa3 # v2.5.0
+
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
       - uses: DeterminateSystems/determinate-nix-action@v3
 
+      # The Nix store a build with the same flake and manifests left, or else
+      # the newest one: the data-plane runtime, the toolchains and crane's
+      # dependency builds come from it unless their inputs changed.
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+        with:
+          primary-key: studio-image-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.lock', '**/Cargo.toml') }}
+          restore-prefixes-first-match: studio-image-${{ runner.arch }}-
+
+      # Spiral's SDK and data-plane runtime come from the private SpiralDB
+      # repository; cargo and Nix fetch it with git over this read-only key.
+      - name: Reach SpiralDB's repository
+        env:
+          SPIRALDB_DEPLOY_KEY: ${{ secrets.SPIRALDB_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          install -m 600 /dev/stdin ~/.ssh/spiraldb <<< "$SPIRALDB_DEPLOY_KEY"
+          printf 'Host github.com\n  IdentityFile ~/.ssh/spiraldb\n  IdentitiesOnly yes\n' >> ~/.ssh/config
+          git config --global url."git@github.com:spiraldb/spiraldb.git".insteadOf "https://github.com/spiraldb/spiraldb.git"
+
+      # spiral-sdk links its release's native ScanDAL runtime, a private asset
+      # of the spiraldb/spiraldb release, which this token reads. The release's
+      # setup script, from Cargo's checkout of the SDK, verifies it and exports
+      # SPIRAL_SCANDAL_NATIVE_DIR to the later steps.
+      - name: Install the Spiral SDK's native runtime
+        env:
+          GH_TOKEN: ${{ secrets.SPIRAL_SDK_TOKEN }}
+        run: nix develop .#ci --command scripts/setup-spiral-sdk.sh
+
       # The result is a script that streams the image as a Docker archive.
+      # --impure lets the build read the ScanDAL archive's directory.
       - name: Build the image
-        run: nix build .#hosted-image --out-link hosted-image
+        run: nix build --impure .#hosted-image --out-link hosted-image
 
       # Signed in after the build, so the token is fresh for the push.
       - id: auth
@@ -52,6 +88,9 @@ jobs:
         env:
           ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
           RELEASE: ${{ github.ref_name }}
+          # skopeo keeps the login under /run/containers by default, which the
+          # runner's user cannot create.
+          REGISTRY_AUTH_FILE: ${{ runner.temp }}/containers-auth.json
         run: |
           set -euo pipefail
           skopeo() { nix run --inputs-from . nixpkgs#skopeo -- "$@"; }

@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
 
-/// How many categories one grouping may name: what `spql.ai.classify` takes.
+/// How many categories one grouping may name: what the decision model's
+/// Choice takes.
 const MAX_CATEGORIES: usize = 255;
 
 /// Which category of its grouping a column or a Select means.

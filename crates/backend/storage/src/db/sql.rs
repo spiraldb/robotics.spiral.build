@@ -18,12 +18,14 @@ use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, ImageFormat};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use spiral_robotics_common::datasets::EpisodeId;
-use spiral_robotics_common::relations::{EpisodeQueryRequest, QueryColumn, SpiralQuerySnapshot};
+use spiral_robotics_common::relations::{
+    EpisodeQueryRequest, EpisodesQueryRequest, QueryColumn, SpiralQuerySnapshot,
+};
 
 use super::database::{DatabaseSession, RecordBatchStream, SqlStatement};
 use super::project_store::{ProjectConnection, ProjectStore};
-use crate::datasets::EpisodeUuids;
-use spiral_robotics_common::sql::ReadOnlyQueryMode;
+use crate::datasets::EpisodeIds;
+use spiral_robotics_common::sql::{ListItems, ReadOnlyQueryMode};
 
 const MAX_QUERY_ROWS: usize = 1_000;
 const MAX_QUERY_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -181,7 +183,7 @@ impl<'a> ProjectQueries<'a> {
     }
 
     /// The same bounded read, scoped to one exact dataset member through a
-    /// bound UUID parameter (`$1`).
+    /// bound episode number (`$1`).
     pub async fn query_for_episode(
         &self,
         request: &EpisodeQueryRequest,
@@ -211,6 +213,44 @@ impl<'a> ProjectQueries<'a> {
             .await
             .map_err(|error| format!("executing Spiral query: {error}"))?
             .into_arrow_ipc(request.max_rows().clamp(1, MAX_ARROW_ROWS))
+            .await
+    }
+
+    /// A bounded read over listed members of one dataset, bound as `$1`
+    /// through `$N`: each member may answer as many rows as one member's
+    /// read.
+    pub async fn query_for_episodes(
+        &self,
+        request: &EpisodesQueryRequest,
+    ) -> Result<SpiralQuerySnapshot, String> {
+        let statement = Self::bound_listed(request)?;
+        let mut connection = self.project_store.connect().await?;
+        let rows = request.max_rows().clamp(1, MAX_QUERY_ROWS);
+        QueryExecution::bound(
+            statement,
+            QueryLimits::new(
+                rows.saturating_mul(request.episodes().len()),
+                MAX_QUERY_RESPONSE_BYTES,
+            ),
+        )
+        .run_async(&mut connection)
+        .await
+    }
+
+    /// The same listed members read as one Arrow IPC stream, exact to the
+    /// value.
+    pub async fn arrow_for_episodes(
+        &self,
+        request: &EpisodesQueryRequest,
+    ) -> Result<Vec<u8>, String> {
+        let statement = Self::bound_listed(request)?;
+        let mut connection = self.project_store.connect().await?;
+        let rows = request.max_rows().clamp(1, MAX_ARROW_ROWS);
+        connection
+            .query(statement)
+            .await
+            .map_err(|error| format!("executing Spiral query: {error}"))?
+            .into_arrow_ipc(rows.saturating_mul(request.episodes().len()))
             .await
     }
 
@@ -272,12 +312,17 @@ impl<'a> ProjectQueries<'a> {
     /// range of its `kept` list, in episode and time order, leaving out
     /// empty ones.
     pub async fn kept_intervals(&self, view: &str) -> Result<Vec<KeptInterval>, String> {
+        let ranges = ListItems::of(
+            format!("({})", view.trim().trim_end_matches(';')),
+            "kept",
+            "k",
+        )
+        .beside(["episode_id"]);
         let sql = format!(
             "SELECT episode_id, start_ns, end_ns FROM (\
-             SELECT v.episode_id, CAST(k.start_ns AS BIGINT) AS start_ns, CAST(k.end_ns AS BIGINT) AS end_ns \
-             FROM ({}) v CROSS JOIN LATERAL UNNEST(v.kept) k) kept \
-             WHERE end_ns > start_ns ORDER BY episode_id, start_ns",
-            view.trim().trim_end_matches(';')
+             SELECT u.episode_id, CAST(u.k.start_ns AS BIGINT) AS start_ns, CAST(u.k.end_ns AS BIGINT) AS end_ns \
+             FROM {ranges} u) kept \
+             WHERE end_ns > start_ns ORDER BY episode_id, start_ns"
         );
         SpiralSql::ensure_read_only(&sql)?;
         let batches = self
@@ -293,7 +338,7 @@ impl<'a> ProjectQueries<'a> {
                     .column_by_name(name)
                     .ok_or_else(|| format!("The view lists no {name}."))
             };
-            let episodes = EpisodeUuids::read(column("episode_id")?.as_ref())?;
+            let episodes = EpisodeIds::read(column("episode_id")?.as_ref())?;
             let times = |name: &str| -> Result<Vec<i64>, String> {
                 let cast = arrow_cast::cast(column(name)?, &DataType::Int64)
                     .map_err(|error| error.to_string())?;
@@ -330,7 +375,7 @@ impl<'a> ProjectQueries<'a> {
             let listed = batch
                 .column_by_name("episode_id")
                 .ok_or("The statement lists no episode_id.")?;
-            ids.extend(EpisodeUuids::read(listed.as_ref())?);
+            ids.extend(EpisodeIds::read(listed.as_ref())?);
         }
         Ok(ids)
     }
@@ -339,8 +384,16 @@ impl<'a> ProjectQueries<'a> {
     fn bound(request: &EpisodeQueryRequest) -> Result<SqlStatement, String> {
         SpiralSql::ensure_read_only(request.statement())?;
         Ok(crate::datasets::EpisodeTopicQuery::for_episode(
-            request.episode().dataset(),
             request.episode().episode_id(),
+            request.statement().trim().to_owned(),
+        )?
+        .into_statement())
+    }
+
+    fn bound_listed(request: &EpisodesQueryRequest) -> Result<SqlStatement, String> {
+        SpiralSql::ensure_read_only(request.statement())?;
+        Ok(crate::datasets::EpisodeTopicQuery::for_episodes(
+            request.episodes(),
             request.statement().trim().to_owned(),
         )?
         .into_statement())

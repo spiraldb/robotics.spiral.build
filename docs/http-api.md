@@ -13,8 +13,9 @@ by the robot connector instead; see [robot connector API](robot-connector-api.md
 2. Send `X-Spiral-Endpoint: <endpoint>` and `X-Spiral-Project: <project_id>` on
    project reads and commands. Omit the project header before a workspace is
    chosen; Studio-wide features still work. Studio-wide `/providers`,
-   `/keys`, `/proxy`, `/account` reads, `/workspaces`, `/settings/connection`, and
-   `POST /datasets/hugging-face/inspect` need neither header.
+   `/keys`, `/proxy`, `/account` reads, `/workspaces`, `/settings/connection`,
+   and the Hugging Face inspections (`POST /datasets/hugging-face/inspect` and
+   `POST /datasets/lerobot/inspect`) need neither header.
 3. The backend keeps no current project. A request may name the project of any
    workspace on the saved endpoint, which the backend reaches as the signed-in
    user. A request naming another endpoint, or a project whose workspace was
@@ -223,38 +224,58 @@ browser stores it: `GET /robot-connector/episodes` lists them, each
 `POST /robot-connector/episodes/{dataset}/{episode}/store` stores one as
 `{episode}.mcap` in the MCAP dataset `dataset` with the browser's Spiral
 access, creating the dataset with its first episode, then forgets it. Storing the
-same episode again only refreshes the dataset. Rollout stores each episode as it
-arrives. Published
-dataset content uses `/datasets/episode-topics` and episode queries with
-explicit dataset/member identities; no recording-header fallback exists.
+same episode again is an idempotent retry; other bytes at that episode are
+refused. Rollout stores each episode as it arrives. Stored episodes are read
+like any other ([datasets](#datasets)); no recording-header fallback exists.
 
-### Hugging Face import
+### Datasets
 
-Dataset import accepts public Hugging Face repositories holding MCAP files or
-a LeRobot v3 dataset. Both requests are `HuggingFaceDatasetSource`:
-`dataset_id`, `repository`, and optional `revision` (default `main`). No
-token is sent. See [datasets](datasets.md#hugging-face-import).
+A dataset is the tables under `datasets.<id>` that Studio writes itself
+([datasets](datasets.md)), named by a `DatasetSelection`, `{"id": …}`.
 
-- `POST /datasets/hugging-face/inspect` and `POST /datasets/lerobot/inspect`
+- `GET /data-catalog` lists the project's datasets, each a `DatasetSummary`:
+  its `selection`, its `format` (`mcap` or `lerobot`), and the `resource_id`
+  and `version_id` of its `episodes` table, which change exactly when episodes
+  are added. `POST /datasets/robot` and `POST /datasets/joint-roles` take one
+  and answer what Studio keeps for that version, or `null`; their `/save`
+  routes keep it.
+- `POST /datasets/inspect` (`DatasetSelection`) answers a
+  `DatasetInspection`: the dataset's summary, its episode count (`members`),
+  and its `topics`, one per stream, each with its `name` (the topic),
+  `revision` (`{stream}`, its table under `messages`), `schema`, `encoding`,
+  and how many episodes (`members`) and messages (`samples`) hold it.
+- `POST /datasets/episode-topics` (`EpisodeSelection`, `{dataset,
+  episode_id}`) lists the streams one episode holds, each with its message
+  count.
+- `POST /datasets/delete` (`DatasetSelection`) drops every table under
+  `datasets.<id>` in one transaction, answers and recordings included, and
+  any table Studio no longer writes; a dataset with no tables is already
+  deleted.
+
+Episode content is read with read-only SQL over those tables: `POST /queries`,
+and `POST /queries/episode` and `POST /queries/episodes`, which bind one
+episode's number as `$1` or listed episodes' as `$1`…`$N`; each of the two has an
+`/arrow` form answering one Arrow IPC stream.
+
+Import takes a public Hugging Face repository holding MCAP files or a LeRobot
+v3 dataset, as a new dataset. Downloads send the deployment's Hugging Face
+token when it is set. See [datasets](datasets.md#writing).
+
+- `POST /datasets/hugging-face/inspect` (MCAP) and
+  `POST /datasets/lerobot/inspect` take a `HuggingFaceDatasetSource`:
+  `dataset_id`, `repository`, and optional `revision` (default `main`). They
   pin the revision to its commit and list the files an import reads, their
-  size, and the relations it creates; they change nothing. A LeRobot
-  repository must hold `meta/info.json`.
-- `POST /datasets/hugging-face/import` imports MCAP files in one request:
-  `dataset_files_<dataset_id>`, a table of the repository's MCAP files, and
-  `dataset_<dataset_id>` derived from it in one transaction, copying every
-  topic into Spiral, with its episode count checked before committing.
-- `POST /datasets/lerobot/imports` starts a LeRobot import the backend holds
-  and answers its `LeRobotImportStatus` at once: `id`, the `source` at its
-  resolved commit, and `phase` (`listing_files`, `creating_dataset`,
-  `copying_episodes`, `creating_answers`, `done`, or `failed` with Spiral's
-  `error`). `GET /datasets/lerobot/imports/{id}` reads it; a run settled and
-  unread for 30 seconds is dropped. The run creates the Location
-  `dataset_files_<dataset_id>` over the repository at that commit, lists it,
-  and creates and refreshes `dataset_<dataset_id>` with
-  `spql.lerobot.dataset`, in one transaction.
-
-Existing targets are refused. Neither publishes rows into a separate Studio
-dataset registry. Project snapshot restore is a separate operation.
+  size, and the tables it creates; they change nothing. A LeRobot repository
+  must hold `meta/info.json`.
+- `POST /datasets/imports` (`DatasetImportRequest`, `{format, source}`)
+  inspects the source again, starts an import the backend holds, and answers
+  its `DatasetImportStatus` at once: `id`, the `request` with its source at
+  the resolved commit, and `phase`: `listing_files`, `importing_episodes`
+  with `written` and `total`, `done`, or `failed` with its `error`.
+  `GET /datasets/imports/{id}` reads it; a run settled and unread for 30
+  seconds is dropped. A run fails at once when the dataset name exists.
+  Episodes are written 32 at a time, each batch in its own transaction; a
+  failed run keeps the batches it committed.
 
 ### Curation
 
@@ -272,11 +293,12 @@ since only the payload names them. A payload over 32 MiB fails with
 twice the payload limit so a document's JSON framing always fits.
 
 Publishing is a fill run. `POST /curation-fills` takes `{dataset, columns,
-views}`: for each node that asks a model, in path order, its answers-table
+views}`: for each node that asks a model, in path order, its answer
 `column`, the `episodes` it is filled for (a read-only statement listing the
 episodes that reach the node, or listed ids), the `node` label the run
-reports, and the `source` of one episode's answer (a read-only statement with
-the episode bound as `$1`, or the Modal service's progress scores of a camera);
+reports, and the `source` of its answers (a model call through OpenRouter,
+the Modal services' progress scores or object tracks of a camera, or one
+read-only statement over the dataset);
 then the views, each `{name, statement}`: one plain identifier and the
 read-only `SELECT` or `WITH` the browser compiled from an output. The backend
 refuses an invalid name, statement, or dataset with `invalid_input`, and a
@@ -290,17 +312,22 @@ runs that publish views, `GET /curation-fills/{id}` reads one, and
 `POST /curation-fills/{id}/stop` starts nothing more; what is in flight is
 written. A Score progress preview starts the same run over the episodes it
 previews, with no views. `POST /curations/unpublish` takes `{name}`, forgets
-the view, and answers `null`; its stored answers stay. See
-[curation](curation.md).
+the view, and answers `null`; its stored answers stay.
+`POST /curation-answers/filled` takes `{dataset, column}` and answers the
+episodes the column holds an answer for, failed ones included, none before a
+run first fills it. `POST /curation-answers/columns` takes a
+`DatasetSelection` and answers the answer columns the dataset holds a table
+for. See [curation](curation.md).
 
 ## Files and media
 
 - `POST /project/import`: raw `.spiral-project` bytes with the project header. A
   body past 256 MiB fails with 413. The browser sends its native File without
   making a project-sized WebAssembly copy. Import returns `ProjectImportSummary`.
-- `GET /project/export?endpoint=...&project_id=...`: version 4 project bundle
+- `GET /project/export?endpoint=...&project_id=...`: version 6 project bundle
   download, a ZIP of `studio.sqlite3` (project-scoped control records, no
-  backend credentials) and the project's MCAP sources.
+  backend credentials) and the project's MCAP files: the bytes of each one
+  held inline, the pinned Hugging Face URI of each one imported from there.
   Import accepts only this version and also bounds total uncompressed contents
   to 256 MiB. See [project transfer](studio-sqlite.md#project-transfer).
 

@@ -50,7 +50,7 @@ pub(super) struct VideoContract {
 
 impl VideoContract {
     /// A field nested within a row is best declared nullable: the service may
-    /// then declare it either way, and the answers table keeps every nested
+    /// then declare it either way, and its answer column keeps every nested
     /// field nullable regardless.
     pub(super) fn new(
         node: &'static str,

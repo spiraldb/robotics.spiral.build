@@ -330,7 +330,7 @@ pub(super) fn CuratedViewSubject(
                 }
                 if !confirming() {
                     Button { id: unpublish_id.clone(), purpose: ActionPurpose::Remove, variant: ButtonVariant::Link,
-                        size: ButtonSize::Compact, class: "data-curated-unpublish",
+                        size: ButtonSize::Compact, class: "data-overview-head-action",
                         title: "Drop this view",
                         onclick: move |_| confirming.set(true), "Unpublish" }
                 }
@@ -386,7 +386,7 @@ fn UnpublishConfirmation(
     rsx! {
         InlineConfirmation {
             id: "data-curated-unpublish-confirmation",
-            class: "data-curated-confirmation",
+            class: "data-overview-confirmation",
             copy: ConfirmationCopy::new(
                 format!(
                     "Unpublish {name}? The view is dropped; the curation “{}” keeps its recipe and can publish it again.",
@@ -511,14 +511,14 @@ mod tests {
     use spiral_robotics_common::relations::QueryColumn;
 
     fn dataset() -> EpisodeListing {
-        EpisodeListing::mcap_fixture("dataset_bottles")
+        EpisodeListing::mcap_fixture("bottles")
     }
 
     /// A row of the view on episode `id`, recorded from `start`, with the
     /// episode's listed facts beside it as one read answers them.
     fn row(id: u32, start: u64, published: Value) -> Value {
         let mut row = json!({
-            "episode_id": EpisodeId::fixture(id).to_string(),
+            "episode_id": EpisodeId::fixture(id),
             "listed_source_uri": format!("s3://recordings/{id}.mcap"),
             "listed_message_start_time": start,
             "listed_duration_ns": 10_000_000_000_u64,

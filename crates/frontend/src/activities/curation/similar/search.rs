@@ -1,4 +1,4 @@
-//! Find similar subtasks: the node's step asks `spql.ai.similarity` how likely
+//! Find similar subtasks: the node's step asks a decision model how likely
 //! every subtask that reaches it is the operation its query names, and its
 //! preview runs that step over the subtasks Break down's preview holds, many
 //! episodes to a query, as the curation's own run.

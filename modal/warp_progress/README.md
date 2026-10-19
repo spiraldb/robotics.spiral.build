@@ -30,19 +30,13 @@ trained for this same backbone and recipe.
   while the model serves one batch at a time on the GPU (`queue` is the wait for it).
 - `warp_progress/testing.py`: stand-ins for the gated backbone and for a head, and a local directory
   standing in for the models Volume, for these tests and the training job's.
-- `parity.py`: compares the port with the Rust function on the hosted sample dataset.
 
 ## Local work
 
 ```sh
 uv sync
 uv run pytest
-uv run python parity.py            # MPS when available; --device cpu for CPU
 ```
-
-`parity.py` reads the pyspiral login, `HF_TOKEN` and Studio's release ADBC driver. It expects the
-weights in `~/.cache/warp-progress/artifacts`. To fetch them, run
-`HF_TOKEN=… uv run python -c 'from pathlib import Path; from warp_progress.artifacts import Artifacts; Artifacts(Path.home() / ".cache/warp-progress/artifacts").download()'`.
 
 ## Deploy
 

@@ -67,7 +67,7 @@ impl EpisodeSample {
     pub(super) fn fixture(episodes: Vec<Episode>) -> Self {
         Self {
             dataset: episodes.first().map_or_else(
-                || DatasetSelection::new(vec!["fixture".to_owned()]).expect("a dataset name"),
+                || DatasetSelection::new("fixture").expect("a dataset name"),
                 |episode| episode.dataset().clone(),
             ),
             episodes,

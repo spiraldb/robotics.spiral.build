@@ -42,5 +42,4 @@ pub(in crate::activities) use listing::{EpisodeRows, RowFace, RowFaceView};
 pub(crate) use still::EpisodeStills;
 pub(in crate::activities) use still::{EpisodeStill, StillMoment};
 pub(in crate::activities) use streams::StreamCatalog;
-pub(crate) use task::EpisodeTask;
 pub(in crate::activities) use timeline::EvidenceTrack;

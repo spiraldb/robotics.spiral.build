@@ -15,17 +15,18 @@
 //! keeps which node wrote each column and what it means ([`TableColumns`]),
 //! so a Select, Data, and Training read a column by the node that wrote it.
 //!
-//! Every model answer is stored: each model node writes one column of the
-//! dataset's answers table per exact call ([`AnswerColumn`]), and a fill run
-//! computes it for every episode that reaches the node and does not have it
-//! yet ([`CurationPath::fills`]), in path order, so the episodes reaching a
-//! node are read over the columns above it. The published view reads those
+//! Every model answer is stored: each model node writes one of the dataset's
+//! answer columns per exact call ([`AnswerColumn`]), a table each, and a fill
+//! run computes it for every episode that reaches the node and does not have
+//! it yet ([`CurationPath::fills`]), in path order, so the episodes reaching
+//! a node are read over the columns above it. The published view reads those
 //! columns and asks no model.
 //!
 //! A preview reads one model node's entries over the stored answers of the
-//! episode bound as `$1`, which it fills first: what the Select's views need
-//! of the node, never the node's big lists. A Select has no preview; the
-//! browser reads its conditions over the previews above it.
+//! episodes it lists, bound as `$1` through `$N`, which it fills first: what
+//! the Select's views need of the node, never the node's big lists, each
+//! entry with its episode. A Select has no preview; the browser reads its
+//! conditions over the previews above it.
 mod episode_row;
 mod table;
 
@@ -38,20 +39,17 @@ use super::select::SelectStep;
 use crate::activities::episode::EpisodeListing;
 use spiral_robotics_common::curation::{AnswerColumn, AnswerSource, ColumnFill, FillEpisodes};
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
+use spiral_robotics_common::sql::SqlStruct;
 
 /// Which reading of a path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PathSource {
-    /// One model node's entries for the episode bound as `$1`, reading its
-    /// stored answers.
-    Preview,
+    /// One model node's entries for `episodes` listed episodes, bound as
+    /// `$1` through `$N`, reading its stored answers.
+    Preview { episodes: usize },
     /// Chained into the view over every episode of the dataset, reading the
     /// stored answers.
     Published,
-    /// The one call filling a node's stored column, for the episode bound as
-    /// `$1`. A call keeps its function's NULL for an answer it cannot give,
-    /// which the fill stores as the episode's failed answer.
-    Fill,
 }
 
 /// Where one model node's part of a path is written: the node, the column
@@ -93,7 +91,7 @@ impl ModelStep<'_> {
 /// entry's element of its list, and which entries it holds when not all.
 struct FoldedColumn {
     column: TableColumn,
-    element: String,
+    element: SqlStruct,
     only: Option<String>,
 }
 
@@ -122,7 +120,7 @@ impl ModelEntries {
     pub(super) fn folding(
         mut self,
         column: TableColumn,
-        (element, only): (String, Option<String>),
+        (element, only): (SqlStruct, Option<String>),
     ) -> Self {
         self.folded.push(FoldedColumn {
             column,
@@ -132,8 +130,7 @@ impl ModelEntries {
         self
     }
     /// The entry folding every column, one row per episode: each list
-    /// collected over the entries in their order, which `spql.list.collect`
-    /// keeps (Spiral has no ordered `ARRAY_AGG`).
+    /// collected over the entries in their order.
     fn fold(&self, step: &ModelStep<'_>) -> String {
         let columns = self
             .folded
@@ -145,18 +142,17 @@ impl ModelEntries {
                     .map(|only| format!(" FILTER (WHERE {only})"))
                     .unwrap_or_default();
                 format!(
-                    "spql.list.collect({}){only} AS {}",
-                    folded.element,
+                    "{}{only} AS {}",
+                    folded.element.collected_by(self.order),
                     folded.column.name()
                 )
             })
             .collect::<Vec<_>>()
             .join(", ");
         format!(
-            "{} AS (SELECT episode_id, {columns} FROM (SELECT * FROM {} ORDER BY episode_id, {}) ordered GROUP BY episode_id)",
+            "{} AS (SELECT episode_id, {columns} FROM {} GROUP BY episode_id)",
             step.name(),
             step.entries(),
-            self.order
         )
     }
 }
@@ -167,15 +163,12 @@ pub(super) trait ModelNode {
     /// The column the node's call stores its answers in. `subtasks` is the
     /// column of the Break down above, for a node that judges its subtasks.
     fn answer_column(&self, subtasks: Option<&AnswerColumn>) -> Result<AnswerColumn, PathError>;
-    /// How a fill computes one episode's answer over `dataset`.
-    fn answer_source(
-        &self,
-        dataset: &DatasetSelection,
-        step: &ModelStep<'_>,
-    ) -> Result<AnswerSource, PathError>;
+    /// How a fill computes one episode's answer.
+    fn answer_source(&self, step: &ModelStep<'_>) -> Result<AnswerSource, PathError>;
     /// The stored answers its entries read, as columns of the episode row.
     fn episode_columns(&self, row: &mut EpisodeRow, step: &ModelStep<'_>) -> Result<(), PathError> {
-        row.stored(step.column())
+        row.stored(step.column());
+        Ok(())
     }
     /// Its entries over the episode row, and the columns folding them.
     fn entries(&self, step: &ModelStep<'_>) -> Result<ModelEntries, PathError>;
@@ -274,9 +267,12 @@ impl<'a> CurationPath<'a> {
         self.compile().map(|compiled| compiled.table)
     }
 
-    /// The last node's entries for the episode bound as `$1`, over its stored
-    /// answers: what its preview reads.
-    pub(super) fn preview(&self) -> Result<String, PathError> {
+    /// The last node's entries for `episodes` listed episodes, bound as `$1`
+    /// through `$N`, over its stored answers: what its preview reads.
+    pub(super) fn preview(&self, episodes: usize) -> Result<String, PathError> {
+        if episodes == 0 {
+            return Err(PathError::new("A preview reads at least one episode."));
+        }
         let dataset = self.dataset()?;
         let columns = self.answer_columns()?;
         let depth = self.nodes.len() - 1;
@@ -285,10 +281,10 @@ impl<'a> CurationPath<'a> {
             return Err(PathError::new("Only a node that asks a model previews."));
         };
         let step = Self::step(node, stored);
-        let mut row = EpisodeRow::new(dataset, PathSource::Preview);
+        let mut row = EpisodeRow::new(dataset, PathSource::Preview { episodes });
         model.episode_columns(&mut row, &step)?;
         let built = model.entries(&step)?;
-        let mut entries = row.entries()?;
+        let mut entries = row.entries();
         entries.extend(built.entries);
         Ok(format!(
             "WITH\n  {}\nSELECT {} FROM {}",
@@ -324,34 +320,31 @@ impl<'a> CurationPath<'a> {
                 nodes: self.nodes[..depth].to_vec(),
             }
             .reaching()?;
-            fills.push(self.fill(self.nodes[depth], stored, FillEpisodes::Reaching(reaching))?);
+            let step = Self::step(self.nodes[depth], stored);
+            fills.push(self.fill(&step, FillEpisodes::Reaching(reaching))?);
         }
         Ok(fills)
     }
 
-    /// The last node's column filled for `episodes`, as its preview fills
-    /// it before reading it.
+    /// The last node's column filled for `episodes`, as its preview fills it
+    /// before reading it.
     pub(super) fn fill_for(&self, episodes: Vec<EpisodeId>) -> Result<ColumnFill, PathError> {
         let depth = self.nodes.len() - 1;
         let columns = self.answer_columns()?;
         let stored = columns[depth]
             .as_ref()
             .ok_or_else(|| PathError::new("This node asks no model."))?;
-        self.fill(self.nodes[depth], stored, FillEpisodes::Listed(episodes))
+        let step = Self::step(self.nodes[depth], stored);
+        self.fill(&step, FillEpisodes::Listed(episodes))
     }
 
-    fn fill(
-        &self,
-        node: &CurationNode,
-        stored: &NodeColumns,
-        episodes: FillEpisodes,
-    ) -> Result<ColumnFill, PathError> {
-        let model =
-            Self::model(node.kind()).ok_or_else(|| PathError::new("This node asks no model."))?;
-        let source = model.answer_source(self.dataset()?, &Self::step(node, stored))?;
+    fn fill(&self, step: &ModelStep<'_>, episodes: FillEpisodes) -> Result<ColumnFill, PathError> {
+        let kind = step.node.kind();
+        let model = Self::model(kind).ok_or_else(|| PathError::new("This node asks no model."))?;
+        let source = model.answer_source(step)?;
         Ok(ColumnFill::new(
-            node.kind().label(),
-            stored.column.clone(),
+            kind.label(),
+            step.column.clone(),
             episodes,
             source,
         ))
@@ -419,7 +412,7 @@ impl<'a> CurationPath<'a> {
             model.episode_columns(&mut row, &Self::step(node, stored))?;
         }
         let mut entries = vec![DatasetStep::new(self.listing()?).entry()];
-        entries.extend(row.entries()?);
+        entries.extend(row.entries());
         let mut table = TableColumns::facts(self.listing()?);
         let mut reach = DatasetStep::NAME.to_owned();
         for (depth, node) in self.nodes.iter().enumerate() {

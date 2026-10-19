@@ -46,6 +46,7 @@ struct CompiledOutput {
 }
 
 impl CompiledOutput {
+    /// What `path` publishes as.
     fn of(path: &CurationPath<'_>) -> Result<Self, PathError> {
         Ok(Self {
             statement: path.statement()?,
@@ -562,8 +563,10 @@ mod tests {
                 node,
                 AnswerColumn::of("probe", &[node]).unwrap(),
                 FillEpisodes::Reaching(reaching.to_owned()),
-                AnswerSource::Statement {
-                    statement: "SELECT $1 AS episode_id, 1 AS answer".to_owned(),
+                AnswerSource::ProgressService {
+                    camera: "/top".to_owned(),
+                    model: "warp".to_owned(),
+                    revision: "rev".to_owned(),
                 },
             )
         };
@@ -580,7 +583,7 @@ mod tests {
                 fills: vec![scores.clone(), subtasks.clone()],
             },
         ];
-        let dataset = DatasetSelection::new(vec!["dataset_folding".into()]).unwrap();
+        let dataset = DatasetSelection::new("folding").unwrap();
         let run = ChosenView::run(dataset, &views);
         assert_eq!(run.columns(), [scores, subtasks]);
         assert_eq!(

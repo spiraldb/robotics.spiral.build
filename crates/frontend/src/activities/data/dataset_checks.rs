@@ -4,7 +4,7 @@
 //! arm followed its commands, neared its limits, spiked, paused, stuck, and
 //! closed its gripper.
 //!
-//! Each check is a column of the dataset's answers table with one cell per
+//! Each check is one of the dataset's answer columns, with one cell per
 //! episode (see `check_columns`). The operator runs the health check, and a
 //! backend fill run fills every column the dataset lacks, reading each check
 //! over every episode at once; a dataset is checked once, and episodes
@@ -32,7 +32,7 @@ use crate::activities::episode::{Episode, EpisodeListing, EpisodeRows, SourceLab
 use crate::client::CommandError;
 use crate::components::scoped_task::ScopedTask;
 use camera_frames::CameraFrames;
-use check_columns::{CheckColumn, CheckKind, CheckRows};
+use check_columns::{CheckColumn, CheckTable};
 use clock_offset::ClockOffset;
 use dioxus::dioxus_core::{ScopeId, current_scope_id};
 use dioxus::prelude::*;
@@ -89,41 +89,52 @@ struct ArmChecks {
 }
 
 impl CheckedDataset {
-    /// The findings `rows` hold in `columns`, the columns `inputs` name,
-    /// which a run has filled.
-    fn read(
+    /// The findings `table` holds in `columns`, the columns `inputs` name,
+    /// which a run has filled, each check judged in Spiral.
+    async fn judge(
         inputs: &CheckInputs,
         roles: &DatasetJointRoles,
         columns: &[CheckColumn],
-        rows: &CheckRows,
+        table: &CheckTable,
     ) -> Result<Self, String> {
+        use futures_util::future::{try_join, try_join3};
         let streams = inputs.streams();
-        let (rates, timings) =
-            RecordingRate::read(streams, &rows.cells(columns, CheckKind::Rates)?);
-        let frames = CameraFrames::read(streams, &rows.cells(columns, CheckKind::Frames)?);
-        let clock = ClockOffset::read(
-            streams,
-            &timings,
-            &frames,
-            &rows.cells(columns, CheckKind::Clock)?,
-        );
+        let (rates, frames) = try_join(
+            RecordingRate::judge(table, columns, streams),
+            CameraFrames::judge(table, columns, streams),
+        )
+        .await?;
+        let clock = ClockOffset::judge(table, columns, streams, &frames).await?;
         let arms = roles.arms();
         let joints = if arms.is_empty() {
             JointChecks::Unidentified
         } else {
             let robot = inputs.robot.as_ref();
+            let ((lag, limits, spikes), (pauses, stuck, grippers)) = try_join(
+                try_join3(
+                    StateActionLag::judge(table, columns, arms),
+                    JointLimits::judge(table, columns, arms, robot),
+                    JointSpikes::judge(table, columns, arms),
+                ),
+                try_join3(
+                    Pauses::judge(table, columns, arms),
+                    StuckJoints::judge(table, columns, arms),
+                    GripperCloses::judge(table, columns, arms),
+                ),
+            )
+            .await?;
             JointChecks::Checked(Box::new(ArmChecks {
                 roles: roles.clone(),
-                lag: StateActionLag::read(arms, &rows.cells(columns, CheckKind::Lag)?),
-                limits: JointLimits::read(arms, robot, &rows.cells(columns, CheckKind::Limits)?)?,
-                spikes: JointSpikes::read(arms, &rows.cells(columns, CheckKind::Spikes)?),
-                pauses: Pauses::read(arms, &rows.cells(columns, CheckKind::Pauses)?),
-                stuck: StuckJoints::read(arms, &rows.cells(columns, CheckKind::Stuck)?),
-                grippers: GripperCloses::read(arms, &rows.cells(columns, CheckKind::Grippers)?),
+                lag,
+                limits,
+                spikes,
+                pauses,
+                stuck,
+                grippers,
             }))
         };
         Ok(Self {
-            episodes: rows.episodes() as u64,
+            episodes: table.episodes(),
             rates,
             frames,
             clock,
@@ -232,14 +243,14 @@ impl CheckInputs {
 /// What a dataset's check columns hold.
 #[derive(Clone, Debug, PartialEq)]
 enum CheckReading {
-    /// The health check has not run, or a run stopped before it filled
-    /// every column.
+    /// The health check has not run, or a run stopped before it began
+    /// filling every column.
     NotRun,
     /// The report, and how many episodes no run has checked yet, such as
     /// ones appended since.
     Read {
         report: Rc<CheckedDataset>,
-        unchecked: usize,
+        unchecked: u64,
     },
 }
 
@@ -281,7 +292,7 @@ enum CheckState {
 /// run keeps going while the operator works elsewhere.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct DatasetChecks {
-    states: Signal<HashMap<String, CheckState>>,
+    states: Signal<HashMap<DatasetSelection, CheckState>>,
     owner: ScopeId,
 }
 
@@ -296,15 +307,15 @@ impl DatasetChecks {
         consume_context()
     }
     fn state(self, dataset: &DatasetSelection) -> Option<CheckState> {
-        self.states.read().get(&dataset.sql_name()).cloned()
+        self.states.read().get(dataset).cloned()
     }
     fn set(mut self, dataset: &DatasetSelection, state: CheckState) {
-        self.states.write().insert(dataset.sql_name(), state);
+        self.states.write().insert(dataset.clone(), state);
     }
     /// Read what `dataset`'s check columns hold, unless this session
     /// already has.
     fn ensure(self, dataset: &DatasetSelection) {
-        if self.states.peek().contains_key(&dataset.sql_name()) {
+        if self.states.peek().contains_key(dataset) {
             return;
         }
         self.set(dataset, CheckState::Reading);
@@ -313,7 +324,7 @@ impl DatasetChecks {
     }
     /// Read again, as after a failure.
     fn retry(mut self, dataset: &DatasetSelection) {
-        self.states.write().remove(&dataset.sql_name());
+        self.states.write().remove(dataset);
         self.ensure(dataset);
     }
     /// Run every check `dataset`'s columns lack.
@@ -337,9 +348,7 @@ impl DatasetChecks {
     }
     /// Move `dataset`'s run on, while it runs.
     fn advance(mut self, dataset: &DatasetSelection, change: impl FnOnce(&mut CheckProgress)) {
-        if let Some(CheckState::Running(progress)) =
-            self.states.write().get_mut(&dataset.sql_name())
-        {
+        if let Some(CheckState::Running(progress)) = self.states.write().get_mut(dataset) {
             change(progress);
         }
     }
@@ -380,13 +389,13 @@ impl CheckRun {
             return Ok(CheckReading::NotRun);
         };
         let columns = inputs.columns()?;
-        let rows = CheckRows::read(&self.client, &self.dataset, &columns).await?;
-        if !columns.iter().all(|column| rows.holds(column)) {
+        let table = CheckTable::read(&self.client, &self.dataset, &columns).await?;
+        if !columns.iter().all(|column| table.holds(column)) {
             return Ok(CheckReading::NotRun);
         }
         Ok(CheckReading::Read {
-            report: Rc::new(CheckedDataset::read(inputs, roles, &columns, &rows)?),
-            unchecked: rows.unchecked(&columns),
+            report: Rc::new(CheckedDataset::judge(inputs, roles, &columns, &table).await?),
+            unchecked: table.unchecked(),
         })
     }
 

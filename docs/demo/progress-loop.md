@@ -97,7 +97,7 @@ What the narration avoids claiming:
 
 ## Before recording
 
-1. **Full dataset in Studio.** Spiral v0.16.45 (with the LeRobot producer and the release-build fix), Studio's driver bumped to it, Studio reading LeRobot datasets (topic listing), then `CREATE DATASET … USING spql.lerobot.dataset` and a refresh. See [train-on-experts.md](train-on-experts.md#how-far-we-are).
+1. **Full dataset in Studio.** Import the LeRobot repository in Data (Import → Hugging Face (LeRobot)), which writes every episode under `datasets.<id>`. See [datasets.md](../datasets.md#writing).
 2. **Keep the best checkpoint.** On the 100-episode sample the progress model overfit after about 750 steps, and only every 2,500th step was saved. Training should keep the checkpoint with the lowest validation loss, and chapter 2 publishes that one.
 3. **Verify chapter 3's beat** on the trained model: score the long demos and check the hero's stretch is left out at a cutoff that doesn't leave out most of the demo.
 4. **ACT on a progress-cleaned view.** A cleaned view has many short kept ranges per episode. Check the ACT run admits it, how many samples it gets, and that its loss falls in the first minutes.

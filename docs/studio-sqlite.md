@@ -9,7 +9,7 @@ The backend owns two persistence boundaries:
   curation recipes and the statements of the views they publish, and a record
   of each training run Studio started (its configuration and what it was
   given).
-- **Spiral / ADBC:** datasets, their MCAP sources, and each dataset's answers
+- **Spiral (through its SDK):** datasets, their MCAP sources, and each dataset's answers
   table: model answers and the health check's columns, one cell per episode.
   Training
   runs' metrics, logs, and checkpoints live on the Modal training service
@@ -94,7 +94,7 @@ Spiral; nothing reads them.
 
 ## Project transfer
 
-Version **5** `.spiral-project` bundles are ZIP archives containing:
+Version **6** `.spiral-project` bundles are ZIP archives containing:
 
 - `studio.sqlite3`: a native SQLite snapshot of the selected project's Studio
   records. SQLite's `VACUUM INTO` captures committed state, including WAL data.
@@ -102,28 +102,44 @@ Version **5** `.spiral-project` bundles are ZIP archives containing:
   (a bundle carries no model answers for them to read), and other projects,
   then vacuums again to remove their deleted bytes. Project keys are neutralized so
   the snapshot can be restored into another project.
-- `manifest.json`: `{"format":"spiral-robotics-project","format_version":5,
+- `manifest.json`: `{"format":"spiral-robotics-project","format_version":6,
   "schema_version":<Spiral schema>,"mcap_datasets":[…]}`; unknown fields are
   refused.
-- `dataset_source.arrows`: one Arrow IPC stream of every dataset's source
-  files (`dataset_name`, `recording`, and `payload`, the MCAP bytes); each
-  dataset restores into its own `dataset_files_<name>`.
+- `dataset_source.arrows`: one Arrow IPC stream of every MCAP dataset's
+  files as their Blobs hold them: `dataset_name`, `recording`, `size`, and
+  either `bytes`, the MCAP bytes of a file the dataset holds inline, or `uri`,
+  the pinned `hf://datasets/<org>/<repo>@<commit>/<path>` URI of a file it
+  points at, which export never downloads. LeRobot datasets are not carried;
+  import one again from Hugging Face.
 
 A relation absent from Spiral is exported as an empty stream with its canonical
 schema. Arrow is used only for data-plane payloads; Studio records have no Arrow
 backup schemas. Import requires exactly these three entries. A ZIP without
 `manifest.json`, which includes every version-3 bundle, fails with "Not a
-format 5 project; project files from older Studio versions cannot be imported";
+format 6 project; project files from older Studio versions cannot be imported";
 any other `format_version` or Spiral schema version is refused. SQLite
 snapshots must match the current managed schema. Imports open snapshots
 read-only, validate their integrity and records, and insert records through
 local ORM entities. They never execute uploaded schema or migration scripts.
-The archive and its total uncompressed contents are limited to 256 MiB; Arrow
-decoding has additional allocation bounds.
+The archive and its total uncompressed contents are limited to 256 MiB, of
+which a pinned file takes only its URI; Arrow decoding has additional
+allocation bounds.
 
 Import validates the bundle and stages local replacements, including constraint
-checks, in a SQLite transaction before mutating Spiral. Spiral's data transaction
-commits first, then SQLite commits. A Spiral failure rolls back staged local
+checks, in a SQLite transaction before mutating Spiral. One Spiral transaction
+then drops every table of the project's MCAP datasets and writes each dataset
+the manifest names again from the bundle's files, decoding them as any MCAP
+import does ([datasets](datasets.md#writing)); a dataset without files is
+made empty, and every restored episode gets a new identity. A file the bundle
+names by its pinned URI is downloaded from Hugging Face at that commit, with
+the deployment's `HF_TOKEN` when it is set, refused unless it is the `size`
+the bundle records, and its dataset keeps pointing at that URI. Downloads run
+inside the Spiral transaction, 32 files at a time, so a failed download
+commits nothing; an import takes as long as its pinned files take to
+download. The project's
+LeRobot datasets stay as they are, so a bundle naming a dataset the project
+holds as anything but an MCAP dataset is refused before anything changes.
+Spiral's data transaction commits first, then SQLite commits. A Spiral failure rolls back staged local
 state. If Spiral commits but the final SQLite commit fails, the error explicitly
 reports partial completion and instructs the operator to retry the same import.
 There is no distributed transaction across these two databases. Importing a
@@ -137,10 +153,10 @@ Curations and training run records load locally. Data queries,
 recording storage, training data access, and artifact reads still require
 Spiral and report their own connection errors.
 
-Run the storage and backend tests with the configured local ADBC driver:
+Run the storage and backend tests:
 
 ```sh
-nix develop .#local-driver --command cargo test \
+nix develop --command cargo test \
   -p spiral-robotics-storage -p spiral-robotics-backend --lib --locked
 ```
 

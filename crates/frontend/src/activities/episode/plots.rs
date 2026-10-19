@@ -90,7 +90,7 @@ fn PlotsEmpty(catalog: StreamCatalog, mut choices: StreamChoices) -> Element {
         .filter(|stream| stream.kind() == StreamKind::Data && !choices.stream_is_quiet(stream))
         .cloned()
         .collect::<Vec<_>>();
-    candidates.sort_by_key(|stream| std::cmp::Reverse(stream.samples().unwrap_or(0)));
+    candidates.sort_by_key(|stream| std::cmp::Reverse(stream.samples()));
     candidates.truncate(QUICK_PLOT_STREAMS);
     rsx! {
         div { class: "data-plots-empty",
@@ -105,7 +105,7 @@ fn PlotsEmpty(catalog: StreamCatalog, mut choices: StreamChoices) -> Element {
                                 span { "{stream.label()}" }
                             }
                             span { class: "data-plots-quick-count",
-                                {stream.samples().map(GroupedCountPresentation::grouped_label).unwrap_or_default()}
+                                {stream.samples().grouped_label()}
                             }
                         }
                     }

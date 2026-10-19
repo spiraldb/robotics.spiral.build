@@ -3,9 +3,11 @@
 //! objects in every sampled picture. Each entry holds its value until the
 //! next one, so the timeline is a run of moments, which a Select keeps
 //! stretches of exactly as its SQL does (`select/step.rs`).
-use crate::activities::episode::Episode;
-use arrow_array::{Array, Float64Array, Int64Array};
+use super::population::EpisodeSample;
+use arrow_array::{Array, Float64Array, Int64Array, UInt64Array};
 use arrow_schema::DataType;
+use spiral_robotics_common::datasets::EpisodeId;
+use std::collections::BTreeMap;
 use std::io::Cursor;
 
 /// One entry: its time, in seconds from the episode's first message, and
@@ -50,9 +52,10 @@ impl TimelineMoment {
 pub(in crate::activities::curation) struct MeasuredTimeline(Vec<TimelineEntry>);
 
 impl MeasuredTimeline {
-    /// The most entries one episode's preview reads: every frame of five and
-    /// a half minutes at 30 Hz, the Arrow episode query's own bound. A longer
-    /// recording is refused rather than cut short.
+    /// How many entries a preview reads for each episode it lists: every
+    /// frame of five and a half minutes at 30 Hz, the Arrow episode query's
+    /// own bound. A read whose episodes hold more in all is refused rather
+    /// than cut short.
     pub(in crate::activities::curation) const MAX_ENTRIES: usize = 10_000;
 
     pub(in crate::activities::curation) fn new(mut entries: Vec<TimelineEntry>) -> Self {
@@ -60,54 +63,63 @@ impl MeasuredTimeline {
         Self(entries)
     }
 
-    /// One episode's timeline from the Arrow stream its preview answered:
-    /// `timestamp_ns` in the recording's clock, which the browser reads from
-    /// the episode's first message, and `value`.
-    pub(in crate::activities::curation) fn read(
+    /// Every listed episode's timeline from the Arrow stream its preview
+    /// answered: `episode_id`, `timestamp_ns` in the recording's clock, which
+    /// the browser reads from each episode's first message in `sample`, and
+    /// `value`. An episode without entries has no timeline.
+    pub(in crate::activities::curation) fn read_each(
         stream: &[u8],
-        episode: &Episode,
-    ) -> Result<Self, String> {
-        let origin = episode
-            .facts()
-            .message_start_time()
-            .and_then(|start| i64::try_from(start).ok())
-            .ok_or("This episode has no recorded start time to place its timeline by.")?;
+        sample: &EpisodeSample,
+    ) -> Result<BTreeMap<EpisodeId, Self>, String> {
         let reader = arrow_ipc::reader::StreamReader::try_new(Cursor::new(stream), None)
             .map_err(|error| error.to_string())?;
-        let mut entries = Vec::new();
+        let mut episodes = BTreeMap::<EpisodeId, (i64, Vec<TimelineEntry>)>::new();
         for batch in reader {
             let batch = batch.map_err(|error| error.to_string())?;
-            let column = |name: &str, kind: &DataType| {
-                let column = batch
+            let column = |name: &str| {
+                batch
                     .column_by_name(name)
-                    .ok_or_else(|| format!("The preview has no {name} column."))?;
-                arrow_cast::cast(column, kind).map_err(|error| error.to_string())
+                    .ok_or_else(|| format!("The preview has no {name} column."))
             };
-            let (times, values) = (
-                column("timestamp_ns", &DataType::Int64)?,
-                column("value", &DataType::Float64)?,
+            let cast = |name: &str, kind: &DataType| {
+                arrow_cast::cast(column(name)?, kind).map_err(|error| error.to_string())
+            };
+            let (ids, times, values) = (
+                column("episode_id")?,
+                cast("timestamp_ns", &DataType::Int64)?,
+                cast("value", &DataType::Float64)?,
             );
-            let (Some(times), Some(values)) = (
+            let (Some(ids), Some(times), Some(values)) = (
+                ids.as_any().downcast_ref::<UInt64Array>(),
                 times.as_any().downcast_ref::<Int64Array>(),
                 values.as_any().downcast_ref::<Float64Array>(),
             ) else {
                 return Err("The preview's columns are not a timeline's types.".into());
             };
             for row in 0..batch.num_rows() {
-                if times.is_null(row) {
-                    return Err("An entry of the preview has no time.".into());
+                if ids.is_null(row) || times.is_null(row) {
+                    return Err("An entry of the preview has no episode or time.".into());
                 }
+                let id = EpisodeId::new(ids.value(row));
+                let (origin, entries) = match episodes.get_mut(&id) {
+                    Some(episode) => episode,
+                    None => {
+                        let origin = sample.origin_ns(&id).ok_or(
+                            "An episode of the preview has no recorded start time to place its timeline by.",
+                        )?;
+                        episodes.entry(id).or_insert((origin, Vec::new()))
+                    }
+                };
                 entries.push(TimelineEntry::new(
-                    times.value(row).saturating_sub(origin) as f64 / 1e9,
+                    times.value(row).saturating_sub(*origin) as f64 / 1e9,
                     (!values.is_null(row)).then(|| values.value(row)),
                 ));
             }
         }
-        Ok(Self::new(entries))
-    }
-
-    pub(in crate::activities::curation) fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        Ok(episodes
+            .into_iter()
+            .map(|(id, (_, entries))| (id, Self::new(entries)))
+            .collect())
     }
 
     /// Every entry's moment, in time order: it lasts until the next entry,
@@ -178,9 +190,9 @@ impl MeasuredTimeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::activities::episode::Episode;
     use arrow_array::{ArrayRef, RecordBatch};
     use arrow_schema::{Field, Schema};
-    use spiral_robotics_common::datasets::EpisodeId;
     use std::sync::Arc;
 
     fn timeline(entries: &[(f64, Option<f64>)]) -> MeasuredTimeline {
@@ -225,15 +237,17 @@ mod tests {
     }
 
     #[test]
-    fn a_preview_reads_back_from_the_episodes_first_message() {
+    fn a_preview_reads_back_each_episode_from_its_first_message() {
         let schema = Arc::new(Schema::new(vec![
+            Field::new("episode_id", DataType::UInt64, false),
             Field::new("timestamp_ns", DataType::Int64, false),
             Field::new("value", DataType::UInt64, true),
         ]));
         let start = 1_000_000_000_i64;
         let columns: Vec<ArrayRef> = vec![
-            Arc::new(Int64Array::from(vec![start + 200_000_000, start])),
-            Arc::new(arrow_array::UInt64Array::from(vec![Some(2), None])),
+            Arc::new(arrow_array::UInt64Array::from(vec![1, 2, 1])),
+            Arc::new(Int64Array::from(vec![start + 200_000_000, start, start])),
+            Arc::new(arrow_array::UInt64Array::from(vec![Some(2), Some(5), None])),
         ];
         let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
         let mut bytes = Vec::new();
@@ -241,11 +255,22 @@ mod tests {
         writer.write(&batch).unwrap();
         writer.finish().unwrap();
         drop(writer);
-        // The fixture episode's first message is at one second of log time.
-        let episode = Episode::fixture(&EpisodeId::fixture(1), 2_000_000_000);
-        assert_eq!(
-            MeasuredTimeline::read(&bytes, &episode).unwrap(),
-            timeline(&[(0.0, None), (0.2, Some(2.0))])
+        // Each fixture episode's first message is at one second of log time;
+        // the third one answered nothing.
+        let sample = EpisodeSample::fixture(
+            (1..=3)
+                .map(|ordinal| Episode::fixture(&EpisodeId::fixture(ordinal), 2_000_000_000))
+                .collect(),
         );
+        let timelines = MeasuredTimeline::read_each(&bytes, &sample).unwrap();
+        assert_eq!(
+            timelines.get(&EpisodeId::fixture(1)),
+            Some(&timeline(&[(0.0, None), (0.2, Some(2.0))]))
+        );
+        assert_eq!(
+            timelines.get(&EpisodeId::fixture(2)),
+            Some(&timeline(&[(0.0, Some(5.0))]))
+        );
+        assert_eq!(timelines.len(), 2);
     }
 }

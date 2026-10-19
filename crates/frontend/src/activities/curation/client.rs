@@ -1,7 +1,7 @@
 //! The saved curations: list them, load one by id, store one back, delete one;
 //! which episodes a column of their answers already holds; and the fill runs
-//! that compute answers-table columns, which curations and the dataset health
-//! check both start.
+//! that compute answer columns, which curations and the dataset health check
+//! both start, and which columns they have started on a dataset.
 //!
 //! Build one inside the task that awaits it, as every other Studio client is
 //! built, so the request names the mounting scope's project.
@@ -10,10 +10,10 @@ use crate::client::http::UrlComponent;
 use crate::client::project::ProjectClient;
 use crate::client::transport::{CommandError, HttpRequest};
 use spiral_robotics_common::curation::{
-    CurationDeletion, CurationDocument, CurationSummary, FillRequest, FillStatus,
+    AnswerColumn, CurationDeletion, CurationDocument, CurationSummary, FillRequest, FillStatus,
     FilledEpisodesRequest, PublishedView,
 };
-use spiral_robotics_common::datasets::EpisodeId;
+use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 use std::collections::BTreeSet;
 
 pub(super) struct CurationClient(ProjectClient);
@@ -81,8 +81,8 @@ impl CurationClient {
     }
 }
 
-/// The backend's fill runs: each computes columns of a dataset's answers
-/// table, and a curation's may publish views once they are written.
+/// The backend's fill runs: each computes some of a dataset's answer columns,
+/// and a curation's may publish views once they are written.
 pub(in crate::activities) struct FillRuns(ProjectClient);
 
 impl FillRuns {
@@ -118,6 +118,17 @@ impl FillRuns {
                 "POST",
                 format!("/api/curation-fills/{}/stop", id.url_component()),
             ))
+            .await
+    }
+
+    /// The answer columns of `dataset` a run has started filling: each one
+    /// whose table exists.
+    pub(in crate::activities) async fn answer_columns(
+        &self,
+        dataset: &DatasetSelection,
+    ) -> Result<BTreeSet<AnswerColumn>, CommandError> {
+        self.0
+            .request(HttpRequest::new("POST", "/api/curation-answers/columns").json(dataset))
             .await
     }
 

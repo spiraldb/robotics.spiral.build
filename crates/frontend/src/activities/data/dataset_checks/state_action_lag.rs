@@ -3,54 +3,81 @@
 //! distance between each command and the measured position that many samples
 //! later; the shift with the least is the lag, and that distance is how
 //! closely the arm tracks its commands. Each episode's cell keeps, for every
-//! arm with commands, the distance at every shift; the lag is picked, and
-//! each episode judged against the arm's typical one, when the report is
-//! read.
-use super::check_columns::{CheckCells, CheckColumn, CheckKind, PartsStatement};
-use super::recording_rate::Median;
+//! arm with commands, the distance at every shift; the report judges them in
+//! Spiral: each episode's lag, the arm's typical tracking error, and the
+//! episodes that stray from it.
+use super::check_columns::{CheckColumn, CheckKind, CheckTable, PartsStatement};
 use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, Plural, Verdict};
 use super::stream_reads::{CheckedStreams, PairedColumns};
 use dioxus::prelude::*;
 use serde::Deserialize;
 use spiral_robotics_common::datasets::{ArmRoles, EpisodeId};
-use std::collections::BTreeMap;
+use spiral_robotics_common::sql::SqlStruct;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct StateActionLag {
     arms: Vec<ArmLag>,
+    /// The median tracking error over every arm's settled episodes: those
+    /// whose lag lies inside the shifts tried.
+    settled_tracking: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 struct ArmLag {
     arm: String,
-    episodes: Vec<EpisodeLag>,
+    /// How far its settled episodes trail their commands; none when no
+    /// episode settled.
+    settled: Option<SettledLag>,
+    /// Its typical and worst tracking error; none when no episode logged
+    /// its commands and positions together.
+    tracking: Option<TrackingError>,
+    flagged: Vec<FlaggedLag>,
     /// Episodes whose commands and positions were not logged together.
     unpaired: Vec<EpisodeId>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct EpisodeLag {
+/// The fewest and most samples settled episodes trail their commands by,
+/// and the shortest and longest that is in time.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+struct SettledLag {
+    fewest: i64,
+    most: i64,
+    shortest_ms: f64,
+    longest_ms: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TrackingError {
+    typical: f64,
+    worst: f64,
+}
+
+/// An episode the judgment flags: its lag is at either end of the shifts
+/// tried, or its tracking error is over `WORSE` times the arm's typical one.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+struct FlaggedLag {
+    #[serde(rename = "episode_id")]
     episode: EpisodeId,
     samples: i64,
-    /// The episode's usual interval between samples.
-    step_ms: f64,
     /// Mean distance, in radians, between a command and the position that
     /// many samples later.
     tracking: f64,
+    at_edge: bool,
+    worse: bool,
 }
 
-/// One arm's commands and positions in one episode, as its cell keeps them:
-/// how many commands met a position logged at the same instant, how many
-/// it logged, its median nanoseconds between samples, and the mean
-/// distance at each shift, by the shift's field.
-#[derive(Deserialize)]
-pub(super) struct LagPart {
+/// One commanded arm as the judgment answers it. The settled tracking error
+/// is the dataset's, the same on every arm's row.
+#[derive(Default, Deserialize)]
+struct JudgedArm {
     part: String,
-    paired: u64,
-    commands: u64,
-    step_ns: Option<f64>,
-    #[serde(flatten)]
-    errors: BTreeMap<String, Option<f64>>,
+    typical: Option<f64>,
+    worst: Option<f64>,
+    settled: Option<SettledLag>,
+    settled_tracking: Option<f64>,
+    flagged: Option<Vec<FlaggedLag>>,
+    unpaired: Option<Vec<EpisodeId>>,
 }
 
 /// Which episodes' commands and positions were logged together: those whose
@@ -58,8 +85,10 @@ pub(super) struct LagPart {
 pub(super) struct Pairing;
 
 impl Pairing {
-    pub(super) fn together(paired: u64, commands: u64) -> bool {
-        paired as f64 >= 0.9 * commands as f64
+    /// The condition, on a part's `paired` and `commands`, that holds when
+    /// they were logged together.
+    pub(super) fn together() -> &'static str {
+        "CAST(paired AS DOUBLE) >= 0.9 * CAST(commands AS DOUBLE)"
     }
 }
 
@@ -109,14 +138,86 @@ impl StateActionLag {
         CheckColumn::of(CheckKind::Lag, parts)
     }
 
-    /// Each commanded arm's lag in every episode its `cells` measured.
-    pub(super) fn read(arms: &[ArmRoles], cells: &CheckCells<LagPart>) -> Self {
+    /// Each commanded arm's lag and tracking error, and the episodes that
+    /// stray, judged in Spiral over the column among `columns` that `table`
+    /// holds.
+    pub(super) async fn judge(
+        table: &CheckTable,
+        columns: &[CheckColumn],
+        arms: &[ArmRoles],
+    ) -> Result<Self, String> {
+        let judged = match table.parts(columns, CheckKind::Lag) {
+            Some(parts) => table.rows(Self::judgment(&parts)).await?,
+            None => Vec::new(),
+        };
+        Ok(Self::of(arms, judged))
+    }
+
+    /// The judgment over `parts`, every episode's distances. An episode's
+    /// lag is the shift with the least distance, the earliest of equals, and
+    /// that distance is its tracking error; one whose commands and positions
+    /// were not logged together, or never met at any shift, is unpaired.
+    /// Per arm: its typical (median) and worst tracking error, the range its
+    /// settled episodes lag over, the episodes it flags and its unpaired
+    /// ones; and over every arm, the settled episodes' median tracking error.
+    fn judgment(parts: &str) -> String {
+        let shifts = Self::EARLIEST..=Self::LATEST;
+        let errors = shifts
+            .clone()
+            .map(Self::error_field)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let closest = shifts
+            .map(|shift| format!("WHEN {} = tracking THEN {shift}", Self::error_field(shift)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(
+            "WITH errors AS (SELECT episode_id, part, {together} AS together, COALESCE(step_ns, 0) / 1e6 AS step_ms, {errors}, least({errors}) AS tracking FROM {parts} p), \
+             lags AS (SELECT episode_id, part, together, tracking, step_ms, CASE {closest} END AS samples FROM errors), \
+             logged AS (SELECT episode_id, part, samples, tracking, samples * step_ms AS delay_ms, samples IN ({earliest}, {latest}) AS at_edge \
+               FROM lags WHERE together AND samples IS NOT NULL), \
+             tracked AS (SELECT part, approx_percentile_cont(tracking, 0.5) AS typical, max(tracking) AS worst FROM logged GROUP BY part), \
+             judged AS (SELECT logged.part AS part, logged.episode_id AS episode_id, logged.samples AS samples, logged.tracking AS tracking, \
+               logged.at_edge AS at_edge, logged.tracking > {worse} * tracked.typical AS worse FROM logged JOIN tracked ON tracked.part = logged.part), \
+             flagged AS (SELECT part, {flagged} AS flagged FROM judged WHERE at_edge OR worse GROUP BY part), \
+             settled AS (SELECT part, {settled} AS settled FROM logged WHERE NOT at_edge GROUP BY part), \
+             unpaired AS (SELECT part, array_agg(episode_id) AS unpaired FROM lags WHERE NOT (together AND samples IS NOT NULL) GROUP BY part), \
+             overall AS (SELECT approx_percentile_cont(tracking, 0.5) AS settled_tracking FROM logged WHERE NOT at_edge), \
+             arms AS (SELECT DISTINCT part FROM lags) \
+             SELECT arms.part AS part, tracked.typical AS typical, tracked.worst AS worst, settled.settled AS settled, overall.settled_tracking AS settled_tracking, \
+               flagged.flagged AS flagged, unpaired.unpaired AS unpaired \
+             FROM arms LEFT JOIN tracked ON tracked.part = arms.part LEFT JOIN settled ON settled.part = arms.part \
+               LEFT JOIN flagged ON flagged.part = arms.part LEFT JOIN unpaired ON unpaired.part = arms.part CROSS JOIN overall",
+            together = Pairing::together(),
+            earliest = Self::EARLIEST,
+            latest = Self::LATEST,
+            worse = Self::WORSE,
+            flagged =
+                SqlStruct::of_columns(["episode_id", "samples", "tracking", "at_edge", "worse"])
+                    .collected(),
+            settled = SqlStruct::new()
+                .field("fewest", "min(samples)")
+                .field("most", "max(samples)")
+                .field("shortest_ms", "min(delay_ms)")
+                .field("longest_ms", "max(delay_ms)"),
+        )
+    }
+
+    /// Every commanded arm among `arms`, as `judged` says it trails its
+    /// commands.
+    fn of(arms: &[ArmRoles], judged: Vec<JudgedArm>) -> Self {
+        let settled_tracking = judged.iter().find_map(|arm| arm.settled_tracking);
+        let mut judged = judged
+            .into_iter()
+            .map(|arm| (arm.part.clone(), arm))
+            .collect::<HashMap<_, _>>();
         Self {
             arms: arms
                 .iter()
                 .filter(|arm| arm.action().is_some())
-                .map(|arm| ArmLag::read(arm.name(), cells))
+                .map(|arm| ArmLag::of(arm.name(), judged.remove(arm.name())))
                 .collect(),
+            settled_tracking,
         }
     }
 
@@ -159,7 +260,7 @@ impl StateActionLag {
             .map(|shift| {
                 let name = Self::shift_name(shift);
                 let distance = (0..joints)
-                    .map(|joint| format!("spql.math.abs(a{joint} - q{joint}_{name})"))
+                    .map(|joint| format!("abs(a{joint} - q{joint}_{name})"))
                     .collect::<Vec<_>>()
                     .join(" + ");
                 format!(
@@ -174,7 +275,7 @@ impl StateActionLag {
             "t AS (SELECT id, {commands}, {shifted}, CAST(log_time AS BIGINT) - CAST(LAG(log_time) {window} AS BIGINT) AS step_ns FROM p)"
         ));
         ctes.push(format!(
-            "r AS (SELECT id, count(*) AS paired, spql.agg.approx_quantile(step_ns, 0.5) AS step_ns, {errors} FROM t GROUP BY id)"
+            "r AS (SELECT id, count(*) AS paired, approx_percentile_cont(step_ns, 0.5) AS step_ns, {errors} FROM t GROUP BY id)"
         ));
         let names = (Self::EARLIEST..=Self::LATEST)
             .map(|shift| format!("r.{0} AS {0}", Self::error_field(shift)))
@@ -195,47 +296,40 @@ impl StateActionLag {
                 Finding::why("No arm records its commands"),
             );
         }
+        // How far positions trail their commands, in time and in samples,
+        // and how far apart the two are there.
         let settled = self
             .arms
             .iter()
-            .flat_map(|arm| arm.episodes.iter().filter(|episode| !episode.at_edge()))
-            .collect::<Vec<_>>();
-        let samples = settled.iter().map(|episode| episode.samples);
-        let delays = settled
-            .iter()
-            .map(|episode| episode.samples as f64 * episode.step_ms);
-        let flagged = self.arms.iter().any(|arm| !arm.flagged().is_empty());
-        // How far positions trail their commands, in time and in samples,
-        // and how far apart the two are there.
-        let finding = match (samples.clone().min(), samples.max()) {
-            (Some(fewest), Some(most)) => Finding::of(
-                Span::of(
-                    delays.clone().fold(f64::INFINITY, f64::min),
-                    delays.fold(f64::NEG_INFINITY, f64::max),
-                    "ms",
-                    0,
-                ),
+            .filter_map(|arm| arm.settled)
+            .reduce(SettledLag::spanning);
+        let finding = match settled {
+            Some(lag) => Finding::of(
+                Span::of(lag.shortest_ms, lag.longest_ms, "ms", 0),
                 "lag, or",
             )
             .and(
-                Span::of(fewest as f64, most as f64, "samples", 0),
+                Span::of(lag.fewest as f64, lag.most as f64, "samples", 0),
                 "; tracking error",
             )
             .and(
-                Radians::milli(
-                    Median::of(settled.iter().map(|episode| episode.tracking)).unwrap_or_default(),
-                ),
+                Radians::milli(self.settled_tracking.unwrap_or_default()),
                 "",
             ),
-            _ => Finding::why("No episode logs commands and positions together"),
+            None => Finding::why("No episode logs commands and positions together"),
         };
-        let arms = self.arms.clone();
-        let flagged_evidence = self
+        let flagged = self
             .arms
             .iter()
-            .flat_map(ArmLag::flagged)
+            .flat_map(ArmLag::evidence)
             .collect::<Vec<_>>();
-        CheckRow::new(NAME, if flagged { Verdict::Flagged } else { Verdict::Clean }, finding).flagging(flagged_evidence).with_details(rsx! {
+        let verdict = if flagged.is_empty() {
+            Verdict::Clean
+        } else {
+            Verdict::Flagged
+        };
+        let arms = self.arms.clone();
+        CheckRow::new(NAME, verdict, finding).flagging(flagged).with_details(rsx! {
             table { class: "data-ledger data-checks-table", "aria-label": "State–action lag by arm",
                 thead { tr {
                     th { "Arm" } th { class: "is-number", "Lag" } th { class: "is-number", "Tracking error" }
@@ -247,7 +341,7 @@ impl StateActionLag {
                             td { class: "data-checks-arm", "{arm.arm}" }
                             td { class: "is-number", "{arm.lag_label()}" }
                             td { class: "is-number", "{arm.tracking_label()}" }
-                            td { EvidenceChips { evidence: arm.flagged() } }
+                            td { EvidenceChips { evidence: arm.evidence() } }
                             td { EvidenceChips { evidence: arm.unpaired.iter().map(|episode| Evidence::whole(episode.clone(), String::new())).collect::<Vec<_>>() } }
                         }
                     }
@@ -260,107 +354,80 @@ impl StateActionLag {
     }
 }
 
-impl LagPart {
-    /// The shift with the least error in `episode`, and that error.
-    fn lag(&self, episode: &EpisodeId) -> Option<EpisodeLag> {
-        let (samples, tracking) = (StateActionLag::EARLIEST..=StateActionLag::LATEST)
-            .filter_map(|shift| {
-                let error = (*self.errors.get(&StateActionLag::error_field(shift))?)?;
-                error.is_finite().then_some((shift, error))
-            })
-            .min_by(|left, right| left.1.total_cmp(&right.1))?;
-        Some(EpisodeLag {
-            episode: episode.clone(),
-            samples,
-            step_ms: self.step_ns.unwrap_or_default() / 1e6,
-            tracking,
-        })
-    }
-}
-
-impl EpisodeLag {
-    /// A lag at either end of the shifts tried may lie beyond them.
-    fn at_edge(&self) -> bool {
-        self.samples == StateActionLag::EARLIEST || self.samples == StateActionLag::LATEST
-    }
-}
-
 impl ArmLag {
-    /// The arm's lag in each episode `cells` measured it in whose commands
-    /// and positions were logged together; the others are unpaired.
-    fn read(arm: &str, cells: &CheckCells<LagPart>) -> Self {
-        let mut read = Self {
+    /// `arm` as `judged` answers it; an arm it does not answer had no
+    /// episode measured.
+    fn of(arm: &str, judged: Option<JudgedArm>) -> Self {
+        let judged = judged.unwrap_or_default();
+        Self {
             arm: arm.to_owned(),
-            episodes: Vec::new(),
-            unpaired: Vec::new(),
-        };
-        for (episode, part) in cells.parts().filter(|(_, part)| part.part == arm) {
-            match part
-                .lag(episode)
-                .filter(|_| Pairing::together(part.paired, part.commands))
-            {
-                Some(lag) => read.episodes.push(lag),
-                None => read.unpaired.push(episode.clone()),
-            }
+            settled: judged.settled,
+            tracking: judged
+                .typical
+                .zip(judged.worst)
+                .map(|(typical, worst)| TrackingError { typical, worst }),
+            flagged: judged.flagged.unwrap_or_default(),
+            unpaired: judged.unpaired.unwrap_or_default(),
         }
-        read
     }
     fn lag_label(&self) -> String {
-        let settled = self
-            .episodes
-            .iter()
-            .filter(|episode| !episode.at_edge())
-            .map(|episode| episode.samples);
-        match (settled.clone().min(), settled.max()) {
-            (Some(fewest), Some(most)) => Span::of(fewest as f64, most as f64, "samples", 0),
-            _ => "—".into(),
+        match self.settled {
+            Some(lag) => Span::of(lag.fewest as f64, lag.most as f64, "samples", 0),
+            None => "—".into(),
         }
     }
-    fn typical_tracking(&self) -> Option<f64> {
-        Median::of(self.episodes.iter().map(|episode| episode.tracking))
-    }
     fn tracking_label(&self) -> String {
-        let worst = self
-            .episodes
-            .iter()
-            .map(|episode| episode.tracking)
-            .fold(f64::NEG_INFINITY, f64::max);
-        match self.typical_tracking() {
-            Some(typical) => format!(
+        match self.tracking {
+            Some(tracking) => format!(
                 "{} · worst {}",
-                Radians::milli(typical),
-                Radians::milli(worst)
+                Radians::milli(tracking.typical),
+                Radians::milli(tracking.worst)
             ),
             None => "—".into(),
         }
     }
-    fn at_edge(&self) -> Vec<Evidence> {
-        self.episodes
+    /// The episodes it flags, as the finding names them: those lagging at
+    /// either end of the shifts tried, in episode order, then those tracking
+    /// worse than usual, worst first.
+    fn evidence(&self) -> Vec<Evidence> {
+        let mut at_edge = self
+            .flagged
             .iter()
-            .filter(|episode| episode.at_edge())
-            .map(|episode| {
-                Evidence::whole(
-                    episode.episode.clone(),
-                    Plural::of(episode.samples.unsigned_abs() as usize, "sample"),
-                )
-            })
-            .collect()
-    }
-    fn flagged(&self) -> Vec<Evidence> {
-        let Some(typical) = self.typical_tracking() else {
-            return Vec::new();
-        };
+            .filter(|lag| lag.at_edge)
+            .collect::<Vec<_>>();
+        at_edge.sort_by(|left, right| left.episode.cmp(&right.episode));
         let mut worse = self
-            .episodes
+            .flagged
             .iter()
-            .filter(|episode| episode.tracking > StateActionLag::WORSE * typical)
+            .filter(|lag| lag.worse)
             .collect::<Vec<_>>();
         worse.sort_by(|left, right| right.tracking.total_cmp(&left.tracking));
-        let mut evidence = self.at_edge();
-        evidence.extend(worse.into_iter().map(|episode| {
-            Evidence::whole(episode.episode.clone(), Radians::milli(episode.tracking))
-        }));
-        evidence
+        at_edge
+            .into_iter()
+            .map(|lag| {
+                Evidence::whole(
+                    lag.episode.clone(),
+                    Plural::of(lag.samples.unsigned_abs() as usize, "sample"),
+                )
+            })
+            .chain(
+                worse
+                    .into_iter()
+                    .map(|lag| Evidence::whole(lag.episode.clone(), Radians::milli(lag.tracking))),
+            )
+            .collect()
+    }
+}
+
+impl SettledLag {
+    /// The range spanning both.
+    fn spanning(self, other: Self) -> Self {
+        Self {
+            fewest: self.fewest.min(other.fewest),
+            most: self.most.max(other.most),
+            shortest_ms: self.shortest_ms.min(other.shortest_ms),
+            longest_ms: self.longest_ms.max(other.longest_ms),
+        }
     }
 }
 
@@ -391,29 +458,6 @@ impl Radians {
 mod tests {
     use super::super::stream_reads::TwoArmDataset;
     use super::*;
-
-    fn episode(ordinal: u32) -> EpisodeId {
-        EpisodeId::try_from(format!("{ordinal:032x}")).unwrap()
-    }
-
-    /// The left arm's part in one episode: every command paired, a 33.4 ms
-    /// step, and the least distance at `closest` samples late.
-    fn part(paired: u64, closest: i64) -> LagPart {
-        LagPart {
-            part: "left".into(),
-            paired,
-            commands: 1000,
-            step_ns: Some(33_400_000.0),
-            errors: (StateActionLag::EARLIEST..=StateActionLag::LATEST)
-                .map(|shift| {
-                    (
-                        StateActionLag::error_field(shift),
-                        Some(0.02 + ((shift - closest) as f64).abs() * 0.01),
-                    )
-                })
-                .collect(),
-        }
-    }
 
     #[test]
     fn every_commanded_arm_keeps_its_error_at_each_shift() {
@@ -448,44 +492,76 @@ mod tests {
     }
 
     #[test]
-    fn the_lag_is_the_closest_shift_and_the_range_edge_is_flagged() {
+    fn the_judgment_picks_each_episodes_closest_shift_and_flags_strays_in_spiral() {
+        let sql = StateActionLag::judgment("(parts)");
+        assert!(
+            sql.contains("CAST(paired AS DOUBLE) >= 0.9 * CAST(commands AS DOUBLE) AS together")
+        );
+        assert!(sql.contains(
+            "least(err_back_2, err_back_1, err_ahead_0, err_ahead_1, err_ahead_2, err_ahead_3, err_ahead_4, err_ahead_5, err_ahead_6, err_ahead_7, err_ahead_8, err_ahead_9, err_ahead_10) AS tracking FROM (parts) p"
+        ));
+        // The earliest of equally close shifts is the lag.
+        assert!(sql.contains(
+            "CASE WHEN err_back_2 = tracking THEN -2 WHEN err_back_1 = tracking THEN -1 WHEN err_ahead_0 = tracking THEN 0"
+        ));
+        assert!(sql.contains("WHEN err_ahead_10 = tracking THEN 10 END AS samples"));
+        assert!(sql.contains("samples IN (-2, 10) AS at_edge"));
+        assert!(sql.contains("approx_percentile_cont(tracking, 0.5) AS typical"));
+        assert!(sql.contains("logged.tracking > 2 * tracked.typical AS worse"));
+        assert!(sql.contains("FROM logged WHERE NOT at_edge GROUP BY part"));
+        assert!(sql.contains("WHERE NOT (together AND samples IS NOT NULL) GROUP BY part"));
+        assert!(sql.ends_with("CROSS JOIN overall"));
+    }
+
+    #[test]
+    fn each_commanded_arm_reads_as_judged_and_names_its_strays() {
         let dataset = TwoArmDataset::new();
-        let cells = CheckCells::fixture(vec![
-            (episode(1), vec![part(1000, 5)]),
-            (episode(2), vec![part(1000, 10)]),
-            (episode(3), vec![part(2, 5)]),
-            (episode(4), Vec::new()),
-        ]);
-        let lag = StateActionLag::read(dataset.arms(), &cells);
+        let judged: Vec<JudgedArm> = serde_json::from_value(serde_json::json!([{
+            "part": "left", "typical": 0.0205, "worst": 0.0483,
+            "settled": {"fewest": 4, "most": 6, "shortest_ms": 133.48, "longest_ms": 202.16},
+            "settled_tracking": 0.0229,
+            "flagged": [
+                {"episode_id": EpisodeId::fixture(3), "samples": 6, "tracking": 0.0483, "at_edge": false, "worse": true},
+                {"episode_id": EpisodeId::fixture(2), "samples": 10, "tracking": 0.0197, "at_edge": true, "worse": false},
+                {"episode_id": EpisodeId::fixture(4), "samples": 5, "tracking": 0.0412, "at_edge": false, "worse": true},
+            ],
+            "unpaired": [EpisodeId::fixture(5)],
+        }]))
+        .unwrap();
+        let lag = StateActionLag::of(dataset.arms(), judged);
         // The right arm records no commands, so has no lag.
         assert_eq!(lag.arms.len(), 1);
+        assert_eq!(lag.settled_tracking, Some(0.0229));
         let arm = &lag.arms[0];
-        assert_eq!(arm.episodes[0].samples, 5);
-        assert!((arm.episodes[0].tracking - 0.02).abs() < 1e-12);
-        assert!((arm.episodes[0].step_ms - 33.4).abs() < 1e-9);
-        assert!(!arm.episodes[0].at_edge());
-        assert!(arm.episodes[1].at_edge());
-        // An episode whose commands met no position is unpaired; one the
-        // check measured nothing in is neither.
-        assert_eq!(arm.unpaired, [episode(3)]);
-        assert_eq!(arm.at_edge().len(), 1);
-        assert_eq!(arm.lag_label(), "5 samples");
-        assert!(Pairing::together(1000, 1000));
-        assert!(!Pairing::together(2, 25_958));
-        let worse = ArmLag {
-            episodes: vec![
-                arm.episodes[0].clone(),
-                EpisodeLag {
-                    tracking: 0.05,
-                    samples: 6,
-                    ..arm.episodes[0].clone()
-                },
-                arm.episodes[1].clone(),
-            ],
-            ..arm.clone()
+        assert_eq!(arm.lag_label(), "4–6 samples");
+        assert_eq!(arm.tracking_label(), "20.5 mrad · worst 48.3 mrad");
+        assert_eq!(arm.unpaired, [EpisodeId::fixture(5)]);
+        // A lag at the edge leads, then the worst tracking first.
+        let evidence = arm.evidence();
+        assert_eq!(
+            evidence.iter().map(Evidence::measure).collect::<Vec<_>>(),
+            ["10 samples", "48.3 mrad", "41.2 mrad"]
+        );
+        // An arm no episode measured reads as nothing.
+        let quiet = StateActionLag::of(dataset.arms(), Vec::new());
+        assert_eq!(quiet.arms[0].lag_label(), "—");
+        assert_eq!(quiet.arms[0].tracking_label(), "—");
+        assert!(quiet.arms[0].evidence().is_empty());
+        let other = SettledLag {
+            fewest: 3,
+            most: 5,
+            shortest_ms: 100.0,
+            longest_ms: 150.0,
         };
-        assert_eq!(worse.flagged().len(), 2);
-        assert_eq!(worse.lag_label(), "5–6 samples");
+        assert_eq!(
+            arm.settled.unwrap().spanning(other),
+            SettledLag {
+                fewest: 3,
+                most: 6,
+                shortest_ms: 100.0,
+                longest_ms: 202.16
+            }
+        );
         assert_eq!(Span::of(4.0, 6.0, "samples", 0), "4–6 samples");
         assert_eq!(Radians::milli(0.0205), "20.5 mrad");
     }

@@ -630,7 +630,7 @@ of MCAP files and each file is one episode. The canonical layout at
 ```text
 ┌────────────────────── 44px top bar ─────────────────────────────────────┐
 ├── 21% ────┬── Overview │ E episode × │ E episode × ─────────────────────┤
-│ Datasets  │ D dataset / Episode …id   0:39.9 · 2025-04-14      J K step │
+│ Datasets  │ D dataset / Episode 12    0:39.9 · 2025-04-14      J K step │
 │ Filter [/]│ camera · top │ camera · left-wrist │ camera · right │ Scene │ │
 │ Import    │              │                     │                │ Plots │ │
 │ D name  40├───────────────────────────────────────────────────────────────┤
@@ -674,7 +674,7 @@ of MCAP files and each file is one episode. The canonical layout at
   without explanation.
 - **Episode subject:** the Episode Heading every inspection is headed by
   (`activities/episode/heading.rs`), here at 40px and led by the way back:
-  the D mark and dataset, "/", the "Episode …id" subject at 13px/560, the
+  the D mark and dataset, "/", the "Episode 12" subject at 13px/560, the
   mono facts, and the J K step hint at right. Curation's evidence column
   uses the same heading at 34px, where it meets the index bar's hairline,
   with a part's words ("Grasp the bottle") and its episode's id when the
@@ -721,10 +721,10 @@ visible span. Every surface names the episode above its inspection, so the
 transport leads with its controls, and Space, the arrows, and Home/End drive
 the clock whether focus rests inside the inspection or on the page itself.
 
-Data speaks the operator's language over storage's. A dataset is named
-without the `dataset_` prefix every native dataset carries in SQL
-(`display_name()`); the SQL name stays in the tooltip and the overview
-footer. The rail names an episode by its task label or the part of its source
+Data speaks the operator's language over storage's. A dataset is named by
+its id (`display_name()`), never by the `datasets.<id>` namespace its tables
+live under in SQL; that name (`label()`) stays in the tooltip and the
+overview footer. The rail names an episode by its task label or the part of its source
 path that differs between files; an identifier-shaped name gives way to the
 recorded time of day, and a recording whose clock started at the Unix epoch
 says "no wall clock" rather than a day in 1970. Plot readouts round to the
@@ -940,7 +940,7 @@ stop, or discard is rendered on the page, never only in a tooltip.
 state; it does not insert a sentence that pushes the panel below it.
 
 **The Storage-Name-Stays-Backstage Rule.** Datasets are named by their
-display name, without the `dataset_` prefix; the SQL name appears only where
+display name, the id alone; the `datasets.<id>` namespace appears only where
 SQL is the subject (tooltips, the overview footer, executed queries).
 
 ## Component Ownership & Data Flow
@@ -1385,7 +1385,7 @@ node's index: a subtask, a whole episode, a stretch of one — is one anatomy
 camera mat, the name over a mono facts line, and the measure in a fixed
 right-hand column. A Curation index row is 96×54 at 62px; the rail's is
 64×36 inside its tree item. A row is read aloud as one name with commas
-between its parts ("…daa7587d, 0:14.4").
+between its parts ("#12, 0:14.4").
 
 - **Still:** a subtask's, an episode's, or a stretch's middle, cut on demand
   on the camera its node read (else the configured camera, else the dataset's
@@ -1396,8 +1396,7 @@ between its parts ("…daa7587d, 0:14.4").
   Waiting is a shimmer on the recess; failure says why on the mat.
 - **Name:** a subtask's words, clamped to two lines in a Curation index and
   one line in the rail; a recording's label, starting with a capital as its
-  tab does, when its path gives one; otherwise its id tail ("…206c08ff") in
-  mono.
+  tab does, when its path gives one; otherwise its number ("#12") in mono.
 - **Facts line:** 11px mono, with one small drawing before the facts: an
   episode's length against the longest listed (square-root scale, as Data's
   rail), where a stretch sits in its episode, or an episode's pace across
@@ -1563,7 +1562,7 @@ while work is in progress; reduced motion keeps fades and nothing else.
   ink at 560), and segment choices as raised paper in a recessed track.
 - **Do** keep the status line to the connection plus exceptions, sorted
   danger, caution, plain, and let narrow widths drop the lowest facts whole.
-- **Do** name datasets without the `dataset_` prefix and keep the SQL name in
+- **Do** name datasets by their id and keep the `datasets.<id>` namespace in
   the tooltip and footer.
 - **Do** lead catalog rows and tabs with a kind mark (D, E) and graph
   nodes with an outlined stage mark.
@@ -1602,7 +1601,7 @@ while work is in progress; reduced motion keeps fades and nothing else.
 - **Don't** draw an indicator on a strip that holds one tab.
 - **Don't** truncate status facts or announce a resting state in the status
   line.
-- **Don't** show the `dataset_` storage prefix in a dataset's display name.
+- **Don't** show the `datasets.` namespace in a dataset's display name.
 - **Don't** cast shadows from resting panels, rails, ledgers, strips, fields,
   or buttons, or use a hard zero-blur offset shadow.
 - **Don't** add a second easing curve or a loop that outlives the work it

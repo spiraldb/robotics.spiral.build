@@ -8,13 +8,12 @@
 //! single authority on which revision a document currently holds, so two tabs
 //! racing to save produce exactly one winner and one conflict.
 use super::fill::FillRuns;
-use super::preview::PreviewRuns;
 use crate::OperationError;
 use spiral_robotics_common::curation::{
-    AnswerTable, CurationDeletion, CurationDocument, CurationSummary, FillRequest, FillStatus,
+    AnswerColumn, CurationDeletion, CurationDocument, CurationSummary, FillRequest, FillStatus,
     FilledEpisodesRequest, PublishedView, UnpublishRequest, ViewName,
 };
-use spiral_robotics_common::datasets::EpisodeId;
+use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 use spiral_robotics_storage::{ProviderKeys, StorageManager};
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -27,7 +26,6 @@ const DELETE_SAVED_ELSEWHERE: &str =
 
 pub(crate) struct CurationManager {
     storage: Arc<StorageManager>,
-    previews: PreviewRuns,
     fills: FillRuns,
 }
 
@@ -35,15 +33,9 @@ impl CurationManager {
     /// `keys` reach the Modal service that scores progress.
     pub(crate) fn new(storage: Arc<StorageManager>, keys: Arc<ProviderKeys>) -> Self {
         Self {
-            previews: PreviewRuns::new(storage.clone()),
             fills: FillRuns::new(storage.clone(), keys),
             storage,
         }
-    }
-
-    /// The preview runs this project's curations have started.
-    pub(super) fn previews(&self) -> &PreviewRuns {
-        &self.previews
     }
 
     /// The fill runs this project's curations have started.
@@ -51,9 +43,8 @@ impl CurationManager {
         &self.fills
     }
 
-    /// Abandon every preview and fill run; the project is closing.
+    /// Abandon every fill run; the project is closing.
     pub(crate) fn shutdown(&self) {
-        self.previews.shutdown();
         self.fills.shutdown();
     }
 
@@ -132,15 +123,28 @@ impl CurationManager {
     }
 
     /// The episodes `request`'s column holds an answer for, failed ones
-    /// included; none before the column is first written.
+    /// included; none before a run first fills the column.
     pub(super) async fn filled(
         &self,
         request: FilledEpisodesRequest,
     ) -> Result<BTreeSet<EpisodeId>, OperationError> {
-        let table = AnswerTable::of(request.dataset()).map_err(OperationError::InvalidInput)?;
+        let filled = self
+            .storage
+            .stored_answers(request.dataset(), request.column())
+            .filled()
+            .await
+            .map_err(OperationError::External)?;
+        Ok(filled.unwrap_or_default())
+    }
+
+    /// The answer columns `dataset` holds a table for: each one a run has
+    /// started filling.
+    pub(super) async fn answer_columns(
+        &self,
+        dataset: DatasetSelection,
+    ) -> Result<BTreeSet<AnswerColumn>, OperationError> {
         self.storage
-            .dataset_answers(table)
-            .filled(request.column())
+            .answer_columns(&dataset)
             .await
             .map_err(OperationError::External)
     }

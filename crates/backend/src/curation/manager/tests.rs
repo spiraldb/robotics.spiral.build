@@ -110,11 +110,8 @@ async fn a_delete_removes_only_the_revision_it_names() {
 
 /// A run over the folding dataset that only publishes `view` as `statement`.
 fn publishing(view: &str, statement: &str) -> FillRequest {
-    FillRequest::new(
-        DatasetSelection::new(vec!["dataset_folding".into()]).unwrap(),
-        Vec::new(),
-    )
-    .publishing(vec![PublishedView::new(view, statement)])
+    FillRequest::new(DatasetSelection::new("folding").unwrap(), Vec::new())
+        .publishing(vec![PublishedView::new(view, statement)])
 }
 
 #[tokio::test]

@@ -138,10 +138,13 @@ impl FilmstripStills {
     async fn decode_wanted(&self) {
         let camera = self.requests.camera.clone();
         let mut playback = CameraPlayback::new(camera.clone());
-        let height = Self::pixel_height();
         let (mut stills, mut aspect, mut failure) = (self.stills, self.aspect, self.failure);
         while let Some(frame) = self.next_wanted() {
-            match playback.still(camera.frame_time(frame), height).await {
+            // As tall as the row, as wide as the camera's aspect makes it.
+            match playback
+                .still(camera.frame_time(frame), (0.0, STILL_HEIGHT))
+                .await
+            {
                 Ok(still) => {
                     if aspect.peek().is_none() {
                         aspect.set(Some(still.aspect()));
@@ -163,11 +166,6 @@ impl FilmstripStills {
             .iter()
             .copied()
             .find(|frame| !stills.contains_key(frame))
-    }
-    /// A still's height in device pixels, so it is sharp on a dense screen.
-    fn pixel_height() -> u32 {
-        let density = web_sys::window().map_or(1.0, |window| window.device_pixel_ratio());
-        (STILL_HEIGHT * density.clamp(1.0, 3.0)).round() as u32
     }
 }
 

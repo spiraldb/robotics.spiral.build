@@ -13,7 +13,7 @@ use crate::activities::episode::{
 };
 use dioxus::prelude::*;
 use serde_json::Value;
-use spiral_robotics_common::curation::{AnswerColumn, AnswerTable};
+use spiral_robotics_common::curation::AnswerColumn;
 use spiral_robotics_common::relations::EpisodeQueryRequest;
 
 /// Where one Track objects node stored its tracks: the column, and the
@@ -43,11 +43,9 @@ impl StoredTracks {
         &self,
         episode: &Episode,
     ) -> Result<CameraBoxes, String> {
-        let table = AnswerTable::of(episode.dataset())?;
         let statement = format!(
-            "SELECT a.{column}.value AS tracks FROM {} a WHERE a.episode_id = $1",
-            table.quoted(),
-            column = self.column
+            "SELECT a.value AS tracks FROM {} a WHERE a.episode_id = $1",
+            episode.dataset().answers(&self.column)
         );
         let answer = DatasetClient::current()
             .run_episode_query(&EpisodeQueryRequest::new(episode.selection(), statement, 1))

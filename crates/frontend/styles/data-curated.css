@@ -114,19 +114,6 @@
     font-size: 8.5px;
   }
 
-  /* Unpublish ends the head, the tab's one destructive action, at rest as
-     quiet as a link; confirming asks on its own row under the head. */
-  .data-curated-unpublish {
-    flex: 0 0 auto;
-    margin-left: auto;
-  }
-
-  .data-curated-confirmation {
-    width: auto;
-    margin: 0 24px 12px;
-    padding-inline: 12px;
-  }
-
   .data-curated-notice {
     margin: 0 24px 12px;
   }

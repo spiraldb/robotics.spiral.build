@@ -21,7 +21,7 @@ use spiral_robotics_storage::{
 use crate::OperationError;
 use crate::account::SpiralSession;
 use crate::curation::manager::CurationManager;
-use crate::data::lerobot_import::LeRobotImports;
+use crate::data::dataset_import::DatasetImports;
 use crate::sync::MutexRecovery;
 use crate::training::manager::TrainingManager;
 
@@ -30,7 +30,7 @@ pub(crate) struct OpenProject {
     storage: Arc<StorageManager>,
     training: Arc<TrainingManager>,
     curation: Arc<CurationManager>,
-    lerobot_imports: Arc<LeRobotImports>,
+    dataset_imports: Arc<DatasetImports>,
 }
 
 /// How every project reaches its data: Studio's local store and the provider
@@ -73,6 +73,12 @@ impl ProjectFactory {
         StagedEpisodes::new(self.data.studio.clone(), endpoint)
     }
 
+    /// The deployment's Hugging Face token, which a project import downloads
+    /// pinned files with.
+    fn huggingface_token(&self) -> Option<&str> {
+        self.data.keys.huggingface_token()
+    }
+
     /// A project that reaches Spiral with `access`.
     fn create(
         &self,
@@ -80,10 +86,9 @@ impl ProjectFactory {
         access: SpiralAccess,
     ) -> Result<Arc<OpenProject>, OperationError> {
         let connection = SpiralConnection::new(settings, access);
-        let database = Arc::new(
-            spiral_robotics_storage::AdbcDatabase::new(connection.clone())
-                .with_provider_keys(&self.data.keys),
-        );
+        let database = Arc::new(spiral_robotics_storage::SpiralSdkDatabase::new(
+            connection.clone(),
+        ));
         let store =
             Arc::new(ProjectStore::new(connection, database).map_err(OperationError::External)?);
         Ok(self.create_from_store(store))
@@ -101,7 +106,7 @@ impl ProjectFactory {
                 storage.clone(),
                 self.data.keys.clone(),
             )),
-            lerobot_imports: Arc::new(LeRobotImports::new(storage.clone())),
+            dataset_imports: Arc::new(DatasetImports::new(storage.clone(), self.data.keys.clone())),
             storage,
         })
     }
@@ -129,8 +134,8 @@ impl OpenProject {
     fn curation(&self) -> &Arc<CurationManager> {
         &self.curation
     }
-    fn lerobot_imports(&self) -> &Arc<LeRobotImports> {
-        &self.lerobot_imports
+    fn dataset_imports(&self) -> &Arc<DatasetImports> {
+        &self.dataset_imports
     }
 
     /// Whether training is active.
@@ -140,7 +145,7 @@ impl OpenProject {
 
     pub(crate) async fn shutdown(&self) {
         self.curation().shutdown();
-        self.lerobot_imports().shutdown();
+        self.dataset_imports().shutdown();
     }
 }
 
@@ -321,7 +326,7 @@ impl ProjectRegistry {
         let summary = candidate
             .storage()
             .transfer()
-            .import_project(document)
+            .import_project(document, self.factory.huggingface_token())
             .await
             .map_err(OperationError::External)?;
         if let Some(slot) = self

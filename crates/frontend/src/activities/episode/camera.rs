@@ -34,7 +34,7 @@ pub(super) fn EpisodeCamera(
     let feed = format!(
         "{} · {}",
         request.topic().topic(),
-        request.revision().variant()
+        request.revision().stream()
     );
     let mut status = transport.clone();
     let status_feed = feed.clone();
@@ -91,7 +91,7 @@ fn CameraFrames(
     let topic = format!(
         "{} · {}",
         request.topic().topic(),
-        request.revision().variant()
+        request.revision().stream()
     );
     let name = request.topic().topic();
     let mut canvas = use_signal(|| None::<web_sys::HtmlCanvasElement>);

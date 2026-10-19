@@ -6,10 +6,11 @@ use super::DatasetClient;
 use crate::client::completions::{ModelClient, ModelRequest};
 use serde_json::{Value, json};
 use spiral_robotics_common::{
-    datasets::{DatasetSelection, DatasetTopic, EpisodeId, EpisodeSelection},
+    datasets::{
+        DatasetFormat, DatasetSelection, DatasetStreams, DatasetTopic, EpisodeId, EpisodeSelection,
+    },
     providers::ProviderMessage,
     relations::EpisodeQueryRequest,
-    sql::SqlLiteral,
 };
 
 /// How many model turns an agent gets before it is given up on.
@@ -40,12 +41,13 @@ pub(super) trait DiscoveryTask {
 }
 
 /// The first episode of a dataset, which discovery reads: its streams, a few
-/// of their messages, where it was imported from, and the checks a result
-/// must pass against them.
+/// of their messages, where it was imported from and in which format, and
+/// the checks a result must pass against them.
 pub(super) struct DiscoveryEpisode {
     data: DatasetClient,
     episode: EpisodeSelection,
     source: Option<String>,
+    format: DatasetFormat,
     topics: Vec<DatasetTopic>,
 }
 
@@ -57,8 +59,8 @@ impl DiscoveryEpisode {
         let first = data
             .run_spiral_query(
                 format!(
-                    "SELECT id, source.uri AS source_uri FROM spql.mcap.episodes({}) LIMIT 1",
-                    SqlLiteral::text(&selection.sql_name())
+                    "SELECT id, source_uri FROM {} LIMIT 1",
+                    selection.episodes()
                 ),
                 1,
             )
@@ -70,13 +72,19 @@ impl DiscoveryEpisode {
             .ok_or("Imported dataset has no episodes")?;
         let id = row
             .get("id")
-            .and_then(Value::as_str)
+            .and_then(Value::as_u64)
+            .map(EpisodeId::new)
             .ok_or("Episode has no identity")?;
         let source = row
             .get("source_uri")
             .and_then(Value::as_str)
             .map(str::to_owned);
-        let episode = EpisodeSelection::new(selection, EpisodeId::try_from(id)?);
+        let format = data
+            .inspect_dataset(selection.clone())
+            .await
+            .map_err(|error| error.to_string())?
+            .format();
+        let episode = EpisodeSelection::new(selection, id);
         let topics = data
             .episode_topics(episode.clone())
             .await
@@ -85,7 +93,80 @@ impl DiscoveryEpisode {
             data,
             episode,
             source,
+            format,
             topics,
+        })
+    }
+
+    /// A LeRobot dataset's own description of its data features: each
+    /// one's dtype, shape and element names from `meta/info.json`, beside
+    /// its per-element min, max, mean and std over every frame from
+    /// `meta/stats.json`. `null` for a dataset not imported as LeRobot from
+    /// a Hugging Face repository.
+    pub(super) async fn lerobot_features(&self) -> Result<Value, String> {
+        let Some(root) = self
+            .source
+            .as_deref()
+            .filter(|_| self.format == DatasetFormat::LeRobot)
+            .and_then(Self::lerobot_root)
+        else {
+            return Ok(Value::Null);
+        };
+        let read = |name: &str| {
+            let url = format!("{root}meta/{name}");
+            async move {
+                let text = self
+                    .data
+                    .read_robot_description(&url)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                serde_json::from_str::<Value>(&text).map_err(|error| format!("{url}: {error}"))
+            }
+        };
+        Ok(Self::described_features(
+            &read("info.json").await?,
+            &read("stats.json").await?,
+        ))
+    }
+
+    /// Where a LeRobot dataset keeps its `meta/` directory, from the
+    /// `hf://datasets/<repository>@<revision>/<root>` repository root its
+    /// episodes were read from.
+    fn lerobot_root(source: &str) -> Option<String> {
+        let (repository, rest) = source.strip_prefix("hf://datasets/")?.split_once('@')?;
+        let (revision, root) = rest.split_once('/')?;
+        if !(root.is_empty() || root.ends_with('/')) {
+            return None;
+        }
+        Some(format!(
+            "https://huggingface.co/datasets/{repository}/resolve/{revision}/{root}"
+        ))
+    }
+
+    /// Every feature `info` lists that is not a camera, with its statistics
+    /// from `stats` beside it.
+    fn described_features(info: &Value, stats: &Value) -> Value {
+        let features = info["features"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(_, feature)| !matches!(feature["dtype"].as_str(), Some("video" | "image")))
+            .map(|(name, feature)| {
+                let mut described = json!({
+                    "dtype": feature["dtype"],
+                    "shape": feature["shape"],
+                    "names": feature["names"],
+                });
+                for statistic in ["min", "max", "mean", "std"] {
+                    described[statistic] = stats[name.as_str()][statistic].clone();
+                }
+                (name.clone(), described)
+            })
+            .collect::<serde_json::Map<_, _>>();
+        json!({
+            "robot_type": info["robot_type"],
+            "fps": info["fps"],
+            "features": features,
         })
     }
 
@@ -202,23 +283,13 @@ impl DiscoveryEpisode {
         topic: &str,
         schema: Option<&str>,
     ) -> Result<Value, String> {
-        let mut matching = self
-            .topics
-            .iter()
-            .filter(|candidate| candidate.is_recorded_as(topic, schema));
-        let found = matching.next().ok_or("Unknown topic/schema")?;
-        if matching.next().is_some() {
-            return Err("Joint stream has ambiguous schema revisions".into());
-        }
+        let found = DatasetStreams::new(&self.topics).recorded(topic, schema)?;
         if found.is_video() {
             return Err("Choose a joint data stream".into());
         }
-        let revision = found.revision().ok_or("Missing topic revision")?;
         let sql = format!(
-            "SELECT value FROM spql.mcap.read_topic({}, {}, {}) WHERE id = $1 ORDER BY log_time, chunk_start_offset, sample_ordinal LIMIT 3",
-            SqlLiteral::text(&self.dataset().sql_name()),
-            SqlLiteral::text(found.name()),
-            SqlLiteral::text(revision.variant())
+            "SELECT value FROM {} WHERE id = $1 ORDER BY log_time, ordinal LIMIT 3",
+            self.dataset().messages(found.revision())
         );
         let result = self
             .data
@@ -230,5 +301,50 @@ impl DiscoveryEpisode {
             return Err("Stream samples are too large for discovery".into());
         }
         Ok(evidence)
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod tests {
+    use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[wasm_bindgen_test]
+    fn a_lerobot_episode_source_leads_to_its_dataset_meta() {
+        assert_eq!(
+            DiscoveryEpisode::lerobot_root("hf://datasets/org/sim-bottles@897b/").as_deref(),
+            Some("https://huggingface.co/datasets/org/sim-bottles/resolve/897b/")
+        );
+        assert_eq!(
+            DiscoveryEpisode::lerobot_root("hf://datasets/org/repo@main/sub/").as_deref(),
+            Some("https://huggingface.co/datasets/org/repo/resolve/main/sub/")
+        );
+        assert_eq!(
+            DiscoveryEpisode::lerobot_root("hf://datasets/org/repo@main/a.mcap"),
+            None
+        );
+        assert_eq!(
+            DiscoveryEpisode::lerobot_root("s3://bucket/data/chunk-000/f.parquet"),
+            None
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn lerobot_features_keep_data_features_with_their_ranges() {
+        let info = json!({"robot_type": "bimanual_sim", "fps": 30, "codebase_version": "v3.0", "features": {
+            "state": {"dtype": "float32", "shape": [2], "names": ["state"]},
+            "top_camera": {"dtype": "video", "shape": [480, 640, 3], "names": ["height", "width", "channel"]},
+        }});
+        let stats = json!({
+            "state": {"min": [-1.5, 0.0], "max": [1.5, 1.0], "mean": [0.1, 0.6], "std": [0.4, 0.3], "count": [900]},
+            "top_camera": {"min": [[[0.0]]], "max": [[[1.0]]]},
+        });
+        assert_eq!(
+            DiscoveryEpisode::described_features(&info, &stats),
+            json!({"robot_type": "bimanual_sim", "fps": 30, "features": {
+                "state": {"dtype": "float32", "shape": [2], "names": ["state"],
+                    "min": [-1.5, 0.0], "max": [1.5, 1.0], "mean": [0.1, 0.6], "std": [0.4, 0.3]},
+            }})
+        );
     }
 }

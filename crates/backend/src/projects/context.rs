@@ -1,7 +1,7 @@
 //! What a request can reach: Studio-wide services, and the project it names.
 use crate::account::{SpiralSession, SpiralSessions};
 use crate::curation::manager::CurationManager;
-use crate::data::lerobot_import::LeRobotImports;
+use crate::data::dataset_import::DatasetImports;
 use crate::projects::{OpenProject, ProjectRegistry};
 use crate::robot_connector::RobotConnectors;
 use crate::training::manager::TrainingManager;
@@ -109,7 +109,7 @@ impl ProjectContext {
     pub(crate) fn curation(&self) -> &Arc<CurationManager> {
         self.project.curation()
     }
-    pub(crate) fn lerobot_imports(&self) -> &Arc<LeRobotImports> {
-        self.project.lerobot_imports()
+    pub(crate) fn dataset_imports(&self) -> &Arc<DatasetImports> {
+        self.project.dataset_imports()
     }
 }

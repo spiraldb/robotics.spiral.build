@@ -1,182 +1,130 @@
-//! Each dataset's answers table, `dataset_answers_<id>`: made from the
-//! dataset's first refresh, given a row by every append that adds an episode,
-//! and dropped with it; and the columns fill runs write into it.
+//! Each dataset's answer columns, a table each,
+//! `datasets.<id>.answers.<column>`: `episode_id` and `value`, one row per
+//! episode a fill run asked, NULL where the model could not answer; and the
+//! rows fill runs append to them.
 //!
-//! A fill writes one column at a time, for the episodes it computed: their
-//! answers, held as Arrow, are ingested into a staging table, the column is
-//! added the first time, merged in by `episode_id`, and the staging table is
-//! dropped. Spiral adds a column only as nullable and spelled in SQL, with
-//! every nested field nullable, so an answer's Arrow type is spelled out for
-//! it and every answer cast to what the table stores.
-use super::{EpisodeUuids, StudioDataset};
+//! A fill run makes a column's table, empty, when it starts filling the
+//! column, its `value` typed for the call's answers with every nested field
+//! nullable, so every answer of the call casts to it however its fields
+//! declare their nullability. It then appends what it answered, a set at a
+//! time. An episode the table already holds is not written again, so two
+//! runs filling one column at once, such as two previews of one call, still
+//! leave one row per episode. The tables go with their dataset.
+use super::EpisodeIds;
 use crate::{ProjectConnection, ProjectStore, StorageManager};
-use arrow_array::{Array, ArrayRef, ListArray, RecordBatch, StructArray};
+use arrow_array::{Array, ArrayRef, ListArray, RecordBatch, make_array};
 use arrow_buffer::OffsetBuffer;
-use arrow_schema::{DataType, Field, Fields, Schema};
-use spiral_robotics_common::curation::{AnswerColumn, AnswerTable};
-use spiral_robotics_common::datasets::EpisodeId;
-use spiral_robotics_common::sql::{SqlLiteral, UnquotedSqlIdentifier};
+use arrow_data::transform::MutableArrayData;
+use arrow_schema::{DataType, Field, FieldRef, Schema, SchemaRef};
+use spiral_robotics_common::curation::AnswerColumn;
+use spiral_robotics_common::datasets::{DatasetSelection, DatasetTable, EpisodeId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-/// The field every stored answer is wrapped in: a NULL struct is an episode
-/// not asked yet, a NULL `value` one the model could not answer.
+/// The column of an answer column's table holding each episode's answer.
 const VALUE: &str = "value";
-/// The column of a fill statement's result holding its answer.
+/// The column of a dataset statement's result holding its answer.
 const ANSWER: &str = "answer";
-impl StudioDataset {
-    /// Create the answers table with one row per episode the dataset holds
-    /// now, and no answer yet.
-    pub(crate) async fn create_answers(
-        &self,
-        connection: &mut ProjectConnection,
-    ) -> Result<(), String> {
-        connection
-            .execute_update_sql(&format!(
-                "CREATE TABLE {} AS SELECT id AS episode_id FROM spql.mcap.episodes({})",
-                self.answers().quoted(),
-                SqlLiteral::text(self.dataset())
-            ))
-            .await
-            .map_err(|error| format!("creating {}: {error}", self.answers().name()))
-    }
-
-    /// Give every episode the dataset holds now and the answers table does
-    /// not a row with no answer. Spiral inserts only rows that name every
-    /// column, so they are read first.
-    pub(crate) async fn add_answer_rows(
-        &self,
-        connection: &mut ProjectConnection,
-    ) -> Result<(), String> {
-        let table = self.answers();
-        let schema = connection
-            .relation_schema(&table.name())
-            .await?
-            .ok_or_else(|| format!("{} has no answers table.", self.dataset()))?;
-        let (columns, values): (Vec<_>, Vec<_>) = schema
-            .fields()
-            .iter()
-            .map(|field| {
-                let value = if field.name() == "episode_id" {
-                    "s.id"
-                } else {
-                    "NULL"
-                };
-                (field.name().as_str(), value)
-            })
-            .unzip();
-        connection
-            .execute_update_sql(&format!(
-                "MERGE INTO {} t USING (SELECT id FROM spql.mcap.episodes({})) s ON t.episode_id = s.id \
-                 WHEN NOT MATCHED THEN INSERT ({}) VALUES ({})",
-                table.quoted(),
-                SqlLiteral::text(self.dataset()),
-                columns.join(", "),
-                values.join(", ")
-            ))
-            .await
-            .map_err(|error| format!("adding episodes to {}: {error}", table.name()))
-    }
-}
 
 impl StorageManager {
-    /// What fill runs read and write of the answers table `table`.
-    pub fn dataset_answers(&self, table: AnswerTable) -> DatasetAnswers<'_> {
-        DatasetAnswers {
+    /// What fill runs read and write of `dataset`'s answer column `column`.
+    pub fn stored_answers(
+        &self,
+        dataset: &DatasetSelection,
+        column: &AnswerColumn,
+    ) -> StoredAnswers<'_> {
+        StoredAnswers {
             store: self.project_store(),
-            table,
+            table: dataset.answers(column),
         }
+    }
+
+    /// The answer columns `dataset` holds a table for: each one a fill run
+    /// has started filling.
+    pub async fn answer_columns(
+        &self,
+        dataset: &DatasetSelection,
+    ) -> Result<BTreeSet<AnswerColumn>, String> {
+        self.project_store()
+            .dataset_catalog()
+            .datasets()
+            .await?
+            .answer_columns(dataset)
     }
 }
 
-/// One dataset's answers table, as fill runs read and write its columns.
-pub struct DatasetAnswers<'a> {
+/// One answer column's table, as fill runs read and write it.
+pub struct StoredAnswers<'a> {
     store: &'a ProjectStore,
-    table: AnswerTable,
+    table: DatasetTable,
 }
 
-impl DatasetAnswers<'_> {
-    /// The episodes `column` holds an answer for, failed ones included; none
-    /// before the column exists.
-    pub async fn filled(&self, column: &AnswerColumn) -> Result<BTreeSet<EpisodeId>, String> {
+/// What a column's table holds now: its schema, and each episode it has a
+/// row for.
+struct WrittenRows {
+    schema: SchemaRef,
+    episodes: BTreeSet<EpisodeId>,
+}
+
+impl StoredAnswers<'_> {
+    /// The episodes the column holds an answer for, failed ones included;
+    /// `None` before its table exists.
+    pub async fn filled(&self) -> Result<Option<BTreeSet<EpisodeId>>, String> {
         let mut connection = self.store.connect().await?;
-        if Self::stored_type(&self.schema(&mut connection).await?, column).is_none() {
-            return Ok(BTreeSet::new());
-        }
-        let batches = connection
-            .read_batches(&format!(
-                "SELECT episode_id FROM {} WHERE {column} IS NOT NULL",
-                self.table.quoted()
-            ))
-            .await?;
-        let mut filled = BTreeSet::new();
-        for batch in batches {
-            let ids = batch.column_by_name("episode_id").ok_or("no episode_id")?;
-            filled.extend(EpisodeUuids::read(ids.as_ref())?);
-        }
-        Ok(filled)
+        let written = self.written(&mut connection).await?;
+        Ok(written.map(|written| written.episodes))
     }
 
-    /// Write `answers` into `column`, adding the column the first time.
-    pub async fn write(&self, column: &AnswerColumn, answers: ColumnAnswers) -> Result<(), String> {
+    /// Make the column's table, empty, for answers of `answer_type`.
+    pub async fn create(&self, answer_type: &DataType) -> Result<(), String> {
+        let schema = Arc::new(AnswerSchema::of(answer_type));
+        self.store
+            .connect_exclusive()
+            .await?
+            .create_or_append_batches(self.table.name(), vec![RecordBatch::new_empty(schema)])
+            .await
+    }
+
+    /// Append each of `answers` whose episode the table holds no row for.
+    pub async fn write(&self, answers: ColumnAnswers) -> Result<(), String> {
         if answers.is_empty() {
             return Ok(());
         }
         let mut connection = self.store.connect_exclusive().await?;
-        let stored = Self::stored_type(&self.schema(&mut connection).await?, column);
-        let batch = answers.batch(column, stored.as_ref())?;
-        let added = match stored {
-            Some(_) => None,
-            None => Some(StoredType::sql(batch.schema().field(1).data_type())?),
-        };
-        let staging = format!("{}_staging_{column}", self.table.name());
-        connection
-            .replace_or_create_batches(&staging, vec![batch])
-            .await?;
-        let staging = format!("\"{}\"", staging.replace('"', "\"\""));
-        let table = self.table.quoted();
-        let written = async {
-            if let Some(spelled) = added {
-                connection
-                    .execute_update_sql(&format!(
-                        "ALTER TABLE {table} ADD COLUMN {column} {spelled}"
-                    ))
-                    .await?;
-            }
-            connection
-                .execute_update_sql(&format!(
-                    "MERGE INTO {table} t USING {staging} s ON t.episode_id = s.episode_id \
-                     WHEN MATCHED THEN UPDATE SET {column} = s.{column}"
-                ))
-                .await
-        }
-        .await;
-        let dropped = connection
-            .execute_update_sql(&format!("DROP TABLE IF EXISTS {staging}"))
-            .await;
-        written
-            .and(dropped)
-            .map_err(|error| format!("writing {column} to {}: {error}", self.table.name()))
-    }
-
-    async fn schema(&self, connection: &mut ProjectConnection) -> Result<Schema, String> {
-        connection
-            .relation_schema(&self.table.name())
+        let written = self
+            .written(&mut connection)
             .await?
-            .ok_or_else(|| {
-                format!(
-                    "{} does not exist; only datasets Studio imported keep model answers.",
-                    self.table.name()
-                )
-            })
+            .ok_or_else(|| format!("{} does not exist.", self.table.name()))?;
+        match answers.rows(&written)? {
+            Some(rows) => {
+                connection
+                    .create_or_append_batches(self.table.name(), vec![rows])
+                    .await
+            }
+            None => Ok(()),
+        }
     }
 
-    /// The type of what `column` stores, when the table has it.
-    fn stored_type(schema: &Schema, column: &AnswerColumn) -> Option<DataType> {
-        schema
-            .field_with_name(column.as_str())
-            .ok()
-            .map(|field| field.data_type().clone())
+    /// What the table holds, read on `connection`; `None` before it exists.
+    async fn written(
+        &self,
+        connection: &mut ProjectConnection,
+    ) -> Result<Option<WrittenRows>, String> {
+        let Some(schema) = connection.relation_schema(self.table.name()).await? else {
+            return Ok(None);
+        };
+        let batches = connection
+            .read_batches(&format!("SELECT episode_id FROM {}", self.table))
+            .await?;
+        let mut episodes = BTreeSet::new();
+        for batch in batches {
+            let ids = batch.column_by_name("episode_id").ok_or("no episode_id")?;
+            episodes.extend(EpisodeIds::read(ids.as_ref())?);
+        }
+        Ok(Some(WrittenRows {
+            schema: Arc::new(schema),
+            episodes,
+        }))
     }
 }
 
@@ -186,25 +134,6 @@ impl DatasetAnswers<'_> {
 pub struct EpisodeAnswer(ArrayRef);
 
 impl EpisodeAnswer {
-    /// What a fill statement answered for the episode it binds: its one
-    /// row's `answer`. A statement that answers no row gives no answer.
-    pub fn from_statement(schema: &Schema, batches: &[RecordBatch]) -> Result<Self, String> {
-        let answer = schema
-            .index_of(ANSWER)
-            .map_err(|_| "A fill statement must answer in `answer`.".to_owned())?;
-        let answers = batches
-            .iter()
-            .map(|batch| batch.column(answer).clone())
-            .collect::<Vec<_>>();
-        match answers.iter().map(|rows| rows.len()).sum::<usize>() {
-            0 => Ok(Self::failed(schema.field(answer).data_type())),
-            1 => Self::concatenated(&answers).map(Self),
-            rows => Err(format!(
-                "A fill statement answered {rows} rows for one episode."
-            )),
-        }
-    }
-
     /// Every row of `rows` as one list answer, in order.
     pub fn listing(rows: ArrayRef) -> Self {
         let field = Arc::new(Field::new_list_field(rows.data_type().clone(), true));
@@ -226,6 +155,38 @@ impl EpisodeAnswer {
         &self.0
     }
 
+    /// The answer copied into buffers of its own, so it keeps nothing of
+    /// whatever it was read with and its size is its own: its strings and
+    /// bytes as plain arrays, since a copied view array still points into
+    /// every buffer of the read.
+    fn alone(&self) -> Result<ArrayRef, String> {
+        let read = self.0.to_data();
+        let mut alone = MutableArrayData::new(vec![&read], false, 1);
+        alone
+            .try_extend(0, 0, 1)
+            .map_err(|error| format!("copying an answer: {error}"))?;
+        let alone = make_array(alone.freeze());
+        let plain = Self::without_views(alone.data_type());
+        arrow_cast::cast(&alone, &plain).map_err(|error| format!("copying an answer: {error}"))
+    }
+
+    /// `data_type` with every string or bytes view it nests a plain string
+    /// or bytes.
+    fn without_views(data_type: &DataType) -> DataType {
+        let field = |field: &FieldRef| {
+            let plain = Self::without_views(field.data_type());
+            Arc::new(field.as_ref().clone().with_data_type(plain))
+        };
+        match data_type {
+            DataType::Utf8View => DataType::Utf8,
+            DataType::BinaryView => DataType::Binary,
+            DataType::List(item) => DataType::List(field(item)),
+            DataType::LargeList(item) => DataType::LargeList(field(item)),
+            DataType::Struct(fields) => DataType::Struct(fields.iter().map(field).collect()),
+            other => other.clone(),
+        }
+    }
+
     fn concatenated(arrays: &[ArrayRef]) -> Result<ArrayRef, String> {
         let arrays = arrays.iter().map(AsRef::as_ref).collect::<Vec<_>>();
         arrow_select::concat::concat(&arrays).map_err(|error| error.to_string())
@@ -243,14 +204,13 @@ impl StatementAnswers {
     /// Each row's `episode_id` and `answer`. An episode answered twice is an
     /// error: a dataset statement measures each episode once.
     pub fn from_statement(schema: &Schema, batches: &[RecordBatch]) -> Result<Self, String> {
-        let missing = |name: &str| format!("A dataset statement must answer `{name}`.");
         let episode = schema
             .index_of("episode_id")
-            .map_err(|_| missing("episode_id"))?;
-        let answer = schema.index_of(ANSWER).map_err(|_| missing(ANSWER))?;
+            .map_err(|_| Self::missing("episode_id"))?;
+        let answer = schema.index_of(ANSWER).map_err(|_| Self::missing(ANSWER))?;
         let mut answers = BTreeMap::new();
         for batch in batches {
-            let episodes = EpisodeUuids::read(batch.column(episode).as_ref())?;
+            let episodes = EpisodeIds::read(batch.column(episode).as_ref())?;
             for (row, id) in episodes.into_iter().enumerate() {
                 let answered = EpisodeAnswer(batch.column(answer).slice(row, 1));
                 if answers.insert(id.clone(), answered).is_some() {
@@ -264,6 +224,15 @@ impl StatementAnswers {
         })
     }
 
+    /// The type of the answers a statement of `schema` answers.
+    pub fn answer_type(schema: &Schema) -> Result<DataType, String> {
+        let answer = schema.field_with_name(ANSWER);
+        Ok(answer
+            .map_err(|_| Self::missing(ANSWER))?
+            .data_type()
+            .clone())
+    }
+
     /// `episode`'s answer; a failed one when the statement measured nothing
     /// for it, so it is not asked again.
     pub fn answer(&mut self, episode: &EpisodeId) -> EpisodeAnswer {
@@ -271,75 +240,102 @@ impl StatementAnswers {
             .remove(episode)
             .unwrap_or_else(|| EpisodeAnswer::failed(&self.answer_type))
     }
+
+    fn missing(name: &str) -> String {
+        format!("A dataset statement must answer `{name}`.")
+    }
 }
 
 /// The answers one fill holds for one column until it writes them: each
-/// episode it computed, beside its answer.
+/// episode it computed, beside its answer, and how many bytes they hold.
 #[derive(Default)]
 pub struct ColumnAnswers {
     episodes: Vec<EpisodeId>,
     answers: Vec<ArrayRef>,
+    bytes: usize,
 }
 
 impl ColumnAnswers {
-    pub fn hold(&mut self, episode: EpisodeId, answer: EpisodeAnswer) {
+    /// The most answer bytes one write carries. Spiral refuses to change
+    /// more than 16 MiB of a hosted table in one statement, so a fill writes
+    /// what it holds each time it reaches this, well below that.
+    const WRITE_BUDGET_BYTES: usize = 4 * 1024 * 1024;
+
+    /// Hold `episode`'s answer, copied out of whatever it was read with, so
+    /// it keeps no more than its own row and is counted once.
+    pub fn hold(&mut self, episode: EpisodeId, answer: EpisodeAnswer) -> Result<(), String> {
+        let alone = answer.alone()?;
+        self.bytes += alone.get_array_memory_size();
         self.episodes.push(episode);
-        self.answers.push(answer.0);
+        self.answers.push(alone);
+        Ok(())
     }
-    pub fn len(&self) -> usize {
-        self.episodes.len()
+    /// Whether what it holds fills one write.
+    pub fn is_full(&self) -> bool {
+        self.bytes >= Self::WRITE_BUDGET_BYTES
     }
     pub fn is_empty(&self) -> bool {
         self.episodes.is_empty()
     }
 
-    /// The staging rows: `episode_id` and `column`, each answer wrapped as
-    /// `STRUCT(value)` and cast to `stored`, the column's type in the table,
-    /// or for a new column to the answers' own type with every field
-    /// nullable, as Spiral will store it.
-    fn batch(
-        self,
-        column: &AnswerColumn,
-        stored: Option<&DataType>,
-    ) -> Result<RecordBatch, String> {
-        let first = self.answers.first().ok_or("No answers to write.")?;
-        let value_type = match stored {
-            Some(DataType::Struct(fields)) if fields.len() == 1 && fields[0].name() == VALUE => {
-                fields[0].data_type().clone()
-            }
-            Some(other) => return Err(format!("{column} stores {other}, not an answer.")),
-            None => StoredType::nullable(first.data_type()),
-        };
-        let answers = self
-            .answers
+    /// The table's rows for each answer of an episode `written` holds no
+    /// row for, cast to the table's `value` type; none when it holds every
+    /// one already.
+    fn rows(self, written: &WrittenRows) -> Result<Option<RecordBatch>, String> {
+        let (episodes, answers): (Vec<_>, Vec<_>) = self
+            .episodes
+            .into_iter()
+            .zip(self.answers)
+            .filter(|(episode, _)| !written.episodes.contains(episode))
+            .unzip();
+        if episodes.is_empty() {
+            return Ok(None);
+        }
+        let value_type = written
+            .schema
+            .field_with_name(VALUE)
+            .map_err(|_| "An answer column's table holds no value.".to_owned())?
+            .data_type();
+        let answers = answers
             .iter()
-            .map(|answer| arrow_cast::cast(answer, &value_type))
+            .map(|answer| arrow_cast::cast(answer, value_type))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("{column}'s answers differ in type: {error}"))?;
-        let values = EpisodeAnswer::concatenated(&answers)?;
-        let wrapped = StructArray::try_new(
-            Fields::from(vec![Field::new(VALUE, value_type, true)]),
-            vec![values],
-            None,
-        )
-        .map_err(|error| error.to_string())?;
-        let schema = Schema::new(vec![
-            EpisodeUuids::field("episode_id"),
-            Field::new(column.as_str(), wrapped.data_type().clone(), true),
-        ]);
-        RecordBatch::try_new(
-            Arc::new(schema),
-            vec![EpisodeUuids::array(&self.episodes)?, Arc::new(wrapped)],
-        )
-        .map_err(|error| error.to_string())
+            .map_err(|error| format!("An answer is not of its column's type: {error}"))?;
+        let (ids, values) = (
+            EpisodeIds::array(&episodes),
+            EpisodeAnswer::concatenated(&answers)?,
+        );
+        let columns = written
+            .schema
+            .fields()
+            .iter()
+            .map(|field| match field.name().as_str() {
+                "episode_id" => Ok(ids.clone()),
+                VALUE => Ok(values.clone()),
+                other => Err(format!("An answer column's table holds {other}.")),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        RecordBatch::try_new(written.schema.clone(), columns)
+            .map(Some)
+            .map_err(|error| error.to_string())
     }
 }
 
-/// An answer's type as the answers table stores it.
-struct StoredType;
+/// The schema of an answer column's table.
+struct AnswerSchema;
 
-impl StoredType {
-    /// `data_type` with every nested field nullable, as Spiral adds a column.
+impl AnswerSchema {
+    /// The table holding answers of `answer_type`: `episode_id`, and the
+    /// answer's type with every nested field nullable as `value`, NULL where
+    /// the model could not answer.
+    fn of(answer_type: &DataType) -> Schema {
+        Schema::new(vec![
+            EpisodeIds::field("episode_id"),
+            Field::new(VALUE, Self::nullable(answer_type), true),
+        ])
+    }
+
+    /// `data_type` with every nested field nullable.
     fn nullable(data_type: &DataType) -> DataType {
         let field = |field: &Field| {
             Arc::new(Field::new(
@@ -357,52 +353,16 @@ impl StoredType {
             other => other.clone(),
         }
     }
-
-    /// `data_type` spelled as Spiral's `ALTER TABLE` reads a column type.
-    fn sql(data_type: &DataType) -> Result<String, String> {
-        Ok(match data_type {
-            DataType::Boolean => "boolean".into(),
-            DataType::Int8 => "tinyint".into(),
-            DataType::Int16 => "smallint".into(),
-            DataType::Int32 => "integer".into(),
-            DataType::Int64 => "bigint".into(),
-            DataType::UInt8 => "uint8".into(),
-            DataType::UInt16 => "uint16".into(),
-            DataType::UInt32 => "uint32".into(),
-            DataType::UInt64 => "uint64".into(),
-            DataType::Float32 => "real".into(),
-            DataType::Float64 => "double".into(),
-            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => "varchar".into(),
-            DataType::Binary | DataType::LargeBinary | DataType::BinaryView => "varbinary".into(),
-            DataType::List(item) | DataType::LargeList(item) => {
-                format!("{}[]", Self::sql(item.data_type())?)
-            }
-            DataType::Struct(fields) => {
-                let fields = fields
-                    .iter()
-                    .map(|field| {
-                        UnquotedSqlIdentifier::try_from(field.name().as_str())
-                            .map_err(|_| format!("An answer field is named {:?}.", field.name()))?;
-                        Ok(format!(
-                            "{} {}",
-                            field.name(),
-                            Self::sql(field.data_type())?
-                        ))
-                    })
-                    .collect::<Result<Vec<_>, String>>()?;
-                format!("STRUCT({})", fields.join(", "))
-            }
-            other => return Err(format!("An answer of type {other} cannot be stored.")),
-        })
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use arrow_array::{
-        Float32Array, Float64Array, Int64Array, StringArray, UInt32Array, UInt64Array,
+        Float32Array, Float64Array, Int64Array, StringArray, StringViewArray, StructArray,
+        UInt32Array, UInt64Array,
     };
+    use arrow_schema::Fields;
 
     fn subtasks(descriptions: &[&str]) -> ArrayRef {
         let fields = Fields::from(vec![
@@ -475,90 +435,78 @@ mod tests {
     }
 
     fn episode(ordinal: u32) -> EpisodeId {
-        EpisodeId::try_from(format!("{ordinal:032x}")).unwrap()
+        EpisodeId::new(u64::from(ordinal))
+    }
+
+    /// The rows of a new table of `answer_type`'s answers, none written.
+    fn new_table(answer_type: &DataType) -> WrittenRows {
+        WrittenRows {
+            schema: Arc::new(AnswerSchema::of(answer_type)),
+            episodes: BTreeSet::new(),
+        }
     }
 
     #[test]
-    fn an_answer_is_spelled_for_spiral_with_every_field_nullable() {
+    fn a_columns_table_stores_its_answers_with_every_nested_field_nullable() {
         let answer = EpisodeAnswer::listing(subtasks(&["reach", "grasp"]));
-        let stored = StoredType::nullable(answer.0.data_type());
+        let schema = AnswerSchema::of(answer.0.data_type());
         assert_eq!(
-            StoredType::sql(&stored).unwrap(),
-            "STRUCT(start_ns uint64, description varchar)[]"
+            schema
+                .fields()
+                .iter()
+                .map(|f| f.name().as_str())
+                .collect::<Vec<_>>(),
+            ["episode_id", "value"]
         );
-        let DataType::List(item) = &stored else {
+        assert!(!schema.field(0).is_nullable() && schema.field(1).is_nullable());
+        let DataType::List(item) = schema.field(1).data_type() else {
             panic!("a list")
         };
         let DataType::Struct(fields) = item.data_type() else {
             panic!("of structs")
         };
         assert!(fields.iter().all(|field| field.is_nullable()));
-        assert!(StoredType::sql(&DataType::Date32).is_err());
     }
 
     #[test]
-    fn answers_are_wrapped_so_a_failed_one_is_a_null_value_not_a_missing_row() {
-        let column = AnswerColumn::of("breakdown_task", &["m"]).unwrap();
+    fn a_failed_answer_is_a_row_whose_value_is_null_and_a_written_episode_is_skipped() {
         let mut answers = ColumnAnswers::default();
         let answered = EpisodeAnswer::listing(subtasks(&["reach"]));
         let failed = EpisodeAnswer::failed(answered.0.data_type());
         assert!(failed.is_failed() && !answered.is_failed());
-        answers.hold(episode(1), answered);
-        answers.hold(episode(2), failed);
-        let batch = answers.batch(&column, None).unwrap();
-        assert_eq!(batch.num_rows(), 2);
+        let table = new_table(answered.0.data_type());
+        answers.hold(episode(1), answered).unwrap();
+        answers.hold(episode(2), failed).unwrap();
+        let rows = answers.rows(&table).unwrap().unwrap();
+        assert_eq!(rows.schema(), table.schema);
         assert_eq!(
-            EpisodeUuids::read(batch.column(0).as_ref()).unwrap(),
+            EpisodeIds::read(rows.column(0).as_ref()).unwrap(),
             [episode(1), episode(2)]
         );
-        let wrapped = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<StructArray>()
-            .unwrap();
-        assert_eq!(wrapped.null_count(), 0, "both episodes were asked");
-        assert!(wrapped.column(0).is_valid(0) && wrapped.column(0).is_null(1));
-        assert_eq!(
-            StoredType::sql(batch.schema().field(1).data_type()).unwrap(),
-            "STRUCT(value STRUCT(start_ns uint64, description varchar)[])"
-        );
-        // Written into a column that exists, answers take its type.
-        let stored = batch.schema().field(1).data_type().clone();
+        assert!(rows.column(1).is_valid(0) && rows.column(1).is_null(1));
+        // An episode the table holds is not written again.
+        let written = WrittenRows {
+            episodes: BTreeSet::from([episode(1)]),
+            ..new_table(&rows.schema().field(1).data_type().clone())
+        };
         let mut again = ColumnAnswers::default();
-        again.hold(episode(3), EpisodeAnswer::listing(subtasks(&["grasp"])));
-        assert_eq!(
-            again
-                .batch(&column, Some(&stored))
-                .unwrap()
-                .schema()
-                .field(1)
-                .data_type(),
-            &stored
-        );
+        again
+            .hold(episode(1), EpisodeAnswer::listing(subtasks(&["grasp"])))
+            .unwrap();
+        assert!(again.rows(&written).unwrap().is_none());
     }
 
     #[test]
-    fn an_answer_nesting_lists_in_lists_is_spelled_and_cast_for_spiral() {
-        let column = AnswerColumn::of("track_objects", &["m"]).unwrap();
+    fn an_answer_nesting_lists_in_lists_is_cast_to_its_tables_type() {
         let mut answers = ColumnAnswers::default();
         let tracked = EpisodeAnswer::listing(pictures(&[2, 0, 1]));
-        answers.hold(episode(1), EpisodeAnswer::failed(tracked.0.data_type()));
-        answers.hold(episode(2), tracked);
-        let batch = answers.batch(&column, None).unwrap();
-        assert_eq!(
-            StoredType::sql(batch.schema().field(1).data_type()).unwrap(),
-            "STRUCT(value STRUCT(timestamp_ns uint64, objects STRUCT(id uint32, score real, x real, y real, width real, height real)[])[])"
-        );
-        let wrapped = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<StructArray>()
+        let table = new_table(tracked.0.data_type());
+        answers
+            .hold(episode(1), EpisodeAnswer::failed(tracked.0.data_type()))
             .unwrap();
-        let episodes = wrapped
-            .column(0)
-            .as_any()
-            .downcast_ref::<ListArray>()
-            .unwrap();
+        answers.hold(episode(2), tracked).unwrap();
+        let rows = answers.rows(&table).unwrap().unwrap();
+        let episodes = rows.column(1).as_any().downcast_ref::<ListArray>().unwrap();
         assert!(episodes.is_null(0) && episodes.is_valid(1));
         let pictures = episodes.value(1);
         let pictures = pictures.as_any().downcast_ref::<StructArray>().unwrap();
@@ -572,42 +520,86 @@ mod tests {
     }
 
     #[test]
-    fn a_statement_answers_in_one_row() {
-        let one = Schema::new(vec![
-            EpisodeUuids::field("episode_id"),
-            Field::new(ANSWER, DataType::Float64, true),
+    fn answers_fill_one_write_by_what_each_holds_alone() {
+        // 64 episodes' scores of 256 KiB each, read as one 16 MiB column.
+        let scores = DataType::List(Arc::new(Field::new_list_field(DataType::Float32, false)));
+        let schema = Schema::new(vec![
+            EpisodeIds::field("episode_id"),
+            Field::new(ANSWER, scores, true),
         ]);
-        let row = |values: Vec<Option<f64>>| {
-            RecordBatch::try_new(
-                Arc::new(one.clone()),
-                vec![
-                    EpisodeUuids::array(&vec![episode(1); values.len()]).unwrap(),
-                    Arc::new(Float64Array::from(values)),
-                ],
-            )
-            .unwrap()
-        };
-        let answered = EpisodeAnswer::from_statement(&one, &[row(vec![Some(0.5)])]).unwrap();
-        assert!(!answered.is_failed());
-        assert!(
-            EpisodeAnswer::from_statement(&one, &[])
-                .unwrap()
-                .is_failed()
+        let frames = 64 * 1024;
+        let read = ListArray::new(
+            Arc::new(Field::new_list_field(DataType::Float32, false)),
+            OffsetBuffer::from_lengths(vec![frames; 64]),
+            Arc::new(Float32Array::from(vec![0.5; 64 * frames])),
+            None,
         );
-        assert!(EpisodeAnswer::from_statement(&one, &[row(vec![Some(0.5), None])]).is_err());
+        let episodes = (0..64).map(episode).collect::<Vec<_>>();
+        let batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![EpisodeIds::array(&episodes), Arc::new(read)],
+        )
+        .unwrap();
+        let mut answered = StatementAnswers::from_statement(&schema, &[batch]).unwrap();
+        let mut held = ColumnAnswers::default();
+        for episode in &episodes[..15] {
+            held.hold(episode.clone(), answered.answer(episode))
+                .unwrap();
+        }
+        assert!(
+            !held.is_full(),
+            "each answer counts its own row, not the read's"
+        );
+        held.hold(episodes[15].clone(), answered.answer(&episodes[15]))
+            .unwrap();
+        assert!(held.is_full(), "16 answers of 256 KiB fill a write");
+    }
+
+    #[test]
+    fn answers_holding_strings_fill_one_write_by_their_own_strings() {
+        // 64 episodes' part names, 64 KiB each, read as one 4 MiB string
+        // view column, as Spiral reads strings.
+        let parts = 64;
+        let name = "p".repeat(1024);
+        let names =
+            StringViewArray::from_iter_values(std::iter::repeat_n(name.as_str(), 64 * parts));
+        let read = ListArray::new(
+            Arc::new(Field::new_list_field(DataType::Utf8View, false)),
+            OffsetBuffer::from_lengths(vec![parts; 64]),
+            Arc::new(names),
+            None,
+        );
+        let mut held = ColumnAnswers::default();
+        for row in 0..16 {
+            held.hold(
+                episode(row),
+                EpisodeAnswer(Arc::new(read.slice(row as usize, 1))),
+            )
+            .unwrap();
+        }
+        assert!(
+            !held.is_full(),
+            "each answer counts its own strings, not the read's"
+        );
+        // Held as plain strings, they are written as the table's views.
+        let table = new_table(read.data_type());
+        let rows = held.rows(&table).unwrap().unwrap();
+        assert_eq!(rows.schema(), table.schema);
+        let written = rows.column(1).as_any().downcast_ref::<ListArray>().unwrap();
+        assert_eq!((written.len(), written.value(15).len()), (16, parts));
     }
 
     #[test]
     fn a_dataset_statement_answers_each_episode_it_measured_once() {
         let schema = Schema::new(vec![
-            EpisodeUuids::field("episode_id"),
+            EpisodeIds::field("episode_id"),
             Field::new(ANSWER, DataType::Float64, true),
         ]);
         let rows = |episodes: Vec<EpisodeId>, values: Vec<f64>| {
             RecordBatch::try_new(
                 Arc::new(schema.clone()),
                 vec![
-                    EpisodeUuids::array(&episodes).unwrap(),
+                    EpisodeIds::array(&episodes),
                     Arc::new(Float64Array::from(values)),
                 ],
             )
@@ -641,36 +633,99 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires SPIRAL_MCAP_TEST_PROJECT and SPIRAL_ACCESS_TOKEN (endpoints from SPIRAL__SERVER__URL and SPIRAL__SPFS__URL); creates and drops a probe dataset with its answers table"]
-    async fn answers_live_with_their_dataset_and_take_the_columns_fills_write() {
+    async fn a_column_is_made_empty_and_holds_one_row_per_episode_asked() {
+        let journal = crate::datasets::TestJournal::start().await;
+        let (store, _) = crate::db::MemoryDatabase::store_with_catalog(journal.endpoint()).await;
+        let store = Arc::new(store);
+        let storage = StorageManager::new(
+            store.clone(),
+            crate::StudioStore::in_memory().project(&store.connection_settings()),
+        );
+        let dataset = DatasetSelection::new("demo").unwrap();
+        let column = AnswerColumn::of("break_down", &["m"]).unwrap();
+        let answers = storage.stored_answers(&dataset, &column);
+        assert_eq!(answers.filled().await.unwrap(), None, "no table yet");
+        let answer_type = EpisodeAnswer::listing(subtasks(&["reach"]))
+            .0
+            .data_type()
+            .clone();
+        answers.create(&answer_type).await.unwrap();
+        assert_eq!(answers.filled().await.unwrap(), Some(BTreeSet::new()));
+        let mut first = ColumnAnswers::default();
+        first
+            .hold(
+                episode(1),
+                EpisodeAnswer::listing(subtasks(&["reach", "grasp"])),
+            )
+            .unwrap();
+        first
+            .hold(episode(2), EpisodeAnswer::failed(&answer_type))
+            .unwrap();
+        answers.write(first).await.unwrap();
+        // Another run asked about episode 2 as well: only episode 3 is new.
+        let mut second = ColumnAnswers::default();
+        second
+            .hold(episode(2), EpisodeAnswer::listing(subtasks(&["lift"])))
+            .unwrap();
+        second
+            .hold(episode(3), EpisodeAnswer::listing(subtasks(&["place"])))
+            .unwrap();
+        answers.write(second).await.unwrap();
+        let read = store
+            .connect()
+            .await
+            .unwrap()
+            .read_batches(&format!(
+                "SELECT episode_id, CAST(cardinality(value) AS BIGINT) AS subtasks FROM {} ORDER BY episode_id",
+                dataset.answers(&column)
+            ))
+            .await
+            .unwrap();
+        let read = arrow_select::concat::concat_batches(&read[0].schema(), &read).unwrap();
+        assert_eq!(
+            EpisodeIds::read(read.column(0).as_ref()).unwrap(),
+            [episode(1), episode(2), episode(3)]
+        );
+        let subtasks = read
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(
+            subtasks.iter().collect::<Vec<_>>(),
+            [Some(2), None, Some(1)],
+            "the failed answer stays failed"
+        );
+        journal.name(&[dataset.episodes(), dataset.answers(&column)]);
+        assert_eq!(
+            storage.answer_columns(&dataset).await.unwrap(),
+            BTreeSet::from([column])
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires SPIRAL_MCAP_TEST_PROJECT and SPIRAL_ACCESS_TOKEN (endpoints from SPIRAL__SERVER__URL and SPIRAL__SPFS__URL); creates and drops a probe dataset with its answer columns"]
+    async fn answer_columns_live_with_their_dataset_and_take_what_fills_write() {
         use crate::datasets::HostedProject;
-        use spiral_robotics_common::datasets::{CameraVideo, DatasetSelection, EpisodeSelection};
+        use spiral_robotics_common::datasets::{CameraVideo, EpisodeSelection};
         use spiral_robotics_common::relations::EpisodeQueryRequest;
         let (store, storage) = HostedProject::storage();
         let name = format!("probe_answers_{}", uuid::Uuid::new_v4().simple());
-        let definition = StudioDataset::new(&name);
-        let table = definition.answers().clone();
-        let dataset = DatasetSelection::new(vec![definition.dataset().to_owned()]).unwrap();
-        let rows = async |store: &crate::ProjectStore| -> Result<usize, String> {
-            let batches = store
-                .connect()
-                .await?
-                .read_batches(&format!("SELECT episode_id FROM {}", table.quoted()))
-                .await?;
-            Ok(batches.iter().map(RecordBatch::num_rows).sum())
-        };
+        let dataset = DatasetSelection::new(name.clone()).unwrap();
+        let similarity = AnswerColumn::of("similarity", &["probe"]).unwrap();
         // An assertion that fails still lets the probe be dropped.
         let outcome = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
-            // The first file makes the Dataset and its answers table.
             storage.record_probe_episode(&name, "one").await?;
-            assert_eq!(rows(&store).await?, 1);
             storage.record_probe_episode(&name, "two").await?;
-            assert_eq!(rows(&store).await?, 2, "an append adds its episode's row");
+            assert!(
+                storage.answer_columns(&dataset).await?.is_empty(),
+                "adding episodes writes no answers"
+            );
             let episodes = storage
                 .queries()
                 .episode_ids(&format!(
-                    "SELECT id AS episode_id FROM spql.mcap.episodes({}) ORDER BY id",
-                    SqlLiteral::text(definition.dataset())
+                    "SELECT id AS episode_id FROM {} ORDER BY id",
+                    dataset.episodes()
                 ))
                 .await?;
             assert_eq!(episodes.len(), 2);
@@ -683,7 +738,16 @@ mod tests {
             };
 
             // The progress service reads the bound episode's packets as recorded.
-            let packets = CameraVideo::new(definition.dataset(), "/camera/top/video").packets();
+            let camera = storage
+                .inspect_dataset(dataset.clone())
+                .await?
+                .topics()
+                .iter()
+                .find(|topic| topic.name() == "/camera/top/video")
+                .ok_or("the probe records its camera")?
+                .revision()
+                .clone();
+            let packets = CameraVideo::new(&dataset, &camera).packets();
             let (schema, batches) = storage
                 .queries()
                 .batches_for_episode(&bound(&episodes[0], packets))
@@ -701,43 +765,30 @@ mod tests {
             let times = times.as_any().downcast_ref::<Int64Array>().unwrap();
             assert_eq!(times.value(1) - times.value(0), 33_333_333);
 
-            // A statement's answer, and one answered per position, fill columns.
-            let answers = storage.dataset_answers(table.clone());
-            let similarity = AnswerColumn::of("similarity", &["probe"]).unwrap();
-            assert!(answers.filled(&similarity).await?.is_empty());
-            let listed = format!(
-                "WITH listed AS (SELECT e.id AS episode_id, [CAST(0.25 AS DOUBLE), CAST(0.5 AS DOUBLE)] AS scores FROM spql.mcap.episodes({}) e WHERE e.id = $1) \
-                 SELECT l.episode_id, g._ AS position, spql.list.get(l.scores, g._) AS answer FROM listed l CROSS JOIN LATERAL spql.range(CAST(spql.list.len(l.scores) AS BIGINT)) g",
-                SqlLiteral::text(definition.dataset())
-            );
-            let (schema, batches) = storage
-                .queries()
-                .batches_for_episode(&bound(&episodes[0], listed))
-                .await?;
+            // A judgment's list, one value per subtask, fills a column.
+            let similarities = DataType::List(Arc::new(Field::new_list_field(DataType::Float64, true)));
+            let answers = storage.stored_answers(&dataset, &similarity);
+            assert_eq!(answers.filled().await?, None);
+            answers.create(&similarities).await?;
+            assert_eq!(answers.filled().await?, Some(BTreeSet::new()));
             let mut first = ColumnAnswers::default();
             first.hold(
                 episodes[0].clone(),
-                EpisodeAnswer::from_statement(&schema, &batches)?,
-            );
-            answers.write(&similarity, first).await?;
-            assert_eq!(answers.filled(&similarity).await?, BTreeSet::from([episodes[0].clone()]));
+                EpisodeAnswer::listing(Arc::new(Float64Array::from(vec![0.25, 0.5]))),
+            )?;
+            answers.write(first).await?;
+            assert_eq!(answers.filled().await?, Some(BTreeSet::from([episodes[0].clone()])));
             // A failed answer is written too, so it is never asked again.
             let mut second = ColumnAnswers::default();
-            second.hold(
-                episodes[1].clone(),
-                EpisodeAnswer::failed(&DataType::List(Arc::new(Field::new_list_field(
-                    DataType::Float64,
-                    true,
-                )))),
-            );
-            answers.write(&similarity, second).await?;
-            assert_eq!(answers.filled(&similarity).await?.len(), 2);
+            second.hold(episodes[1].clone(), EpisodeAnswer::failed(&similarities))?;
+            answers.write(second).await?;
+            assert_eq!(answers.filled().await?.map(|filled| filled.len()), Some(2));
             let read = store
                 .connect()
                 .await?
                 .read_batches(&format!(
-                    "SELECT a.episode_id, spql.list.get(a.{similarity}.value, CAST(1 AS BIGINT)) AS second FROM {} a ORDER BY a.episode_id",
-                    table.quoted()
+                    "SELECT a.episode_id, array_element(a.value, 2) AS second FROM {} a ORDER BY a.episode_id",
+                    dataset.answers(&similarity)
                 ))
                 .await?;
             let second = read[0].column(1).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -765,17 +816,21 @@ mod tests {
                     .unwrap(),
                 )
             };
+            let scored_answers = storage.stored_answers(&dataset, &scores);
+            scored_answers
+                .create(EpisodeAnswer::listing(frame(0)).value().data_type())
+                .await?;
             let mut scored = ColumnAnswers::default();
             for (episode, index) in episodes.iter().zip([0, 1]) {
-                scored.hold(episode.clone(), EpisodeAnswer::listing(frame(index)));
+                scored.hold(episode.clone(), EpisodeAnswer::listing(frame(index)))?;
             }
-            answers.write(&scores, scored).await?;
+            scored_answers.write(scored).await?;
             let read = store
                 .connect()
                 .await?
                 .read_batches(&format!(
-                    "SELECT p.frame_index, p.timestamp_ns FROM {} a CROSS JOIN LATERAL UNNEST(a.{scores}.value) p",
-                    table.quoted()
+                    "SELECT s.p.frame_index AS frame_index, s.p.timestamp_ns AS timestamp_ns FROM (SELECT unnest(a.value) AS p FROM {} a) s",
+                    dataset.answers(&scores)
                 ))
                 .await?;
             assert_eq!(read.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
@@ -783,38 +838,48 @@ mod tests {
 
             // Track objects' pictures, each nesting the objects it tracks.
             let tracks = AnswerColumn::of("track_objects", &["probe"]).unwrap();
+            let tracked_answers = storage.stored_answers(&dataset, &tracks);
+            tracked_answers
+                .create(EpisodeAnswer::listing(pictures(&[1])).value().data_type())
+                .await?;
             let mut tracked = ColumnAnswers::default();
             for (episode, objects) in episodes.iter().zip([2, 0]) {
-                tracked.hold(episode.clone(), EpisodeAnswer::listing(pictures(&[objects, 1])));
+                tracked.hold(episode.clone(), EpisodeAnswer::listing(pictures(&[objects, 1])))?;
             }
-            answers.write(&tracks, tracked).await?;
-            assert_eq!(answers.filled(&tracks).await?.len(), 2);
+            tracked_answers.write(tracked).await?;
+            assert_eq!(tracked_answers.filled().await?.map(|filled| filled.len()), Some(2));
             let read = store
                 .connect()
                 .await?
                 .read_batches(&format!(
-                    "SELECT p.timestamp_ns FROM {} a CROSS JOIN LATERAL UNNEST(a.{tracks}.value) p",
-                    table.quoted()
+                    "SELECT s.p.timestamp_ns AS timestamp_ns FROM (SELECT unnest(a.value) AS p FROM {} a) s",
+                    dataset.answers(&tracks)
                 ))
                 .await?;
             assert_eq!(read.iter().map(RecordBatch::num_rows).sum::<usize>(), 4);
+            assert_eq!(
+                storage.answer_columns(&dataset).await?,
+                BTreeSet::from([similarity.clone(), scores, tracks])
+            );
 
-            // A later episode gets a row naming every column the table has.
+            // A later episode is not asked yet: it has no row.
             storage.record_probe_episode(&name, "three").await?;
-            assert_eq!(rows(&store).await?, 3);
-            assert_eq!(answers.filled(&similarity).await?.len(), 2);
+            assert_eq!(answers.filled().await?.map(|filled| filled.len()), Some(2));
 
             Ok::<_, String>(())
         }))
         .await;
-        storage.drop_probe_dataset(&name).await.unwrap();
+        storage.delete_dataset(&dataset).await.unwrap();
         let mut connection = store.connect().await.unwrap();
         assert!(
-            !connection.table_exists(&table.name()).await.unwrap(),
-            "retiring drops the answers table"
+            !connection
+                .table_exists(dataset.answers(&similarity).name())
+                .await
+                .unwrap(),
+            "dropping the dataset drops its answer columns"
         );
         match outcome {
-            Ok(outcome) => outcome.expect("answers lifecycle"),
+            Ok(outcome) => outcome.expect("answer columns lifecycle"),
             Err(panic) => std::panic::resume_unwind(panic),
         }
     }

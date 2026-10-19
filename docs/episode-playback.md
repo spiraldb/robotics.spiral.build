@@ -1,9 +1,9 @@
-# Schema-driven native episode inspection
+# Schema-driven episode inspection
 
-Open **Data → dataset → episode**. The rail lists a dataset's members as
-chronological episodes, a LeRobot dataset's by index; opening one shows the
+Open **Data → dataset → episode**. The rail lists a dataset's episodes in
+recording order, a LeRobot dataset's by index; opening one shows the
 episode inspection Curation uses too: one camera panel per camera stream (a
-`foxglove.CompressedVideo` channel, or a LeRobot video feature), a **Scene**
+`foxglove.CompressedVideo` channel, or a LeRobot camera), a **Scene**
 tile with **Plots** behind it, and the **Timeline** across the bottom. Every
 panel reads the same episode-owned clock and the same visible span; native
 tabs, splits, and resizing remain available, and each dataset remembers its
@@ -17,9 +17,9 @@ unticked row stays one quiet line and reads nothing. Cameras are named by what
 tells them apart (`left-wrist`, `top`), as their pictures are captioned; a
 row's topic, schemas and message count are in its tooltip. Expanding a data stream reads its schema once and
 lists nested structs, lists, scalar types, and nullability (`?`) with
-per-field checkboxes. Kind is decided from what the producer recorded only —
-a `foxglove.CompressedVideo` schema, or the `mp4` message encoding of a
-LeRobot video feature; topic and field names carry no physical meaning, and a
+per-field checkboxes. Kind is decided from what was recorded only — a
+`foxglove.CompressedVideo` schema, or the `h264` message encoding of a
+LeRobot camera; topic and field names carry no physical meaning, and a
 validity flag is an ordinary selectable boolean. A LeRobot named vector, such
 as `observation.state`, is a struct of one field per name, so it plots one
 lane per joint; a name holding punctuation (`shoulder_pan.pos`) is labelled
@@ -36,38 +36,48 @@ episode and shared by the panel and its timeline row (`episode/reads.rs`). A
 camera decodes only while its panel is visible. Its filmstrip decodes stills
 of its own in the browser from the same video: one still per cell of the
 visible span, at the frame shown mid-cell, visited left to right so each costs
-at most one keyframe interval, and kept while the row is shown. No still is
-decoded on the server.
+at most one keyframe interval, and kept while the row is shown.
+
+The still a row of episodes leads with, in Data's rail and in every Curation
+index, is decoded in the browser too, by the same decoder (`episode/still.rs`).
+Its frame is the first the camera logged at or after its instant, within a
+second, and one episode query reads only the packets that decode it: from the
+last keyframe at or before that frame up to the frame, found by the stream's
+`keyframe` and `ordinal` columns. A still therefore reads one group of pictures
+at most, and an episode's opening still one packet. It is drawn as a JPEG just
+large enough to cover the largest slot a row gives it, decoded once per
+project, camera, episode and instant (`EpisodeStills`). Training reads a
+camera's size from the same still at the first episode's start, as the decoded
+frame displays.
 
 ## One message transport
 
-`POST /api/datasets/episode-topics` lists the selected member's topics the
-way its dataset's producer allows and joins them to native catalog
-observations: an MCAP member's native `spql.mcap.channels` summary, or, for a
-LeRobot member, whose source is a frame table it shares, a count of its
-messages of each of the dataset's topics with `spql.mcap.read_topic`, in one
-statement. Incompatible schema variants remain distinct. Each source carries
-its native schema variant; requests bind the member UUID.
+`POST /api/datasets/episode-topics` lists the streams the selected episode
+holds messages of, from its row's `streams` beside the dataset's `topics`
+([datasets](datasets.md#catalog-layout)): each stream's topic, schema,
+encoding and the episode's message count. A topic recorded with two schemas is
+two streams, each named by its table under `messages`; the Timeline shows such
+a topic's streams side by side, told apart by the hash their names end with.
 
 The browser reads messages with ordinary episode SQL. `MessageRead` (in
-`common`) writes the `spql.mcap.read_topic` query for one topic revision, and
-`POST /api/queries/episode/arrow` runs it with `$1` bound to the member UUID and
+`common`) reads one stream's `datasets.<id>.messages.<stream>` table, and
+`POST /api/queries/episode/arrow` runs it with `$1` bound to the episode's number and
 returns `application/vnd.apache.arrow.stream`. The same query serves schema
 discovery, plots and recorded camera packets; there are no dedicated joint,
 video, or message endpoints.
 
-- A schema read is the same query with `LIMIT 0`: the native Arrow schema,
+- A schema read is the same query with `LIMIT 0`: the stream's Arrow schema,
   including nested types, field metadata and nullability, without message rows.
 - A window specifies a half-open nanosecond interval, structured field paths,
   a row limit, and an optional continuation cursor.
-- Pages retain `log_time`, `publish_time`, `channel_id`, `chunk_start_offset` and `sample_ordinal`.
+- Pages retain `log_time`, `publish_time`, `sequence` and `ordinal`.
   Projection aliases correspond to the ordered requested paths.
-- Ordering and continuation use `(log_time, chunk_start_offset, sample_ordinal)` so messages with
-  equal timestamps across chunks are not skipped. Each page asks for one row past its
-  limit; that row means the browser continues after the last kept message.
+- Ordering and continuation use `(log_time, ordinal)`, so messages with equal
+  timestamps are not skipped. Each page asks for one row past its limit; that
+  row means the browser continues after the last kept message.
 - The Arrow endpoint returns the complete result or refuses it (over 10,000 rows
-  or 32 MiB); it never truncates. Reads are pinned to the member UUID, so a new
-  take appended to the dataset does not disturb an open episode. The browser
+  or 32 MiB); it never truncates. Reads are pinned to the episode's number, so an
+  episode appended to the dataset does not disturb an open one. The browser
   rejects a schema that changes between pages.
 
 Arrow retains exact integers, timestamps, nulls and binary packets. Plot geometry
@@ -111,8 +121,9 @@ owns its effects: Data selects streams, Curation handles interval activation,
 and Rollout controls recording and permits robot motion only on committed seeks.
 Events carry the source identity; owners reject events from replaced sources.
 
-Cameras use a media adapter for `foxglove.CompressedVideo` H.264. They consume
-binary packets from the same message transport.
+Cameras use a media adapter for H.264 access units, a
+`foxglove.CompressedVideo` channel's or a LeRobot camera's. They consume binary
+packets from the same message transport.
 Each visible camera keeps one WebCodecs decoder following the playhead: forward
 playback decodes every frame once, a jump restarts from the preceding keyframe,
 and only frames within a quarter second behind the playhead plus a short

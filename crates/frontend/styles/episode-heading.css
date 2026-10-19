@@ -71,27 +71,15 @@
     font-variant-numeric: tabular-nums;
   }
 
-  /* The episode's identifier, as text somebody can select and paste. It was a
-     `title` tooltip, which is none of those things. It is cut from the front,
-     so the tail every index heading names the episode by is what shows. */
+  /* The episode's number, as text somebody can select and paste. It was a
+     `title` tooltip, which is none of those things. The subject gives way to
+     it rather than it to the subject. */
   .episode-heading-id {
-    overflow: hidden;
-    /* "…" and eight hex digits: the tail every index row names it by,
-       which the subject gives way to rather than it. */
-    max-width: 9.6ch;
     flex-shrink: 0;
     color: var(--tone-ink-soft);
     font: inherit;
-    direction: rtl;
-    text-align: left;
-    text-overflow: ellipsis;
     white-space: nowrap;
     user-select: text;
-  }
-
-  .episode-heading-id:hover,
-  .episode-heading-id:focus-within {
-    max-width: none;
   }
 
   /* A model's words begin as a sentence does, however the model wrote them. */

@@ -14,14 +14,14 @@ use crate::components::page_keys::PageKeys;
 use crate::format::GroupedCountPresentation as _;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{
-    DatasetInspection, DatasetSelection, EpisodeId, ProjectResource,
+    DatasetInspection, DatasetSelection, DatasetSummary, EpisodeId,
 };
 use spiral_robotics_ui::{
     ActionPurpose, BrowserFocus, Button, ButtonSize, ButtonVariant, KindMark, RefreshIcon,
     TextInput, TextInputKind, Tree, TreeBranch, TreeItem,
 };
 
-type ResourceCatalog = ReadSignal<Option<Result<Vec<ProjectResource>, String>>>;
+type ListedDatasets = ReadSignal<Option<Result<Vec<DatasetSummary>, String>>>;
 pub(super) type CuratedCatalog = ReadSignal<Option<Result<Vec<CuratedView>, String>>>;
 const EPISODE_PAGE_SIZE: usize = 50;
 const FILTER_ID: &str = "data-rail-filter";
@@ -160,7 +160,7 @@ impl RailSelection {
 
 #[component]
 pub(super) fn CatalogRail(
-    resources: ResourceCatalog,
+    datasets: ListedDatasets,
     curated: CuratedCatalog,
     selection: RailSelection,
     actions: RailActions,
@@ -174,7 +174,7 @@ pub(super) fn CatalogRail(
         }
         claimed
     });
-    let result = resources.read();
+    let result = datasets.read();
     rsx! {
         section { class: "data-rail", "aria-label": "Datasets",
             header { class: "data-rail-head",
@@ -198,7 +198,6 @@ pub(super) fn CatalogRail(
                         // A search never hides a dataset: each one stays listed and
                         // searches its own episodes, so a match in a collapsed dataset
                         // is found and the operator's expansion choices survive.
-                        let datasets = entries.iter().filter(|resource| resource.kind() == "dataset").cloned().collect::<Vec<_>>();
                         // Curated views lead, so an open dataset's episodes
                         // never push them out of sight.
                         let curated = match &*curated.read() {
@@ -219,20 +218,20 @@ pub(super) fn CatalogRail(
                             if headed {
                                 h3 { class: "data-curated-heading", "Datasets" }
                             }
-                            if datasets.is_empty() {
+                            if entries.is_empty() {
                                 div { class: "data-rail-note",
                                     strong { "No datasets yet" }
                                     p { "Import MCAP recordings to create the first one." }
                                 }
                             }
                             Tree { label: "Datasets", class: "data-dataset-list",
-                                for resource in datasets.iter() {
+                                for summary in entries.iter() {
                                     DatasetBranch {
-                                        key: "{resource.resource_id()}",
-                                        resource: resource.clone(),
-                                        selected: selection.dataset.as_ref() == Some(resource.selection()),
+                                        key: "{summary.resource_id()}",
+                                        summary: summary.clone(),
+                                        selected: selection.dataset.as_ref() == Some(summary.selection()),
                                         selected_episode_id: selection.episode_id.clone(),
-                                        inspection: selection.inspection.clone().filter(|_| selection.dataset.as_ref() == Some(resource.selection())),
+                                        inspection: selection.inspection.clone().filter(|_| selection.dataset.as_ref() == Some(summary.selection())),
                                         filter: needle.clone(),
                                         actions,
                                     }
@@ -251,7 +250,7 @@ pub(super) fn CatalogRail(
 /// exactly one row in the rail wears the lime.
 #[component]
 fn DatasetBranch(
-    resource: ProjectResource,
+    summary: DatasetSummary,
     selected: bool,
     selected_episode_id: Option<EpisodeId>,
     inspection: Option<DatasetInspection>,
@@ -266,9 +265,9 @@ fn DatasetBranch(
             expanded.set(true);
         }
     }));
-    let dataset = resource.selection().clone();
-    let name = dataset.display_name();
-    let sql_name = dataset.sql_name();
+    let dataset = summary.selection().clone();
+    let name = dataset.display_name().to_owned();
+    let label = dataset.label();
     // Every dataset says how many episodes it holds, open or not.
     // Read again when the catalog is refreshed, as the episodes are.
     let count_dataset = dataset.clone();
@@ -278,7 +277,7 @@ fn DatasetBranch(
     });
     let members = inspection
         .as_ref()
-        .and_then(DatasetInspection::members)
+        .map(DatasetInspection::members)
         .or_else(|| {
             counted
                 .read()
@@ -297,14 +296,14 @@ fn DatasetBranch(
             onselect: move |_| { actions.on_select_dataset.call(select.clone()); expanded.set(true); },
             label: rsx! {
                 KindMark { letter: 'D', hue: "var(--tone-kind-dataset)", label: "Dataset" }
-                span { class: "data-dataset-name", title: "{sql_name}", "{name}" }
+                span { class: "data-dataset-name", title: "{label}", "{name}" }
             },
             trailing: rsx! {
                 span { class: "data-dataset-count", title: "Episodes",
                     if let Some(members) = members { "{members.grouped_label()}" }
                 }
             },
-            DatasetEpisodes { key: "{resource.resource_id()}", dataset, selected_episode_id, filter, actions }
+            DatasetEpisodes { key: "{summary.resource_id()}", listing: EpisodeListing::of(&summary), selected_episode_id, filter, actions }
         }
     }
 }
@@ -314,7 +313,7 @@ fn DatasetBranch(
 /// and draws its length against the longest episode listed.
 #[component]
 fn DatasetEpisodes(
-    dataset: DatasetSelection,
+    listing: EpisodeListing,
     selected_episode_id: Option<EpisodeId>,
     filter: String,
     actions: RailActions,
@@ -323,17 +322,16 @@ fn DatasetEpisodes(
     let mut loaded = use_signal(Vec::<Episode>::new);
     let mut has_more = use_signal(|| false);
     let mut offset = use_signal(|| 0_usize);
-    let query_dataset = dataset.clone();
+    let dataset = listing.dataset().clone();
     // Refresh reads the page again along with the catalog, so the rail's
     // Refresh refreshes what the rail shows, not only its datasets. A page
-    // is listed as the dataset's producer lists episodes, which the catalog
+    // is listed as the dataset's format lists episodes, which the catalog
     // says.
     let mut page = QueryPolicy::on_demand(QueryDomain::Catalog).use_resource(move || {
-        let dataset = query_dataset.clone();
+        let listing = listing.clone();
         let offset = offset();
         async move {
-            EpisodeListing::read(&dataset)
-                .await?
+            listing
                 .page(offset, EPISODE_PAGE_SIZE)
                 .await
                 .map(|page| (offset, page))

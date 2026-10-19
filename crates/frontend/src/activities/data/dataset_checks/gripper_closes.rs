@@ -2,15 +2,17 @@
 //! than half a second, how far it actually closed — all the way, onto
 //! nothing, or stopped on something it holds. Openings read on one scale for
 //! every dataset: 0 closed, 1 open. Each episode's cell keeps every
-//! gripper's closes; whether its commands and openings were logged
-//! together is judged when the report is read.
-use super::check_columns::{CheckCells, CheckColumn, CheckKind, PartsStatement};
+//! gripper's closes; the report totals them in Spiral, over the episodes
+//! whose commands and openings were logged together.
+use super::check_columns::{CheckColumn, CheckKind, CheckTable, PartsStatement};
 use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, Plural, Verdict};
 use super::state_action_lag::Pairing;
 use super::stream_reads::{CheckedStreams, PairedColumns};
 use dioxus::prelude::*;
 use serde::Deserialize;
-use spiral_robotics_common::datasets::{ArmRoles, EpisodeId};
+use spiral_robotics_common::datasets::{ArmRoles, EpisodeId, GripperRoles};
+use spiral_robotics_common::sql::SqlStruct;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct GripperCloses {
@@ -20,11 +22,12 @@ pub(super) struct GripperCloses {
 #[derive(Clone, Debug, PartialEq)]
 struct ArmCloses {
     arm: String,
-    episodes: Vec<EpisodeCloses>,
-    unpaired: Vec<EpisodeId>,
+    counts: CloseCounts,
+    /// The episodes that close all the way most often, most first.
+    most_shut: Vec<EpisodeShut>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 struct CloseCounts {
     /// Closed all the way: nothing in the gripper.
     shut: u64,
@@ -34,27 +37,22 @@ struct CloseCounts {
     holding: u64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct EpisodeCloses {
+/// An episode's closes all the way.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+struct EpisodeShut {
+    #[serde(rename = "episode_id")]
     episode: EpisodeId,
-    counts: CloseCounts,
+    shut: u64,
     /// Seconds into the episode of its first close all the way.
     first_shut_at: Option<f64>,
 }
 
-/// One arm's gripper in one episode, as its cell keeps it: how many
-/// commands met an opening logged at the same instant and how many it
-/// logged, how many closes went each way — none when it never closed — and
-/// when the first close all the way was.
-#[derive(Deserialize)]
-pub(super) struct ClosesPart {
+/// One gripper as the judgment answers it.
+#[derive(Default, Deserialize)]
+struct JudgedArm {
     part: String,
-    paired: u64,
-    commands: u64,
-    shut: Option<u64>,
-    nearly: Option<u64>,
-    holding: Option<u64>,
-    first_shut_at: Option<f64>,
+    counts: Option<CloseCounts>,
+    most_shut: Option<Vec<EpisodeShut>>,
 }
 
 impl GripperCloses {
@@ -66,9 +64,12 @@ impl GripperCloses {
     /// shut; above `NEARLY`, the gripper stopped on something.
     const SHUT: f64 = 0.05;
     const NEARLY: f64 = 0.15;
+    /// How many of the episodes that close all the way most often the
+    /// details name.
+    const MOST_SHUT: usize = 3;
 
     /// The column keeping every gripper's closes in each episode, by its
-    /// arm; `None` when no arm records a gripper.
+    /// arm; `None` when no arm records a gripper whose ends are known.
     pub(super) fn column(
         streams: CheckedStreams<'_>,
         arms: &[ArmRoles],
@@ -82,22 +83,69 @@ impl GripperCloses {
             "first_shut_at",
         ]);
         for arm in arms {
-            let Some(gripper) = arm.gripper() else {
+            let Some((gripper, range)) = Self::judged_gripper(arm) else {
                 continue;
             };
             let paired = PairedColumns::new(gripper.state(), gripper.action());
-            parts = parts.part(arm.name(), Self::sql(streams, &paired, gripper.range())?);
+            parts = parts.part(arm.name(), Self::sql(streams, &paired, range)?);
         }
         CheckColumn::of(CheckKind::Grippers, parts)
     }
 
-    /// Each gripper's closes in every episode its `cells` measured.
-    pub(super) fn read(arms: &[ArmRoles], cells: &CheckCells<ClosesPart>) -> Self {
+    /// `arm`'s gripper and its open and closed values, when it has a gripper
+    /// whose ends are known: a close is judged on that scale.
+    fn judged_gripper(arm: &ArmRoles) -> Option<(&GripperRoles, (f64, f64))> {
+        let gripper = arm.gripper()?;
+        Some((gripper, gripper.range()?))
+    }
+
+    /// Each gripper's closes, totalled in Spiral over the column among
+    /// `columns` that `table` holds.
+    pub(super) async fn judge(
+        table: &CheckTable,
+        columns: &[CheckColumn],
+        arms: &[ArmRoles],
+    ) -> Result<Self, String> {
+        let judged = match table.parts(columns, CheckKind::Grippers) {
+            Some(parts) => table.rows(Self::judgment(&parts)).await?,
+            None => Vec::new(),
+        };
+        Ok(Self::of(arms, judged))
+    }
+
+    /// The judgment over `parts`, every episode's closes: per gripper, over
+    /// its episodes whose commands and openings were logged together, how
+    /// many closes went each way, and the episodes that close all the way
+    /// most often.
+    fn judgment(parts: &str) -> String {
+        format!(
+            "WITH logged AS (SELECT part, episode_id, COALESCE(shut, 0) AS shut, COALESCE(nearly, 0) AS nearly, COALESCE(holding, 0) AS holding, first_shut_at \
+               FROM {parts} p WHERE {together}), \
+             counts AS (SELECT part, {counts} AS counts FROM logged GROUP BY part), \
+             ranked AS (SELECT part, episode_id, shut, first_shut_at, ROW_NUMBER() OVER (PARTITION BY part ORDER BY shut DESC, episode_id) AS rank FROM logged WHERE shut > 0), \
+             most AS (SELECT part, {most_shut} AS most_shut FROM ranked WHERE rank <= {most} GROUP BY part) \
+             SELECT counts.part AS part, counts.counts AS counts, most.most_shut AS most_shut FROM counts LEFT JOIN most ON most.part = counts.part",
+            together = Pairing::together(),
+            most = Self::MOST_SHUT,
+            counts = SqlStruct::new()
+                .field("shut", "sum(shut)")
+                .field("nearly", "sum(nearly)")
+                .field("holding", "sum(holding)"),
+            most_shut = SqlStruct::of_columns(["episode_id", "shut", "first_shut_at"]).collected(),
+        )
+    }
+
+    /// Every arm among `arms` with a gripper, as `judged` says it closed.
+    fn of(arms: &[ArmRoles], judged: Vec<JudgedArm>) -> Self {
+        let mut judged = judged
+            .into_iter()
+            .map(|arm| (arm.part.clone(), arm))
+            .collect::<HashMap<_, _>>();
         Self {
             arms: arms
                 .iter()
-                .filter(|arm| arm.gripper().is_some())
-                .map(|arm| ArmCloses::read(arm.name(), cells))
+                .filter(|arm| Self::judged_gripper(arm).is_some())
+                .map(|arm| ArmCloses::of(arm.name(), judged.remove(arm.name())))
                 .collect(),
         }
     }
@@ -122,7 +170,7 @@ impl GripperCloses {
             "k AS (SELECT id, log_time, opening, {closing} AS closing, \
              ROW_NUMBER() OVER (PARTITION BY id ORDER BY log_time) - ROW_NUMBER() OVER (PARTITION BY id, {closing} ORDER BY log_time) AS grp FROM n)"
         ));
-        ctes.push("runs AS (SELECT id, grp, (max(CAST(log_time AS BIGINT)) - min(CAST(log_time AS BIGINT))) / 1e9 AS run_s, min(opening) AS floor, min(log_time) AS start FROM k WHERE closing = 1 GROUP BY id, grp)".into());
+        ctes.push("runs AS (SELECT id, grp, (CAST(max(log_time) AS BIGINT) - CAST(min(log_time) AS BIGINT)) / 1e9 AS run_s, min(opening) AS floor, min(log_time) AS start FROM k WHERE closing = 1 GROUP BY id, grp)".into());
         let (shut, nearly) = (Self::SHUT, Self::NEARLY);
         ctes.push(format!(
             "closes AS (SELECT id, sum(CASE WHEN floor < {shut} THEN 1 ELSE 0 END) AS shut, \
@@ -150,9 +198,10 @@ impl GripperCloses {
                 Finding::why("No gripper with a recorded command and known ends"),
             );
         }
-        let total = self.arms.iter().fold(CloseCounts::default(), |total, arm| {
-            total.plus(&arm.counts())
-        });
+        let total = self
+            .arms
+            .iter()
+            .fold(CloseCounts::default(), |total, arm| total.plus(&arm.counts));
         let finding = Finding::of_count(total.all() as usize, "close", ":")
             .and(total.shut.to_string(), "all the way,")
             .and(total.nearly.to_string(), "nearly,")
@@ -167,7 +216,7 @@ impl GripperCloses {
                     for arm in arms {
                         tr { key: "{arm.arm}",
                             td { class: "data-checks-arm", "{arm.arm}" }
-                            td { CloseSplit { counts: arm.counts() } }
+                            td { CloseSplit { counts: arm.counts.clone() } }
                             td { EvidenceChips { evidence: arm.most_shut() } }
                         }
                     }
@@ -194,53 +243,31 @@ impl CloseCounts {
 }
 
 impl ArmCloses {
-    /// The arm's gripper closes in each episode `cells` measured it in whose
-    /// commands and openings were logged together; the others are unpaired.
-    fn read(arm: &str, cells: &CheckCells<ClosesPart>) -> Self {
-        let mut read = Self {
+    /// `arm` as `judged` answers it; an arm it does not answer had no
+    /// episode measured.
+    fn of(arm: &str, judged: Option<JudgedArm>) -> Self {
+        let judged = judged.unwrap_or_default();
+        let mut most_shut = judged.most_shut.unwrap_or_default();
+        most_shut.sort_by(|left, right| {
+            right
+                .shut
+                .cmp(&left.shut)
+                .then_with(|| left.episode.cmp(&right.episode))
+        });
+        Self {
             arm: arm.to_owned(),
-            episodes: Vec::new(),
-            unpaired: Vec::new(),
-        };
-        for (episode, part) in cells.parts().filter(|(_, part)| part.part == arm) {
-            if !Pairing::together(part.paired, part.commands) {
-                read.unpaired.push(episode.clone());
-                continue;
-            }
-            read.episodes.push(EpisodeCloses {
-                episode: episode.clone(),
-                counts: CloseCounts {
-                    shut: part.shut.unwrap_or_default(),
-                    nearly: part.nearly.unwrap_or_default(),
-                    holding: part.holding.unwrap_or_default(),
-                },
-                first_shut_at: part.first_shut_at,
-            });
+            counts: judged.counts.unwrap_or_default(),
+            most_shut,
         }
-        read
     }
-    fn counts(&self) -> CloseCounts {
-        self.episodes
-            .iter()
-            .fold(CloseCounts::default(), |total, episode| {
-                total.plus(&episode.counts)
-            })
-    }
-    /// The three episodes that close all the way most often.
     fn most_shut(&self) -> Vec<Evidence> {
-        let mut shut = self
-            .episodes
+        self.most_shut
             .iter()
-            .filter(|episode| episode.counts.shut > 0)
-            .collect::<Vec<_>>();
-        shut.sort_by_key(|episode| std::cmp::Reverse(episode.counts.shut));
-        shut.into_iter()
-            .take(3)
             .map(|episode| {
                 Evidence::at(
                     episode.episode.clone(),
                     episode.first_shut_at,
-                    Plural::of(episode.counts.shut as usize, "close"),
+                    Plural::of(episode.shut as usize, "close"),
                 )
             })
             .collect()
@@ -270,12 +297,8 @@ mod tests {
     use super::super::stream_reads::TwoArmDataset;
     use super::*;
 
-    fn episode(ordinal: u32) -> EpisodeId {
-        EpisodeId::try_from(format!("{ordinal:032x}")).unwrap()
-    }
-
     #[test]
-    fn each_grippers_closes_are_read_where_it_was_logged_together() {
+    fn each_grippers_closes_are_judged_where_it_was_logged_together() {
         let dataset = TwoArmDataset::new();
         let column = GripperCloses::column(dataset.streams(), dataset.arms())
             .unwrap()
@@ -291,34 +314,47 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let part = |paired, shut| ClosesPart {
-            part: "left".into(),
-            paired,
-            commands: 100,
-            shut,
-            nearly: shut.map(|_| 1),
-            holding: shut.map(|_| 2),
-            first_shut_at: Some(3.0),
-        };
-        let cells = CheckCells::fixture(vec![
-            (episode(1), vec![part(100, Some(4))]),
-            (episode(2), vec![part(100, None)]),
-            (episode(3), vec![part(5, Some(9))]),
-            (episode(4), Vec::new()),
-        ]);
-        let closes = GripperCloses::read(dataset.arms(), &cells);
+        let sql = GripperCloses::judgment("(parts)");
+        assert!(sql.contains(
+            "FROM (parts) p WHERE CAST(paired AS DOUBLE) >= 0.9 * CAST(commands AS DOUBLE)"
+        ));
+        assert!(sql.contains(
+            "named_struct('shut', sum(shut), 'nearly', sum(nearly), 'holding', sum(holding)) AS counts"
+        ));
+        assert!(sql.contains(
+            "array_agg(named_struct('episode_id', episode_id, 'shut', shut, 'first_shut_at', first_shut_at)) AS most_shut FROM ranked WHERE rank <= 3 GROUP BY part"
+        ));
+        let judged: Vec<JudgedArm> = serde_json::from_value(serde_json::json!([{
+            "part": "left",
+            "counts": {"shut": 13, "nearly": 1, "holding": 2},
+            "most_shut": [
+                {"episode_id": EpisodeId::fixture(6), "shut": 2, "first_shut_at": 1.5},
+                {"episode_id": EpisodeId::fixture(5), "shut": 6, "first_shut_at": 1.0},
+                {"episode_id": EpisodeId::fixture(1), "shut": 4, "first_shut_at": null},
+            ],
+        }]))
+        .unwrap();
+        let closes = GripperCloses::of(dataset.arms(), judged);
+        // Only the left arm records a gripper.
         assert_eq!(closes.arms.len(), 1);
         let arm = &closes.arms[0];
-        assert_eq!(arm.unpaired, [episode(3)]);
         assert_eq!(
-            arm.counts(),
+            arm.counts,
             CloseCounts {
-                shut: 4,
+                shut: 13,
                 nearly: 1,
                 holding: 2
             }
         );
-        assert_eq!(arm.most_shut().len(), 1);
-        assert_eq!(arm.most_shut()[0].measure(), "4 closes");
+        assert_eq!(
+            arm.most_shut()
+                .iter()
+                .map(Evidence::measure)
+                .collect::<Vec<_>>(),
+            ["6 closes", "4 closes", "2 closes"]
+        );
+        let quiet = GripperCloses::of(dataset.arms(), Vec::new());
+        assert_eq!(quiet.arms[0].counts, CloseCounts::default());
+        assert!(quiet.arms[0].most_shut().is_empty());
     }
 }

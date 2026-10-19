@@ -18,9 +18,7 @@
     "run_name": "fixture-run",
     "source": {
       "dataset": {
-        "path": [
-          "dataset_fixture"
-        ]
+        "id": "fixture"
       },
       "view": "fixture_view"
     },

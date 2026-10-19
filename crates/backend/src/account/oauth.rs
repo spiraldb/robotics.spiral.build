@@ -8,9 +8,8 @@ use spiral_robotics_common::account::{SpiralIdentity, SpiralOrganization};
 use super::tokens::SessionTokens;
 
 const ISSUER: &str = "https://auth.spiraldb.com";
-/// What Studio asks a user to delegate. `locations:*` let a LeRobot import
-/// create and list the Location over its Hugging Face repository.
-const SCOPES: &str = "openid email projects:read catalog:read catalog:write tables:read tables:write locations:read locations:write";
+const SCOPES: &str =
+    "openid email projects:read catalog:read catalog:write tables:read tables:write";
 
 pub(super) struct SpiralOAuth {
     http: reqwest::Client,

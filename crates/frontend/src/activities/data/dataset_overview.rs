@@ -2,21 +2,23 @@
 //! every episode's streams found.
 use super::DatasetClient;
 use super::dataset_checks::{CheckedEpisode, DatasetCheckReport};
+use super::relations::CatalogRefresh;
 use crate::activities::episode::EpisodeListing;
 use crate::format::{
     ByteCountPresentation, ClockPresentation, GroupedCountPresentation, LongDurationPresentation,
     UtcTimestampPresentation, WallClockPresentation,
 };
+use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
 use serde::Deserialize;
-use spiral_robotics_common::datasets::{DatasetProducer, DatasetSelection};
-use spiral_robotics_common::sql::SqlLiteral;
+use spiral_robotics_common::datasets::{DatasetFormat, DatasetSelection};
 use spiral_robotics_ui::{
-    ActionPurpose, Button, ButtonSize, ButtonVariant, Fact, FactLayout, FactList, KindMark,
+    ActionPurpose, Button, ButtonSize, ButtonVariant, ConfirmationCopy, ConfirmationDismissal,
+    ConfirmationResponse, Fact, FactLayout, FactList, InlineConfirmation, KindMark,
 };
 use std::collections::HashMap;
 
-/// Totals over every member, from one aggregate query.
+/// Totals over every episode, from one aggregate query.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 struct DatasetFacts {
     episodes: Option<u64>,
@@ -27,21 +29,21 @@ struct DatasetFacts {
 }
 
 impl DatasetFacts {
-    /// The totals `listing`'s producer records: an MCAP dataset's size is
+    /// The totals `listing`'s format records: an MCAP dataset's size is
     /// the size of its files, and a LeRobot episode has no file of its own.
     fn sql(listing: &EpisodeListing) -> String {
-        let bytes = match listing.producer() {
-            DatasetProducer::Mcap => " sum(source.size) AS bytes,",
-            DatasetProducer::LeRobot => "",
+        let bytes = match listing.format() {
+            DatasetFormat::Mcap => " sum(source_bytes) AS bytes,",
+            DatasetFormat::LeRobot => "",
         };
         format!(
             "SELECT count(*) AS episodes, sum(duration_ns) AS duration_ns,{bytes} \
              min(message_start_time) AS first_start, max(message_end_time) AS last_end \
-             FROM spql.mcap.episodes({})",
-            SqlLiteral::text(&listing.dataset().sql_name())
+             FROM {}",
+            listing.dataset().episodes()
         )
     }
-    /// The totals of `dataset`, read as its producer records them.
+    /// The totals of `dataset`, read as its format records them.
     async fn read(listing: &EpisodeListing) -> Result<Self, String> {
         let snapshot = DatasetClient::current()
             .run_spiral_query(Self::sql(listing), 1)
@@ -88,13 +90,13 @@ impl DatasetFacts {
     }
 }
 
-/// The totals last read for each dataset, kept for the project, by SQL
-/// name: a view that mounts again — the Dataset node after a step is
+/// The totals last read for each dataset, kept for the project: a view
+/// that mounts again — the Dataset node after a step is
 /// deleted, Data after Curation — paints the last answer at once while it
 /// reads again, rather than a column of "Counting…".
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct DatasetOverviewMemory {
-    facts: Signal<HashMap<String, DatasetFacts>>,
+    facts: Signal<HashMap<DatasetSelection, DatasetFacts>>,
 }
 
 impl DatasetOverviewMemory {
@@ -107,13 +109,12 @@ impl DatasetOverviewMemory {
         consume_context()
     }
     fn facts(self, dataset: &DatasetSelection) -> Option<DatasetFacts> {
-        self.facts.read().get(&dataset.sql_name()).cloned()
+        self.facts.read().get(dataset).cloned()
     }
     /// Keep `answer` as `dataset`'s, unless it already is.
     fn remember(mut self, dataset: &DatasetSelection, answer: &DatasetFacts) {
-        let key = dataset.sql_name();
-        if self.facts.peek().get(&key) != Some(answer) {
-            self.facts.write().insert(key, answer.clone());
+        if self.facts.peek().get(dataset) != Some(answer) {
+            self.facts.write().insert(dataset.clone(), answer.clone());
         }
     }
 }
@@ -125,34 +126,62 @@ pub(in crate::activities) fn DatasetOverview(
     listing: EpisodeListing,
     /// Opens an episode a finding names, where the finding is.
     on_open: EventHandler<CheckedEpisode>,
+    /// Given, the head offers Delete, and this hears once the dataset is
+    /// gone; Data's Overview gives it, Curation's Dataset node does not.
+    on_deleted: Option<EventHandler<()>>,
 ) -> Element {
     // The totals belong to this dataset alone: choosing another one
-    // re-queries instead of keeping the first answer under a new name.
-    let facts = use_resource(use_reactive((&listing,), |(listing,)| async move {
-        DatasetFacts::read(&listing).await
+    // re-queries, and each answer carries the dataset it was read for, since
+    // the previous dataset's stays readable until the new one arrives.
+    let read = use_resource(use_reactive((&listing,), |(listing,)| async move {
+        let answer = DatasetFacts::read(&listing).await;
+        (listing.dataset().clone(), answer)
     }));
     let dataset = listing.dataset().clone();
-    // Once read, the totals are the dataset's last answer; until they are
-    // read the last answer stands in for them.
+    // Once read, the totals are their dataset's last answer; until this
+    // dataset's are read, its own last answer stands in for them.
     let memory = DatasetOverviewMemory::current();
-    let remembered = dataset.clone();
     use_effect(move || {
-        if let Some(Ok(answer)) = &*facts.read() {
-            memory.remember(&remembered, answer);
+        if let Some((read_for, Ok(answer))) = &*read.read() {
+            memory.remember(read_for, answer);
         }
     });
-    let facts = facts
+    let facts = read
         .read()
-        .clone()
+        .as_ref()
+        .filter(|(read_for, _)| *read_for == dataset)
+        .map(|(_, answer)| answer.clone())
         .or_else(|| memory.facts(&dataset).map(Ok));
     let name = dataset.display_name();
-    let sql_name = dataset.sql_name();
+    let label = dataset.label();
+    // The dataset Delete is asking about: the Overview shows one dataset after
+    // another, and choosing another one leaves the question unasked.
+    let mut confirming = use_signal(|| None::<DatasetSelection>);
+    let asking = confirming.read().as_ref() == Some(&dataset);
+    let delete_id = format!("data-overview-delete-{}", dataset.id());
+    let asked = dataset.clone();
     rsx! {
         section { class: "data-overview", "aria-label": "Dataset overview",
             div { class: "data-overview-body",
                 header { class: "data-overview-head",
                     KindMark { class: "data-overview-mark", letter: 'D', hue: "var(--tone-kind-dataset)", label: "Dataset" }
-                    h2 { title: "{sql_name}", "{name}" }
+                    h2 { title: "{label}", "{name}" }
+                    if on_deleted.is_some() && !asking {
+                        Button { id: delete_id.clone(), purpose: ActionPurpose::Delete, variant: ButtonVariant::Link,
+                            size: ButtonSize::Compact, class: "data-overview-head-action",
+                            title: "Delete {label}",
+                            onclick: move |_| confirming.set(Some(asked.clone())), "Delete" }
+                    }
+                }
+                if let Some(on_deleted) = on_deleted.filter(|_| asking) {
+                    DeleteConfirmation { dataset: dataset.clone(), return_focus: delete_id,
+                        on_done: move |deleted: bool| {
+                            confirming.set(None);
+                            if deleted {
+                                on_deleted.call(());
+                            }
+                        },
+                    }
                 }
                 match &facts {
                     Some(Err(error)) => rsx! { p { class: "data-overview-alert", role: "alert", "{error}" } },
@@ -180,13 +209,60 @@ pub(in crate::activities) fn DatasetOverview(
     }
 }
 
+/// Whether to delete the dataset, asked under its head: confirmed, every
+/// table of it is dropped, and the catalog is read again. `on_done` says
+/// whether it was deleted.
+#[component]
+fn DeleteConfirmation(
+    dataset: DatasetSelection,
+    return_focus: String,
+    on_done: EventHandler<bool>,
+) -> Element {
+    let studio = StudioProjectState::current();
+    let mut pending = use_signal(|| false);
+    let name = dataset.display_name().to_owned();
+    rsx! {
+        InlineConfirmation {
+            id: "data-overview-delete-confirmation",
+            class: "data-overview-confirmation",
+            copy: ConfirmationCopy::new(
+                format!("Delete dataset {name}? Its episodes, recordings and answers will be permanently removed."),
+                if pending() { "Deleting…" } else { "Delete dataset" },
+                "Keep dataset",
+            ),
+            response: ConfirmationResponse::new(
+                ActionPurpose::Delete,
+                move |_| {
+                    pending.set(true);
+                    let dataset = dataset.clone();
+                    spawn(async move {
+                        let outcome = DatasetClient::current().delete_dataset(&dataset).await;
+                        pending.set(false);
+                        let deleted = outcome.is_ok();
+                        match outcome {
+                            Ok(()) => {
+                                CatalogRefresh::request();
+                                studio.report_success(format!("Deleted {}", dataset.display_name()));
+                            }
+                            Err(error) => studio.report(error.to_string()),
+                        }
+                        on_done.call(deleted);
+                    });
+                },
+                move |_| on_done.call(false),
+            ),
+            dismissal: ConfirmationDismissal::new(return_focus).with_pending(pending()),
+        }
+    }
+}
+
 /// Every dataset in the project, before one is chosen: one ledger row each,
 /// with the totals that tell them apart. Import stays in the rail; an empty
 /// project offers it here too, as the one thing to do.
 #[component]
 pub(super) fn DatasetsAtAGlance(
-    datasets: Vec<DatasetSelection>,
-    on_select: EventHandler<DatasetSelection>,
+    datasets: Vec<EpisodeListing>,
+    on_select: EventHandler<EpisodeListing>,
     on_import: EventHandler<()>,
 ) -> Element {
     rsx! {
@@ -214,8 +290,8 @@ pub(super) fn DatasetsAtAGlance(
 /// for a dataset offers them — Data's home, and a curation that has none yet.
 #[component]
 pub(crate) fn DatasetLedger(
-    datasets: Vec<DatasetSelection>,
-    on_select: EventHandler<DatasetSelection>,
+    datasets: Vec<EpisodeListing>,
+    on_select: EventHandler<EpisodeListing>,
 ) -> Element {
     rsx! {
         div { class: "data-ledger-card",
@@ -229,8 +305,8 @@ pub(crate) fn DatasetLedger(
                     th { "Span" }
                 } }
                 tbody {
-                    for (index, dataset) in datasets.into_iter().enumerate() {
-                        DatasetRow { key: "{dataset.sql_name()}", dataset, order: index, on_select }
+                    for (index, listing) in datasets.into_iter().enumerate() {
+                        DatasetRow { key: "{listing.dataset().id()}", listing, order: index, on_select }
                     }
                 }
             }
@@ -240,16 +316,15 @@ pub(crate) fn DatasetLedger(
 
 #[component]
 fn DatasetRow(
-    dataset: DatasetSelection,
+    listing: EpisodeListing,
     order: usize,
-    on_select: EventHandler<DatasetSelection>,
+    on_select: EventHandler<EpisodeListing>,
 ) -> Element {
-    // A row knows only the dataset's name, so it asks which producer made it
-    // before reading the totals that producer records.
-    let facts = use_resource(use_reactive((&dataset,), |(dataset,)| async move {
-        let listing = EpisodeListing::read(&dataset).await.ok()?;
+    // The totals are read as the dataset's format records them.
+    let facts = use_resource(use_reactive((&listing,), |(listing,)| async move {
         DatasetFacts::read(&listing).await.ok()
     }));
+    let dataset = listing.dataset().clone();
     let memory = DatasetOverviewMemory::current();
     let remembered = dataset.clone();
     use_effect(move || {
@@ -264,12 +339,12 @@ fn DatasetRow(
         .or_else(|| memory.facts(&dataset));
     let read = facts.is_some();
     let cell = |label: fn(&DatasetFacts) -> Option<String>| facts.as_ref().and_then(label);
-    let chosen = dataset.clone();
-    let open = dataset.clone();
+    let chosen = listing.clone();
+    let open = listing.clone();
     rsx! {
         tr { class: "data-glance-row", style: "--i: {order}", onclick: move |_| on_select.call(chosen.clone()),
             td {
-                button { r#type: "button", class: "data-glance-name", title: "{dataset.sql_name()}",
+                button { r#type: "button", class: "data-glance-name", title: "{dataset.label()}",
                     onclick: move |event: MouseEvent| { event.stop_propagation(); on_select.call(open.clone()); },
                     KindMark { letter: 'D', hue: "var(--tone-kind-dataset)", label: "Dataset" }
                     span { "{dataset.display_name()}" }
@@ -322,12 +397,16 @@ mod tests {
         let simulated: DatasetFacts =
             serde_json::from_value(serde_json::json!({"first_start": 5, "last_end": 9})).unwrap();
         assert_eq!(simulated.span_label(), None);
-        let mcap = EpisodeListing::mcap_fixture("owner's data");
-        assert!(DatasetFacts::sql(&mcap).contains("'owner''s data'"));
-        assert!(DatasetFacts::sql(&mcap).contains("sum(source.size) AS bytes"));
+        let mcap = EpisodeListing::mcap_fixture("bench");
+        assert_eq!(
+            DatasetFacts::sql(&mcap),
+            "SELECT count(*) AS episodes, sum(duration_ns) AS duration_ns, sum(source_bytes) AS bytes, \
+             min(message_start_time) AS first_start, max(message_end_time) AS last_end \
+             FROM \"datasets.bench.episodes\""
+        );
         let lerobot = EpisodeListing::new(
-            DatasetSelection::new(vec!["so101".into()]).unwrap(),
-            DatasetProducer::LeRobot,
+            DatasetSelection::new("so101").unwrap(),
+            DatasetFormat::LeRobot,
         );
         assert!(!DatasetFacts::sql(&lerobot).contains("source"));
     }

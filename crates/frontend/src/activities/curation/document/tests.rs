@@ -301,7 +301,7 @@ fn a_select_chooses_the_same_categories_through_every_edit_of_them() {
 
 #[test]
 fn a_select_reads_only_nodes_above_it_of_the_kind_each_condition_reads() {
-    let mut payload = CurationGraph::new(Some(EpisodeListing::mcap_fixture("dataset_bottles")));
+    let mut payload = CurationGraph::new(Some(EpisodeListing::mcap_fixture("bottles")));
     let mut tracking = ObjectTracking::default();
     tracking.set_prompt("bottle");
     let track = payload
@@ -394,12 +394,12 @@ fn a_select_reads_only_nodes_above_it_of_the_kind_each_condition_reads() {
 }
 
 /// A LeRobot episode has no file or channels of its own, so a Select over a
-/// LeRobot dataset offers only the facts its producer records.
+/// LeRobot dataset offers only the facts its format records.
 #[test]
 fn a_select_offers_only_the_facts_its_dataset_records() {
     let lerobot = EpisodeListing::new(
-        DatasetSelection::new(vec!["dataset_so101".into()]).unwrap(),
-        spiral_robotics_common::datasets::DatasetProducer::LeRobot,
+        DatasetSelection::new("so101").unwrap(),
+        spiral_robotics_common::datasets::DatasetFormat::LeRobot,
     );
     let mut payload = CurationGraph::new(Some(lerobot));
     let keep = payload.add_child(DATASET_NODE_ID, select()).unwrap();
@@ -562,8 +562,17 @@ fn every_node_saves_its_recipe_and_nothing_it_read() {
         serde_json::json!({"id": "score_progress-1", "kind": {"type": "score_progress"}})
     );
     // What earlier encodings stored is refused rather than carried: a rule on
-    // a model node, and a Select without its conditions.
+    // a model node, a Select without its conditions, and a row asked about by
+    // its episode's UUID rather than its number.
+    let asked_about = |episode: &str| {
+        format!(
+            r#"{{"nodes":[{{"id":"dataset","kind":{{"type":"dataset"}}}},{{"id":"a","kind":{{"type":"break_down_subtasks","sample_interval_seconds":0.5}}}},{{"id":"s","kind":{{"type":"find_similar_subtasks","query":"fold","source":{{"episode":{episode},"start_time":0.0}}}}}}],"edges":[{{"from":"dataset","to":"a"}},{{"from":"a","to":"s"}}]}}"#
+        )
+    };
+    assert!(CurationGraph::decode(CURATION_ENCODING_VERSION, &asked_about("12")).is_ok());
+    let asked_about_a_uuid = asked_about(r#""01a0989fb6557788a2dd36342635e3d1""#);
     for stored in [
+        asked_about_a_uuid.as_str(),
         r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"m","kind":{"type":"score_progress"},"keeps":{"keep":"progressing","minimum":0.5}}],"edges":[{"from":"dataset","to":"m"}]}"#,
         r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"s","kind":{"type":"select"}}],"edges":[{"from":"dataset","to":"s"}]}"#,
         r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"t","kind":{"type":"track_objects","camera":"/top","prompt":"bottle"}}],"edges":[{"from":"dataset","to":"t"}]}"#,
@@ -579,7 +588,7 @@ fn every_node_saves_its_recipe_and_nothing_it_read() {
 /// A graph over a dataset with two Selects over whole episodes: longer and
 /// shorter ones.
 fn two_outputs() -> (CurationGraph, String, String) {
-    let mut payload = CurationGraph::new(Some(EpisodeListing::mcap_fixture("dataset_abc130k")));
+    let mut payload = CurationGraph::new(Some(EpisodeListing::mcap_fixture("abc130k")));
     let mut add = |comparison| {
         let id = payload.add_child(DATASET_NODE_ID, select()).unwrap();
         payload
@@ -648,7 +657,7 @@ fn a_view_is_current_while_its_node_compiles_to_it() {
 
 #[test]
 fn an_edit_above_a_node_on_its_path_puts_its_view_out_of_date() {
-    let mut payload = CurationGraph::new(Some(EpisodeListing::mcap_fixture("dataset_abc130k")));
+    let mut payload = CurationGraph::new(Some(EpisodeListing::mcap_fixture("abc130k")));
     let mut tracking = ObjectTracking::default();
     tracking.set_camera(Some("/top-camera".to_owned()));
     tracking.set_prompt("bottle");

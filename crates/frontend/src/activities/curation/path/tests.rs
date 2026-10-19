@@ -5,13 +5,13 @@ use crate::activities::curation::document::{
     SubtaskCategory, SubtaskGrouping, SubtaskSearch,
 };
 use crate::activities::curation::score_progress::ProgressScorer;
-use crate::activities::episode::EpisodeTask;
-use spiral_robotics_common::curation::{AnswerSource, FillEpisodes};
+use spiral_robotics_common::curation::{AnswerSource, CategoryDefinition, FillEpisodes};
+use spiral_robotics_common::datasets::EpisodeTask;
 use spiral_robotics_common::sql::{ReadOnlyQuery, ReadOnlyQueryMode};
 
 fn graph() -> CurationGraph {
     CurationGraph::new(Some(
-        crate::activities::episode::EpisodeListing::mcap_fixture("dataset_abc130k"),
+        crate::activities::episode::EpisodeListing::mcap_fixture("abc130k"),
     ))
 }
 
@@ -46,8 +46,9 @@ fn published(graph: &CurationGraph, node: &str) -> String {
     CurationPath::to(graph, node).unwrap().statement().unwrap()
 }
 
+/// What `node`'s preview of two listed episodes reads.
 fn preview(graph: &CurationGraph, node: &str) -> String {
-    CurationPath::to(graph, node).unwrap().preview().unwrap()
+    CurationPath::to(graph, node).unwrap().preview(2).unwrap()
 }
 
 /// A Break down node on the top camera of a dataset that records the
@@ -106,7 +107,16 @@ fn column(graph: &CurationGraph, node: &str) -> String {
         .to_string()
 }
 
-const ANSWERS: &str = "\"dataset_answers_abc130k\"";
+/// The table of `graph`'s answer column `column`.
+fn answers(graph: &CurationGraph, column: &str) -> String {
+    let column = AnswerColumn::try_from(column.to_owned()).unwrap();
+    graph
+        .listing()
+        .unwrap()
+        .dataset()
+        .answers(&column)
+        .to_string()
+}
 
 #[test]
 fn a_select_on_duration_keeps_whole_episodes_and_publishes_the_dataset_table() {
@@ -120,7 +130,7 @@ fn a_select_on_duration_keeps_whole_episodes_and_publishes_the_dataset_table() {
     assert_eq!(
         published(&graph, &long),
         "WITH
-  dataset AS (SELECT episode_id, start_ns AS origin_ns, [STRUCT_PACK(start_ns := start_ns, end_ns := end_ns)] AS kept, duration_seconds, messages, channels, size_megabytes FROM (SELECT id AS episode_id, CAST(message_start_time AS BIGINT) AS start_ns, CAST(message_start_time + duration_ns AS BIGINT) AS end_ns, CAST(duration_ns AS DOUBLE) / 1e9 AS duration_seconds, message_count AS messages, channel_count AS channels, CAST(source_bytes AS DOUBLE) / 1e6 AS size_megabytes FROM (SELECT id, source.uri AS source_uri, source.size AS source_bytes, message_count, message_start_time, duration_ns, channel_count FROM spql.mcap.episodes('dataset_abc130k')) listed) spans),
+  dataset AS (SELECT episode_id, start_ns AS origin_ns, make_array(named_struct('start_ns', start_ns, 'end_ns', end_ns)) AS kept, duration_seconds, messages, channels, size_megabytes FROM (SELECT id AS episode_id, CAST(message_start_time AS BIGINT) AS start_ns, CAST(message_start_time + duration_ns AS BIGINT) AS end_ns, CAST(duration_ns AS DOUBLE) / 1e9 AS duration_seconds, message_count AS messages, channel_count AS channels, CAST(source_bytes AS DOUBLE) / 1e6 AS size_megabytes FROM (SELECT id, source_uri, source_bytes, message_count, message_start_time, duration_ns, channel_count FROM \"datasets.abc130k.episodes\") listed) spans),
   select_1_numbers AS (SELECT r.episode_id, r.kept, d.duration_seconds AS number_0 FROM dataset r JOIN dataset d ON d.episode_id = r.episode_id),
   select_1 AS (SELECT episode_id, kept FROM select_1_numbers WHERE number_0 >= CAST(10 AS DOUBLE))
 SELECT r.episode_id, r.kept, d.duration_seconds, d.messages, d.channels, d.size_megabytes FROM select_1 r JOIN dataset d ON d.episode_id = r.episode_id"
@@ -156,19 +166,20 @@ fn the_fastest_quarter_by_duration_per_bottle_ranks_every_reaching_episode() {
         ))],
     );
     let tracks = column(&graph, &track);
+    let stored = answers(&graph, &tracks);
     let published = published(&graph, &fastest);
     for step in [
         format!(
-            "episodes AS (SELECT d.episode_id, d.origin_ns, a.{tracks}.value AS {tracks} FROM dataset d JOIN {ANSWERS} a ON a.episode_id = d.episode_id)"
+            "episodes AS (SELECT d.episode_id, d.origin_ns, a0.value AS {tracks} FROM dataset d LEFT JOIN {stored} a0 ON a0.episode_id = d.episode_id)"
         ),
         // The tracks, a picture at a time in log time, folded per episode.
         format!(
-            "track_objects_1_entries AS (SELECT r.episode_id, r.origin_ns + CAST(p.timestamp_ns AS BIGINT) AS timestamp_ns, p.objects AS objects FROM episodes r CROSS JOIN LATERAL UNNEST(r.{tracks}) p)"
+            "track_objects_1_entries AS (SELECT u.episode_id, u.origin_ns + CAST(u.p.timestamp_ns AS BIGINT) AS timestamp_ns, u.p.objects AS objects FROM (SELECT r.episode_id, r.origin_ns, unnest(r.{tracks}) AS p FROM episodes r) u)"
         ),
-        "track_objects_1 AS (SELECT episode_id, spql.list.collect(STRUCT_PACK(timestamp_ns := timestamp_ns, objects := objects)) AS track_objects_1 FROM (SELECT * FROM track_objects_1_entries ORDER BY episode_id, timestamp_ns) ordered GROUP BY episode_id)".to_owned(),
+        "track_objects_1 AS (SELECT episode_id, array_agg(named_struct('timestamp_ns', timestamp_ns, 'objects', objects) ORDER BY timestamp_ns) AS track_objects_1 FROM track_objects_1_entries GROUP BY episode_id)".to_owned(),
         // Each reaching episode's duration per the most bottles one picture held.
-        "select_1_numbers AS (SELECT r.episode_id, r.kept, CASE WHEN m0.most > 0 THEN d.duration_seconds / CAST(m0.most AS DOUBLE) END AS number_0 FROM dataset r JOIN dataset d ON d.episode_id = r.episode_id LEFT JOIN (SELECT episode_id, MAX(spql.list.len(objects)) AS most FROM track_objects_1_entries GROUP BY episode_id) m0 ON m0.episode_id = r.episode_id)".to_owned(),
-        "select_1_ranked AS (SELECT episode_id, kept, number_0, CAST(RANK() OVER (PARTITION BY number_0 IS NULL ORDER BY number_0) - 1 AS DOUBLE) / CAST(GREATEST(COUNT(number_0) OVER (PARTITION BY number_0 IS NULL), 2) - 1 AS DOUBLE) AS rank_0 FROM select_1_numbers)".to_owned(),
+        "select_1_numbers AS (SELECT r.episode_id, r.kept, CASE WHEN m0.most > 0 THEN d.duration_seconds / CAST(m0.most AS DOUBLE) END AS number_0 FROM dataset r JOIN dataset d ON d.episode_id = r.episode_id LEFT JOIN (SELECT episode_id, MAX(cardinality(objects)) AS most FROM track_objects_1_entries GROUP BY episode_id) m0 ON m0.episode_id = r.episode_id)".to_owned(),
+        "select_1_ranked AS (SELECT episode_id, kept, number_0, PERCENT_RANK() OVER (PARTITION BY number_0 IS NULL ORDER BY number_0) AS rank_0 FROM select_1_numbers)".to_owned(),
         "select_1 AS (SELECT episode_id, kept FROM select_1_ranked WHERE number_0 IS NOT NULL AND rank_0 <= CAST(0.25 AS DOUBLE))".to_owned(),
     ] {
         assert!(published.contains(&step), "{step}\n{published}");
@@ -197,15 +208,17 @@ fn the_fastest_quarter_by_duration_per_bottle_ranks_every_reaching_episode() {
         reaching.ends_with("\nSELECT episode_id FROM dataset"),
         "{reaching}"
     );
-    // The preview reads how many bottles each picture of the bound episode
-    // held, never the boxes.
+    // The preview reads how many bottles each picture of the listed
+    // episodes held, never the boxes.
     let counting = preview(&graph, &track);
     assert!(counting.contains(&format!(
-        "episodes AS (SELECT e.id AS episode_id, CAST(e.message_start_time AS BIGINT) AS origin_ns, a.{tracks}.value AS {tracks} FROM spql.mcap.episodes('dataset_abc130k') e JOIN {ANSWERS} a ON a.episode_id = e.id WHERE e.id = $1)"
+        "episodes AS (SELECT e.id AS episode_id, CAST(e.message_start_time AS BIGINT) AS origin_ns, a0.value AS {tracks} FROM \"datasets.abc130k.episodes\" e LEFT JOIN {stored} a0 ON a0.episode_id = e.id WHERE e.id IN ($1, $2))"
     )));
     assert!(counting.ends_with(
-        "\nSELECT timestamp_ns, spql.list.len(objects) AS value FROM track_objects_1_entries"
+        "\nSELECT episode_id, timestamp_ns, cardinality(objects) AS value FROM track_objects_1_entries"
     ));
+    let path = CurationPath::to(&graph, &track).unwrap();
+    assert!(path.preview(0).is_err(), "a preview lists an episode");
     admitted(&published, &counting);
     // The rate is part of the call: another rate is another column.
     if let CurationNodeKind::TrackObjects(tracking) = graph.node_mut(&track).unwrap().kind_mut() {
@@ -234,29 +247,27 @@ fn a_progress_rate_narrows_kept_to_the_stretches_progressing_fast_enough() {
     let published = published(&graph, &moving);
     for step in [
         format!(
-            "score_progress_1_entries AS (SELECT r.episode_id, r.origin_ns + CAST(p.timestamp_ns AS BIGINT) AS timestamp_ns, CASE WHEN p.support > 0 AND NOT isnan(p.velocity) THEN p.velocity END AS progress_rate FROM episodes r CROSS JOIN LATERAL UNNEST(r.{scores}) p)"
+            "score_progress_1_entries AS (SELECT u.episode_id, u.origin_ns + CAST(u.p.timestamp_ns AS BIGINT) AS timestamp_ns, CASE WHEN u.p.support > 0 AND NOT isnan(u.p.velocity) THEN u.p.velocity END AS progress_rate FROM (SELECT r.episode_id, r.origin_ns, unnest(r.{scores}) AS p FROM episodes r) u)"
         ),
-        "score_progress_1 AS (SELECT episode_id, spql.list.collect(STRUCT_PACK(timestamp_ns := timestamp_ns, progress_rate := progress_rate)) AS score_progress_1 FROM (SELECT * FROM score_progress_1_entries ORDER BY episode_id, timestamp_ns) ordered GROUP BY episode_id)".to_owned(),
+        "score_progress_1 AS (SELECT episode_id, array_agg(named_struct('timestamp_ns', timestamp_ns, 'progress_rate', progress_rate) ORDER BY timestamp_ns) AS score_progress_1 FROM score_progress_1_entries GROUP BY episode_id)".to_owned(),
         // No episode condition: the Select's input is the dataset's reach.
-        "select_1_unnested AS (SELECT p.episode_id, k.start_ns, k.end_ns FROM dataset p CROSS JOIN LATERAL UNNEST(p.kept) k)".to_owned(),
+        "select_1_unnested AS (SELECT u.episode_id, u.k.start_ns AS start_ns, u.k.end_ns AS end_ns FROM (SELECT r.episode_id, unnest(r.kept) AS k FROM dataset r) u)".to_owned(),
         "select_1_within_0_moments AS (SELECT episode_id, timestamp_ns AS start_ns, COALESCE(LEAD(timestamp_ns) OVER (PARTITION BY episode_id ORDER BY timestamp_ns), timestamp_ns + (timestamp_ns - LAG(timestamp_ns) OVER (PARTITION BY episode_id ORDER BY timestamp_ns))) AS end_ns, progress_rate AS value, ROW_NUMBER() OVER (PARTITION BY episode_id ORDER BY timestamp_ns) AS position FROM score_progress_1_entries)".to_owned(),
         "FROM select_1_within_0_moments WHERE end_ns > start_ns AND (value IS NULL OR value >= CAST(0.2 AS DOUBLE)))".to_owned(),
         "select_1_within_0 AS (SELECT episode_id, MIN(start_ns) AS start_ns, MAX(end_ns) AS end_ns FROM select_1_within_0_passing GROUP BY episode_id, stretch)".to_owned(),
         "select_1_kept_0 AS (SELECT k.episode_id, GREATEST(k.start_ns, w.start_ns) AS start_ns, LEAST(k.end_ns, w.end_ns) AS end_ns FROM select_1_unnested k JOIN select_1_within_0 w ON w.episode_id = k.episode_id AND w.start_ns < k.end_ns AND w.end_ns > k.start_ns)".to_owned(),
         // Ranges that overlap or touch fold into one.
         "select_1_islands AS (SELECT episode_id, start_ns, end_ns, SUM(opens) OVER (PARTITION BY episode_id ORDER BY start_ns, end_ns ROWS UNBOUNDED PRECEDING) AS island FROM (SELECT episode_id, start_ns, end_ns, CASE WHEN start_ns <= MAX(end_ns) OVER (PARTITION BY episode_id ORDER BY start_ns, end_ns ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) THEN 0 ELSE 1 END AS opens FROM select_1_kept_0) flagged)".to_owned(),
-        "select_1 AS (SELECT episode_id, spql.list.collect(STRUCT_PACK(start_ns := start_ns, end_ns := end_ns)) AS kept FROM (SELECT episode_id, MIN(start_ns) AS start_ns, MAX(end_ns) AS end_ns FROM select_1_islands GROUP BY episode_id, island ORDER BY episode_id, start_ns) ordered GROUP BY episode_id)".to_owned(),
+        "select_1 AS (SELECT episode_id, array_agg(named_struct('start_ns', start_ns, 'end_ns', end_ns) ORDER BY start_ns) AS kept FROM (SELECT episode_id, MIN(start_ns) AS start_ns, MAX(end_ns) AS end_ns FROM select_1_islands GROUP BY episode_id, island) merged GROUP BY episode_id)".to_owned(),
     ] {
         assert!(published.contains(&step), "{step}\n{published}");
     }
-    // The preview reads the bound episode's frames and their rates.
+    // The preview reads the listed episodes' frames and their rates.
     let scoring = preview(&graph, &score);
-    assert!(
-        scoring.ends_with(
-            "\nSELECT timestamp_ns, progress_rate AS value FROM score_progress_1_entries"
-        )
-    );
-    assert!(!scoring.contains("spql.ai.") && !scoring.contains("read_topic"));
+    assert!(scoring.ends_with(
+        "\nSELECT episode_id, timestamp_ns, progress_rate AS value FROM score_progress_1_entries"
+    ));
+    assert!(!scoring.contains("\"messages\""));
     admitted(&published, &scoring);
     let fills = CurationPath::to(&graph, &moving).unwrap().fills().unwrap();
     assert_eq!(
@@ -271,7 +282,7 @@ fn a_progress_rate_narrows_kept_to_the_stretches_progressing_fast_enough() {
 }
 
 #[test]
-fn stored_answers_keep_the_columns_they_were_stored_in() {
+fn each_call_names_the_column_it_is_stored_in() {
     let mut graph = graph();
     let score = child(
         &mut graph,
@@ -281,15 +292,15 @@ fn stored_answers_keep_the_columns_they_were_stored_in() {
     let annotate = child(&mut graph, &score, breakdown());
     let search = child(&mut graph, &annotate, searching("fold the towel"));
     let group = child(&mut graph, &annotate, grouping(&["fold", "grasp"]));
-    // The same calls as before the table had one row per episode, hashed
-    // alike, so what they stored is read without asking again.
+    // A call always hashes to the same column, so what it stored is read
+    // without asking again.
     assert_eq!(
         [&score, &annotate, &search, &group].map(|node| column(&graph, node)),
         [
             "score_progress_67aae2",
-            "breakdown_task_16f1c2",
-            "similarity_f0ec97",
-            "subtask_category_9c254b"
+            "break_down_2c3345",
+            "similarity_9f8877",
+            "subtask_category_be7603"
         ]
     );
 }
@@ -304,47 +315,51 @@ fn a_breakdown_reads_each_episode_whole_and_lists_its_subtasks_in_log_time() {
     );
     let annotate = child(&mut graph, &long, breakdown());
     let subtasks = column(&graph, &annotate);
-    assert!(subtasks.starts_with("breakdown_task_"));
+    assert!(subtasks.starts_with("break_down_"));
     let published = published(&graph, &annotate);
     for step in [
         format!(
-            "break_down_subtasks_1_listed AS (SELECT r.episode_id, r.origin_ns, g._ AS subtask_index, spql.list.get(r.{subtasks}, g._) AS listed FROM episodes r CROSS JOIN LATERAL spql.range(CAST(spql.list.len(r.{subtasks}) AS BIGINT)) g)"
+            "break_down_subtasks_1_listed AS (SELECT g.episode_id, g.origin_ns, g.subtask_index, array_element(g.{subtasks}, g.subtask_index + 1) AS listed FROM (SELECT r.episode_id, r.origin_ns, r.{subtasks}, unnest(range(cardinality(r.{subtasks}))) AS subtask_index FROM episodes r) g)"
         ),
         "break_down_subtasks_1_entries AS (SELECT l.episode_id, l.subtask_index, l.listed.description AS description, l.origin_ns + CAST(l.listed.start_ns AS BIGINT) AS start_ns, l.origin_ns + CAST(l.listed.end_ns AS BIGINT) AS end_ns FROM break_down_subtasks_1_listed l)".to_owned(),
-        "spql.list.collect(STRUCT_PACK(description := description, start_ns := start_ns, end_ns := end_ns)) AS break_down_subtasks_1 FROM (SELECT * FROM break_down_subtasks_1_entries ORDER BY episode_id, subtask_index) ordered GROUP BY episode_id)".to_owned(),
+        "array_agg(named_struct('description', description, 'start_ns', start_ns, 'end_ns', end_ns) ORDER BY subtask_index) AS break_down_subtasks_1 FROM break_down_subtasks_1_entries GROUP BY episode_id)".to_owned(),
     ] {
         assert!(published.contains(&step), "{step}\n{published}");
     }
     // A model node keeps nothing, so its view is what reaches it.
     assert!(published.contains(" FROM select_1 r JOIN dataset d"));
-    assert!(!published.contains("spql.ai.") && !published.contains("read_topic"));
-    // Its fill asks the model about the episode bound as `$1` whole, from
-    // the chosen camera, with its first instruction as the task, of the
-    // episodes the Select keeps.
+    assert!(!published.contains("\"messages\""));
+    // Its fill asks the model about each episode the Select keeps whole,
+    // from the chosen camera, with its first instruction as the task.
     let fills = CurationPath::to(&graph, &annotate)
         .unwrap()
         .fills()
         .unwrap();
-    let AnswerSource::Statement { statement } = fills[0].source() else {
-        panic!("Break down is filled by a statement")
+    let AnswerSource::BreakDown(call) = fills[0].source() else {
+        panic!("Break down is filled by its model call")
     };
-    assert!(statement.contains("spql.mcap.read_topic('dataset_abc130k', '/top-camera')"));
-    assert!(statement.contains(
-        "spql.ai.breakdown_task(camera_video_1.source, sample_interval => 0.5, model => 'google/gemini-3.8-flash', task => instruction_1.task)"
-    ));
-    assert!(statement.ends_with(&format!(
-        "\nSELECT episode_id, {subtasks} AS answer FROM episodes"
-    )));
+    assert_eq!(
+        (
+            call.camera(),
+            call.sample_interval().seconds(),
+            call.model()
+        ),
+        ("/top-camera", 0.5, "google/gemini-3.8-flash")
+    );
+    assert_eq!(
+        call.task(),
+        Some(&EpisodeTask::Recorded("/instruction".to_owned()))
+    );
     let FillEpisodes::Reaching(reaching) = fills[0].episodes() else {
         panic!("a published fill asks what reaches the node")
     };
     assert!(reaching.ends_with("\nSELECT episode_id FROM select_1"));
-    // The preview reads the bound episode's stored subtasks.
+    // The preview reads the listed episodes' stored subtasks.
     let breaking = preview(&graph, &annotate);
     assert!(breaking.ends_with(
         "\nSELECT episode_id, description, start_ns, end_ns FROM break_down_subtasks_1_entries"
     ));
-    assert!(!breaking.contains("spql.ai.") && !breaking.contains("select_1"));
+    assert!(!breaking.contains("select_1"));
     admitted(&published, &breaking);
 
     // A dataset that records no instruction asks without a task, and that
@@ -374,42 +389,36 @@ fn a_search_lists_every_subtask_with_its_similarity_and_a_select_keeps_the_close
     let published = published(&graph, &close);
     for step in [
         format!(
-            "find_similar_subtasks_1_listed AS (SELECT r.episode_id, r.origin_ns, g._ AS subtask_index, spql.list.get(r.{subtasks}, g._) AS listed, spql.list.get(r.{similarities}, g._) AS judgment FROM episodes r CROSS JOIN LATERAL spql.range(CAST(spql.list.len(r.{subtasks}) AS BIGINT)) g)"
+            "find_similar_subtasks_1_listed AS (SELECT g.episode_id, g.origin_ns, g.subtask_index, array_element(g.{subtasks}, g.subtask_index + 1) AS listed, array_element(g.{similarities}, g.subtask_index + 1) AS judgment FROM (SELECT r.episode_id, r.origin_ns, r.{subtasks}, r.{similarities}, unnest(range(cardinality(r.{subtasks}))) AS subtask_index FROM episodes r) g)"
         ),
         ", l.judgment AS similarity FROM find_similar_subtasks_1_listed l)".to_owned(),
-        "spql.list.collect(STRUCT_PACK(start_ns := start_ns, end_ns := end_ns, similarity := similarity)) AS find_similar_subtasks_1".to_owned(),
+        "array_agg(named_struct('start_ns', start_ns, 'end_ns', end_ns, 'similarity', similarity) ORDER BY subtask_index) AS find_similar_subtasks_1".to_owned(),
         "select_1_within_0 AS (SELECT episode_id, start_ns, end_ns FROM find_similar_subtasks_1_entries WHERE similarity >= CAST(0.7 AS DOUBLE))".to_owned(),
     ] {
         assert!(published.contains(&step), "{step}\n{published}");
     }
     // The stored subtasks and similarities are each read once on the row.
     for stored in [&subtasks, &similarities] {
-        assert_eq!(published.matches(&format!("a.{stored}.value")).count(), 1);
+        let table = answers(&graph, stored);
+        assert_eq!(published.matches(&format!("LEFT JOIN {table} ")).count(), 1);
     }
     assert!(published.ends_with(
         ", break_down_subtasks_1.break_down_subtasks_1, find_similar_subtasks_1.find_similar_subtasks_1 FROM select_1 r JOIN dataset d ON d.episode_id = r.episode_id LEFT JOIN break_down_subtasks_1 ON break_down_subtasks_1.episode_id = r.episode_id LEFT JOIN find_similar_subtasks_1 ON find_similar_subtasks_1.episode_id = r.episode_id"
     ));
-    // Its fill judges each subtask the Break down stored for the episode
-    // bound as `$1`, collected in their order.
+    // Its fill judges each subtask the Break down stored for an episode.
     let fills = CurationPath::to(&graph, &close).unwrap().fills().unwrap();
-    let AnswerSource::Statement { statement } = fills[1].source() else {
-        panic!("a judgment is filled by a statement")
+    let AnswerSource::Similarity(call) = fills[1].source() else {
+        panic!("Find similar is filled by its model call")
     };
+    assert_eq!(call.subtasks().as_str(), subtasks);
     assert_eq!(
-        statement,
-        &format!(
-            "WITH e AS (SELECT a.episode_id, a.{subtasks}.value AS subtasks FROM {ANSWERS} a WHERE a.episode_id = $1), \
-             s AS (SELECT e.episode_id, spql.list.get(e.subtasks, g._) AS listed \
-             FROM e CROSS JOIN LATERAL spql.range(CAST(spql.list.len(e.subtasks) AS BIGINT)) g) \
-             SELECT s.episode_id, spql.list.collect(spql.ai.similarity(s.listed.description, 'fold the towel''s edge', model => 'typesafe/jev-1.13')) AS answer \
-             FROM s GROUP BY s.episode_id"
-        )
+        (call.query(), call.model()),
+        ("fold the towel's edge", "typesafe/jev-1.13")
     );
     let asking = preview(&graph, &search);
     assert!(asking.ends_with(
         "\nSELECT episode_id, description, start_ns, end_ns, similarity FROM find_similar_subtasks_1_entries"
     ));
-    assert!(!asking.contains("spql.ai."));
     admitted(&published, &asking);
 }
 
@@ -433,21 +442,25 @@ fn a_grouping_writes_a_column_per_category_and_a_select_keeps_the_chosen_ones() 
     let published = published(&graph, &folds);
     for step in [
         ", l.judgment.category AS category, l.judgment.probability AS probability FROM group_similar_subtasks_1_listed l)".to_owned(),
-        "group_similar_subtasks_1 AS (SELECT episode_id, spql.list.collect(STRUCT_PACK(start_ns := start_ns, end_ns := end_ns)) FILTER (WHERE category = 'fold') AS group_similar_subtasks_1_category_1, spql.list.collect(STRUCT_PACK(start_ns := start_ns, end_ns := end_ns)) FILTER (WHERE category = 'flatten') AS group_similar_subtasks_1_category_2 FROM (SELECT * FROM group_similar_subtasks_1_entries ORDER BY episode_id, subtask_index) ordered GROUP BY episode_id)".to_owned(),
+        "group_similar_subtasks_1 AS (SELECT episode_id, array_agg(named_struct('start_ns', start_ns, 'end_ns', end_ns) ORDER BY subtask_index) FILTER (WHERE category = 'fold') AS group_similar_subtasks_1_category_1, array_agg(named_struct('start_ns', start_ns, 'end_ns', end_ns) ORDER BY subtask_index) FILTER (WHERE category = 'flatten') AS group_similar_subtasks_1_category_2 FROM group_similar_subtasks_1_entries GROUP BY episode_id)".to_owned(),
         "select_1_within_0 AS (SELECT episode_id, start_ns, end_ns FROM group_similar_subtasks_1_entries WHERE category IN ('fold'))".to_owned(),
     ] {
         assert!(published.contains(&step), "{step}\n{published}");
     }
-    assert!(!published.contains("spql.ai."));
     // Its fill classifies each subtask the Break down stored.
     let fills = CurationPath::to(&graph, &folds).unwrap().fills().unwrap();
-    let AnswerSource::Statement { statement } = fills[1].source() else {
-        panic!("a judgment is filled by a statement")
+    let AnswerSource::Classify(call) = fills[1].source() else {
+        panic!("Group similar is filled by its model call")
     };
-    assert!(statement.contains(&format!("a.{subtasks}.value AS subtasks")));
-    assert!(statement.contains(
-        "spql.list.collect(spql.ai.classify(s.listed.description, [STRUCT_PACK(name := 'fold', definition := 'The robot folds the cloth.'), STRUCT_PACK(name := 'flatten', definition := 'The robot flattens the cloth.')], model => 'typesafe/jev-1.13')) AS answer"
-    ));
+    assert_eq!(call.subtasks().as_str(), subtasks);
+    assert_eq!(
+        call.categories(),
+        [
+            CategoryDefinition::new("fold", "The robot folds the cloth."),
+            CategoryDefinition::new("flatten", "The robot flattens the cloth."),
+        ]
+    );
+    assert_eq!(call.model(), "typesafe/jev-1.13");
     let table = CurationPath::to(&graph, &folds).unwrap().table().unwrap();
     assert_eq!(
         table
@@ -499,32 +512,6 @@ fn one_call_shares_its_column_across_curations_and_another_call_does_not() {
     }
     assert_ne!(column(&one, &annotated[0]), column(&other, &annotated[1]));
     assert_ne!(column(&one, &searches[0]), column(&other, &searches[1]));
-}
-
-#[test]
-fn only_a_dataset_studio_imported_keeps_the_answers_a_model_node_publishes() {
-    let mut graph = CurationGraph::new(Some(
-        crate::activities::episode::EpisodeListing::mcap_fixture("recordings"),
-    ));
-    let long = selecting(
-        &mut graph,
-        DATASET_NODE_ID,
-        vec![lasting(Comparison::AtLeast, 10.0)],
-    );
-    let score = child(
-        &mut graph,
-        &long,
-        CurationNodeKind::ScoreProgress(ProgressScoring::default()),
-    );
-    assert!(CurationPath::to(&graph, &long).unwrap().statement().is_ok());
-    assert_eq!(
-        CurationPath::to(&graph, &score)
-            .unwrap()
-            .statement()
-            .unwrap_err()
-            .message(),
-        "recordings keeps no model answers; only datasets Studio imported do."
-    );
 }
 
 #[test]
@@ -735,10 +722,8 @@ fn no_published_path_asks_a_model_and_each_fill_reads_only_what_is_filled_before
     every_path(&mut graph, (DATASET_NODE_ID, 5), &mut |graph, node| {
         paths += 1;
         let statement = published(graph, node);
-        assert!(!statement.contains("spql.ai."), "{statement}");
         let path = CurationPath::to(graph, node).unwrap();
         let fills = path.fills().unwrap();
-        assert!(statement.matches(ANSWERS).count() <= 1, "{statement}");
         let compiled = CompiledEntries::of(&statement);
         // The reach chain: every Select reads the reach above it once.
         for select in path
@@ -749,29 +734,16 @@ fn no_published_path_asks_a_model_and_each_fill_reads_only_what_is_filled_before
             assert_eq!(compiled.reads(&select.stem()), 1, "{statement}");
         }
         for (filled, fill) in fills.iter().enumerate() {
-            assert_eq!(
-                statement
-                    .matches(&format!("a.{}.value", fill.column()))
-                    .count(),
-                1,
-                "{statement}"
-            );
+            let table = answers(graph, fill.column().as_str());
+            assert_eq!(statement.matches(&table).count(), 1, "{statement}");
             let FillEpisodes::Reaching(reaching) = fill.episodes() else {
                 panic!("a published fill asks what reaches the node")
             };
-            assert!(!reaching.contains("spql.ai."));
             let above = &fills[..filled];
             for later in &fills[filled..] {
                 if !above.iter().any(|fill| fill.column() == later.column()) {
                     assert!(!reaching.contains(later.column().as_str()), "{reaching}");
                 }
-            }
-            if let AnswerSource::Statement { statement } = fill.source() {
-                assert_eq!(statement.matches("spql.ai.").count(), 1, "{statement}");
-                assert_eq!(
-                    ReadOnlyQuery::new(statement, ReadOnlyQueryMode::Curation).authorize(),
-                    Ok(())
-                );
             }
         }
         let models = path

@@ -2595,6 +2595,20 @@ button.studio-status-connection[aria-expanded="true"] {
     overflow-wrap: anywhere;
   }
 
+  /* A head's one destructive action (Delete on a dataset, Unpublish on a
+     curated view) ends it, at rest as quiet as a link; confirming asks on
+     its own row under the head. */
+  .data-overview-head-action {
+    flex: 0 0 auto;
+    margin-left: auto;
+  }
+
+  .data-overview-confirmation {
+    width: auto;
+    margin: 0 24px 12px;
+    padding-inline: 12px;
+  }
+
   .data-overview-alert {
     @apply mx-6 text-[12px] text-ink-faint;
   }

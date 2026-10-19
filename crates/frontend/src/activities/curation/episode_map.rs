@@ -354,7 +354,7 @@ mod tests {
         assert_eq!(placed(1), [(1, 0.125, 0.125)]);
         assert_eq!(
             lanes.0[0].segments[0].label,
-            "fold · Episode …00000001 · 0:05.0 – 0:10.0"
+            "fold · Episode 1 · 0:05.0 – 0:10.0"
         );
         assert_eq!(lanes.locate(2), Some((0, 0.875)));
     }

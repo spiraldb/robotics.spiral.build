@@ -29,17 +29,24 @@ The backend HTTP API and curl examples are documented in
 ## Development
 
 Use [Nix](https://nixos.org/download.html) for development. `flake.nix` and
-`flake.lock` own the Rust toolchain, build tools, standalone ADBC driver, and
+`flake.lock` own the Rust toolchain, build tools, and
 their environment variables. With direnv, `.envrc` loads the same default shell.
 
 ```console
 nix develop .
 ```
 
-The default and CI shells select the pinned published Spiral ADBC library. To
-try an unreleased upstream driver, build it and enter `nix develop .#local-driver`,
-which selects the local library automatically; see
-[database setup](docs/database-boundary.md) for the build instructions.
+Studio builds on a Spiral Rust SDK release, which Cargo fetches from
+SpiralDB's private repository with your git credentials. The SDK links that
+release's native ScanDAL runtime, a private release asset: the default shell
+installs it on entry, once per release, with `GH_TOKEN` or your `gh` login
+(either must read spiraldb/spiraldb). Outside the shell, install it with:
+
+```console
+scripts/setup-spiral-sdk.sh
+```
+
+See [database setup](docs/database-boundary.md) for the release and its archive.
 
 Run CI commands with `nix develop .#ci --command <command>`.
 
@@ -76,8 +83,9 @@ DX builds them together using the `@client` and `@server` package selections.
 
 Agent orchestration belongs to the frontend: imported robot discovery and
 Curation's category proposals own their prompts, model responses, and tool
-selection in the browser. Curation's per-row model work runs in Spiral, as the
-`spql.ai` functions its views compile to. `GET /api/providers` tells the frontend which
+selection in the browser. Curation's per-row model work runs in the backend's
+fill runs: Break down and the judgments of its subtasks call OpenRouter, and
+Score progress and Track objects their Modal services. `GET /api/providers` tells the frontend which
 model provider is configured; it constructs provider requests and interprets
 responses. `/api/proxy` relays external HTTP requests, attaches the key Studio
 holds for the destination's origin, and streams the responses back.
@@ -102,9 +110,10 @@ The Cargo profile's `debug = 0` does not disable DX's separate bundling option.
 
 ### Hosted
 
-[`deploy/hosted`](deploy/hosted/README.md) runs Studio for Spiral colleagues at
-`robotics.spiral.build`, on one Compute Engine VM behind Cloudflare Access.
-Each release, a pushed `v*` tag, publishes its Linux image, the flake's
+Studio runs at `robotics.spiral.build` on one Compute Engine VM, defined by
+`robotics.tf` and `config/robotics-studio/` in `spiraldb/infra`. A Cloudflare
+Tunnel carries its traffic, and Studio's own Spiral sign-in gates every API
+request. Each release, a pushed `v*` tag, publishes its Linux image, the flake's
 `hosted-image`, through `.github/workflows/hosted-image.yml`.
 
 Interface primitives (buttons, fields, facts, disclosures, trees, notices)
@@ -164,10 +173,9 @@ MODAL_SERVICE_TOKEN='…'
 ```
 
 An unset key turns off only what needs it. The relay attaches each key to
-requests bound for its provider's origin, and Studio passes the first two to
-the Spiral driver: the OpenRouter key as `spiral.openrouter_api_key` for the
-`spql.ai` model functions Curation compiles to, and the token as
-`spiral.huggingface_token`. The startup log says which keys are set, never
+requests bound for its provider's origin, Curation's fill runs send the
+OpenRouter key with their own model calls, and Studio passes the Hugging Face
+token to the Spiral driver as `spiral.huggingface_token`. The startup log says which keys are set, never
 their values. To change a key, restart the backend.
 
 Robot discovery calls `openai/gpt-5.6-terra` through OpenRouter, with `medium`
@@ -188,13 +196,15 @@ for project data. Its permissions are also limited by the signed-in user's
 permissions. Create projects in Spiral Studio before adding their workspaces here.
 
 Set `SPIRAL_ROBOTICS_CLIENT_ID` to the registration for this environment.
-The Nix development shell sets Dev (`client_aRm8njLb18Px`); the hosted image
-sets Prod (`client_PiwYy0njXU92`). These IDs are public, not secrets.
+The Nix development shell sets Dev (`client_sQWdRwk7ZTBd`); the hosted image
+sets Prod (`client_3CMizYLaPa3h`). These IDs are public, not secrets.
 `SPIRAL_ROBOTICS_PUBLIC_URL` (or `--public-url`) sets the address browsers reach
-Studio at, `http://localhost:3000` by default. Register its exact `/callback` URL:
-`http://localhost:3000/callback` for Dev and
-`https://robotics.spiral.build/callback` for Prod. The two registrations belong to
-the Spiral organization and have separate client IDs. No client secret is needed.
+Studio at, `http://localhost:3000` by default. Prod registers
+`https://robotics.spiral.build/callback`; Dev registers `http://localhost/callback`,
+which matches any port. Both registrations belong to the project
+`xiangpeng-robotics-618551` and need no client secret. Each is installed in the
+Spiral organization on every project: a registered application's tokens reach only
+the projects its installation selects, so without one Studio sees no project.
 `SPIRAL_ROBOTICS_AUTH_URL` defaults to `https://auth.spiraldb.com`.
 
 Each browser gets its own session. The backend keeps that user's tokens in SQLite,

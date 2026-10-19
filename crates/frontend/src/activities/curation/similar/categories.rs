@@ -2,7 +2,7 @@
 //! with, and the category the operator is editing.
 //!
 //! The categories come from the descriptions themselves, so the list is
-//! complete by construction: `spql.ai.classify` puts every subtask in its
+//! complete by construction: the classification puts every subtask in its
 //! most probable category, with no "other" option and no confidence gate.
 use crate::activities::curation::document::SubtaskCategory;
 use serde::Deserialize;

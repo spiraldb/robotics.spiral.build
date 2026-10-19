@@ -1,7 +1,6 @@
 //! The Modal service that scores progress, as Score progress asks it: one
 //! episode's camera packets, scored with a checkpoint on a service revision,
-//! and answered as `spql.ai.warp_rm`'s shape — a score per picture in display
-//! order.
+//! and answered as a score per picture in display order.
 use super::video_service::{VideoContract, VideoQuestion, VideoService};
 use arrow_schema::{DataType, Field, Fields};
 use spiral_robotics_storage::ProviderKeys;

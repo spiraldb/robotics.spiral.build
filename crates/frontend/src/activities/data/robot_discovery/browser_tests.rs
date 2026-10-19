@@ -32,14 +32,14 @@ export function installRobotDiscoveryFetch() {
         const recordedPath = path === '/api/proxy' ? metadata.url : path;
         robotRequests.push({path:recordedPath, transport:path, project: request.headers.get('X-Spiral-Project'), metadata, body});
         if (path === '/api/queries') return Response.json({
-            columns:[{name:'id'}],rows:[{id:'01a0989fb65870a7a5459902f9e3e090'}],truncated:false
+            columns:[{name:'id'}],rows:[{id:7}],truncated:false
         });
         if (path === '/api/datasets/inspect') return Response.json({
-            dataset:{selection:{path:['dataset_demo']},resource_id:'demo-resource',version_id:'demo-version'},
-            producer:'spql.mcap.dataset',members:1,topics:[]
+            dataset:{selection:{id:'demo'},format:'mcap',resource_id:'demo-resource',version_id:'demo-version'},
+            members:1,topics:[]
         });
         if (path === '/api/datasets/episode-topics') return Response.json([
-            {name:'/joints',schemas:['sensor_msgs/JointState'],members:1,samples:3,revision:{variant:'joints'}}
+            {name:'/joints',revision:{stream:'joints_0a1b2c3d'},schema:'sensor_msgs/JointState',encoding:'protobuf',members:1,samples:3}
         ]);
         if (path === '/api/queries/episode') return Response.json({
             columns:[{name:'value'}],rows:[{value:{position:[0.25]}}],truncated:false
@@ -134,7 +134,7 @@ async fn browser_dispatches_native_tools_and_repairs_a_rejected_result() {
         HuggingFaceInspectionContents::new(
             vec![HuggingFaceDatasetFile::new("episodes/episode.mcap", 42)],
             42,
-            vec!["dataset_demo".into()],
+            vec!["datasets.demo".into()],
         ),
     );
     harness.start(&dom, inspection);
@@ -185,15 +185,12 @@ async fn browser_dispatches_native_tools_and_repairs_a_rejected_result() {
         .iter()
         .find(|request| request["path"] == "/api/queries/episode")
         .unwrap();
-    assert_eq!(
-        samples["body"]["episode"]["episode_id"],
-        "01a0989fb65870a7a5459902f9e3e090"
-    );
+    assert_eq!(samples["body"]["episode"]["episode_id"], 7);
     assert!(
         samples["body"]["statement"]
             .as_str()
             .unwrap()
-            .contains("spql.mcap.read_topic('dataset_demo', '/joints', 'joints')")
+            .contains("FROM \"datasets.demo.messages.joints_0a1b2c3d\" WHERE id = $1")
     );
     let saves = requests
         .iter()
@@ -203,7 +200,7 @@ async fn browser_dispatches_native_tools_and_repairs_a_rejected_result() {
     // The robot is filed under the dataset version the browser inspected.
     assert_eq!(
         saves[0]["body"]["dataset"],
-        json!({"selection": {"path": ["dataset_demo"]}, "resource_id": "demo-resource", "version_id": "demo-version"})
+        json!({"selection": {"id": "demo"}, "format": "mcap", "resource_id": "demo-resource", "version_id": "demo-version"})
     );
     assert_eq!(saves[0]["body"]["robot"]["bindings"], json!([]));
 }

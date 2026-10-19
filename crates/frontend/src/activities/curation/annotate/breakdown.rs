@@ -1,25 +1,26 @@
 //! What a Break down subtasks node adds to a path, and the listing of its
 //! subtasks every judgment of them reads too.
 //!
-//! The node asks each episode for `spql.ai.breakdown_task` over the chosen
+//! The node asks the backend to break each episode down over the chosen
 //! camera's video, with the episode's task when the dataset records one: its
-//! recorded instruction, or the task a LeRobot dataset lists. A fill stores the answer in the dataset's
-//! answers table, and the published view and the preview read it from there.
-//! The model reads each episode whole, so what it is asked never depends on
-//! anything above the node. Its entries list the subtasks of every episode,
-//! each with its place in the answer, which the stored judgments below read
-//! by. The function answers on the video's presentation timeline, which
-//! Studio's packets count from the episode's first message, so a subtask's
-//! log time is that message's time plus its own.
+//! recorded instruction, or the task a LeRobot dataset lists. A fill stores
+//! the answer in the node's answer column, and the published view and the
+//! preview read it from there. The model reads each episode whole, so what
+//! it is asked never depends on anything above the node. Its entries list
+//! the subtasks of every episode, each with its place in the answer, which
+//! the stored judgments below read by. The answer is on the video's
+//! presentation timeline, which Studio's packets count from the episode's
+//! first message, so a subtask's log time is that message's time plus its
+//! own.
 use crate::activities::curation::document::{DEFAULT_ANNOTATION_MODEL, SubtaskAnnotation};
 use crate::activities::curation::path::{
-    ColumnMeaning, EpisodeRow, ModelEntries, ModelNode, ModelStep, PathError, PathSource,
-    TableColumn,
+    ColumnMeaning, EpisodeRow, ModelEntries, ModelNode, ModelStep, PathError, TableColumn,
 };
-use crate::activities::episode::EpisodeTask;
-use spiral_robotics_common::curation::{AnswerColumn, AnswerSource};
-use spiral_robotics_common::datasets::DatasetSelection;
-use spiral_robotics_common::sql::SqlLiteral;
+use spiral_robotics_common::curation::{
+    AnswerColumn, AnswerSource, SampleInterval, SubtaskBreakdown,
+};
+use spiral_robotics_common::datasets::EpisodeTask;
+use spiral_robotics_common::sql::{ListItems, SqlList, SqlStruct};
 
 impl SubtaskAnnotation {
     /// The camera the model watches.
@@ -27,25 +28,13 @@ impl SubtaskAnnotation {
         self.camera()
             .ok_or_else(|| PathError::new("Choose the camera Break down reads."))
     }
-    /// The model's call over the episode's row.
-    fn call(&self, row: &mut EpisodeRow) -> Result<String, PathError> {
-        let interval = SqlLiteral::number(self.sample_interval_seconds())
-            .ok_or_else(|| PathError::new("The sample interval must be a number."))?;
-        let video = row.video(self.watched()?);
-        let task = self
-            .task()
-            .map(|task| format!(", task => {}", row.task(&task)))
-            .unwrap_or_default();
-        Ok(format!(
-            "spql.ai.breakdown_task({video}, sample_interval => {interval}, model => {}{task})",
-            SqlLiteral::text(DEFAULT_ANNOTATION_MODEL)
-        ))
-    }
 }
 
 /// Each episode's subtasks are stored under the model, the camera, the
 /// sample interval, and where it was told its task from: the instruction
-/// topic, or the task its dataset lists.
+/// topic, or the task its dataset lists. The call keeps the name of the
+/// Spiral function that first answered it, so what that stored is read
+/// without asking again.
 impl ModelNode for SubtaskAnnotation {
     fn answer_column(&self, _subtasks: Option<&AnswerColumn>) -> Result<AnswerColumn, PathError> {
         let task = match self.task() {
@@ -54,37 +43,23 @@ impl ModelNode for SubtaskAnnotation {
             None => serde_json::Value::Null,
         };
         let call = serde_json::json!([
-            "spql.ai.breakdown_task",
             DEFAULT_ANNOTATION_MODEL,
             self.watched()?,
             self.sample_interval_seconds(),
             task,
         ]);
-        AnswerColumn::of("breakdown_task", &call).map_err(PathError::new)
+        AnswerColumn::of("break_down", &call).map_err(PathError::new)
     }
 
-    fn answer_source(
-        &self,
-        dataset: &DatasetSelection,
-        step: &ModelStep<'_>,
-    ) -> Result<AnswerSource, PathError> {
-        let mut row = EpisodeRow::new(dataset, PathSource::Fill);
-        self.episode_columns(&mut row, step)?;
-        Ok(AnswerSource::Statement {
-            statement: row.answering()?,
-        })
-    }
-
-    /// A fill asks the model on the row; every other reading reads what it
-    /// stored.
-    fn episode_columns(&self, row: &mut EpisodeRow, step: &ModelStep<'_>) -> Result<(), PathError> {
-        match row.source() {
-            PathSource::Published | PathSource::Preview => row.stored(step.column()),
-            PathSource::Fill => {
-                let call = self.call(row)?;
-                row.asked(step.column(), call)
-            }
-        }
+    fn answer_source(&self, _step: &ModelStep<'_>) -> Result<AnswerSource, PathError> {
+        let interval =
+            SampleInterval::from_seconds(self.sample_interval_seconds()).map_err(PathError::new)?;
+        Ok(AnswerSource::BreakDown(SubtaskBreakdown::new(
+            self.watched()?,
+            interval,
+            DEFAULT_ANNOTATION_MODEL,
+            self.task(),
+        )))
     }
 
     /// Every subtask the model found in the episode, at its place in the
@@ -94,8 +69,7 @@ impl ModelNode for SubtaskAnnotation {
             entries.folding(
                 TableColumn::of_node(step.node(), &step.name(), ColumnMeaning::Subtasks),
                 (
-                    "STRUCT_PACK(description := description, start_ns := start_ns, end_ns := end_ns)"
-                        .to_owned(),
+                    SqlStruct::of_columns(["description", "start_ns", "end_ns"]),
                     None,
                 ),
             )
@@ -146,11 +120,19 @@ impl<'a> SubtaskListing<'a> {
     ) -> ModelEntries {
         let (step, subtasks, origin) = (self.step, self.subtasks, EpisodeRow::ORIGIN);
         let listed = format!("{}_listed", step.name());
+        let mut lists = vec![subtasks.as_str()];
         let judgment = if self.judged.is_empty() {
             String::new()
         } else {
-            format!(", spql.list.get(r.{}, g._) AS judgment", step.column())
+            lists.push(step.column().as_str());
+            format!(
+                ", {} AS judgment",
+                SqlList::item(&format!("g.{}", step.column()), "g.subtask_index")
+            )
         };
+        let positions =
+            ListItems::positions(EpisodeRow::EPISODES, subtasks.as_str(), "subtask_index")
+                .beside(["episode_id", origin].into_iter().chain(lists));
         let judged = self
             .judged
             .iter()
@@ -158,10 +140,9 @@ impl<'a> SubtaskListing<'a> {
             .collect::<String>();
         let entries = vec![
             format!(
-                "{listed} AS (SELECT r.episode_id, r.{origin}, g._ AS subtask_index, \
-                 spql.list.get(r.{subtasks}, g._) AS listed{judgment} FROM {} r \
-                 CROSS JOIN LATERAL spql.range(CAST(spql.list.len(r.{subtasks}) AS BIGINT)) g)",
-                EpisodeRow::EPISODES,
+                "{listed} AS (SELECT g.episode_id, g.{origin}, g.subtask_index, \
+                 {} AS listed{judgment} FROM {positions} g)",
+                SqlList::item(&format!("g.{subtasks}"), "g.subtask_index"),
             ),
             format!(
                 "{} AS (SELECT l.episode_id, l.subtask_index, l.listed.description AS description, \

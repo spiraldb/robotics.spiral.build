@@ -84,8 +84,8 @@ impl EpisodeEndpoints {
     }
 
     /// Store a whole episode in its dataset with this browser's Spiral access,
-    /// then forget it. Storing the same episode again only refreshes the
-    /// dataset, so two browsers storing it at once is harmless.
+    /// then forget it. Storing the same episode again is an idempotent retry,
+    /// so two browsers storing it at once is harmless.
     async fn store(
         Project(project): Project,
         ApiPath((dataset, episode)): ApiPath<(String, String)>,

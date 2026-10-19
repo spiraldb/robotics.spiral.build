@@ -1,7 +1,7 @@
 //! Group similar subtasks: one LLM pass in the browser proposes the
 //! categories as soon as the subtasks that reach the node have arrived, they
-//! become the node's configuration, and the node's step puts
-//! every subtask that reaches it in one of them with `spql.ai.classify`. Its
+//! become the node's configuration, and the node's step has a decision model
+//! put every subtask that reaches it in one of them. Its
 //! preview runs that step over the subtasks Break down's preview holds, many
 //! episodes to a query, as the curation's own run.
 //!

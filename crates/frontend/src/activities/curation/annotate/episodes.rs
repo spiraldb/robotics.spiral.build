@@ -1,9 +1,9 @@
 //! The episodes one annotation node reads, and what their recordings hold
 //! that its step reads: the cameras, and the episode's task.
 use crate::activities::curation::state::CurationController;
-use crate::activities::episode::{Episode, EpisodeTask, StreamCatalog};
+use crate::activities::episode::{Episode, StreamCatalog};
 use dioxus::prelude::*;
-use spiral_robotics_common::datasets::EpisodeId;
+use spiral_robotics_common::datasets::{EpisodeId, EpisodeTask};
 
 /// What one of a dataset's recordings holds that Break down reads: its
 /// camera topics, and where it records its task. Every episode of one
@@ -25,7 +25,7 @@ impl RecordedTopics {
                     .videos()
                     .map(|stream| stream.name().to_owned())
                     .collect(),
-                task: EpisodeTask::of(episode.listing(), &catalog),
+                task: episode.listing().task(&catalog),
             })
         }));
         topics.read().clone().flatten()

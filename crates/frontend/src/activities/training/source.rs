@@ -112,7 +112,7 @@ impl TrainableViews {
         let mut groups = BTreeMap::<String, Vec<String>>::new();
         for view in &self.0 {
             groups
-                .entry(view.dataset().display_name())
+                .entry(view.dataset().display_name().to_owned())
                 .or_default()
                 .push(view.view().to_owned());
         }
@@ -334,6 +334,7 @@ pub(super) fn TrainingDataSection(
 mod tests {
     use super::*;
     use serde_json::json;
+    use spiral_robotics_common::datasets::TopicRevision;
 
     fn arm(name: &str, commanded: bool) -> serde_json::Value {
         let values = |topic: &str| {
@@ -378,14 +379,20 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn cameras_keep_the_datasets_order_and_at_least_one() {
-        let video = |name: &str| {
-            DatasetTopic::new(name.to_owned(), vec!["foxglove.CompressedVideo".to_owned()])
+        let stream = |name: &str, stream: &str, schema: &str| {
+            DatasetTopic::new(
+                name.to_owned(),
+                TopicRevision::new(stream).unwrap(),
+                "protobuf".to_owned(),
+            )
+            .with_schema(Some(schema.to_owned()))
         };
+        let video = "foxglove.CompressedVideo";
         let cameras = DatasetCameras::recorded(&[
-            video("/top-camera"),
-            DatasetTopic::new("/joints".to_owned(), vec!["JointState".to_owned()]),
-            video("/left-wrist-camera"),
-            video("/top-camera"),
+            stream("/top-camera", "top_camera_00000001", video),
+            stream("/joints", "joints_00000002", "JointState"),
+            stream("/left-wrist-camera", "left_wrist_camera_00000003", video),
+            stream("/top-camera", "top_camera_00000004", video),
         ]);
         assert_eq!(cameras.names(), ["/left-wrist-camera", "/top-camera"]);
         let top = vec!["/top-camera".to_owned()];

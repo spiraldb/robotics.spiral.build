@@ -5,6 +5,7 @@ use super::messages::MessageBuffer;
 use base64::Engine as _;
 use js_sys::{Function, Object, Promise, Reflect, Uint8Array};
 use spiral_robotics_common::datasets::{EpisodeVideo, MessageRead};
+use spiral_robotics_common::relations::EpisodeQueryRequest;
 use std::{cell::RefCell, ops::Range, rc::Rc};
 use wasm_bindgen::{JsCast as _, prelude::*};
 
@@ -95,6 +96,18 @@ impl EncodedCamera {
     /// Every packet `request` reads, on a clock that starts at `origin`.
     pub(super) async fn read(request: MessageRead, origin: u64) -> Result<Self, String> {
         let messages = MessageBuffer::load(request).await?;
+        let camera = Self::from_messages(messages.batches(), origin)?;
+        if camera.packets.is_empty() {
+            return Err("No recorded video in this episode".into());
+        }
+        Ok(camera)
+    }
+
+    /// Every packet one episode query lists, on a clock that starts at
+    /// `origin`: a read its statement bounds, such as the group of pictures
+    /// one still decodes. A query that lists none reads an empty camera.
+    pub(super) async fn query(request: &EpisodeQueryRequest, origin: u64) -> Result<Self, String> {
+        let messages = MessageBuffer::query(request).await?;
         Self::from_messages(messages.batches(), origin)
     }
 
@@ -168,9 +181,6 @@ impl EncodedCamera {
                 });
             }
         }
-        if camera.packets.is_empty() {
-            return Err("No recorded video in this episode".into());
-        }
         Ok(camera)
     }
 
@@ -197,6 +207,13 @@ impl EncodedCamera {
     fn first_frame_seconds(&self) -> Option<f64> {
         self.packets
             .first()
+            .map(|packet| packet.microseconds as f64 / 1e6)
+    }
+    /// When the last packet was logged: the frame a read that ends on it,
+    /// such as a still's, is for.
+    pub(super) fn last_frame_seconds(&self) -> Option<f64> {
+        self.packets
+            .last()
             .map(|packet| packet.microseconds as f64 / 1e6)
     }
     /// The first recorded frame when `seconds` precedes it: the picture a
@@ -378,11 +395,15 @@ impl CameraPlayback {
         }
     }
 
-    /// The frame on screen at `seconds` as a still `height` pixels tall at
-    /// the frame's own aspect.
-    pub(super) async fn still(&mut self, seconds: f64, height: u32) -> Result<CameraStill, String> {
+    /// The frame on screen at `seconds` as a still covering `cover`, a width
+    /// and height in CSS pixels, at the frame's own aspect.
+    pub(super) async fn still(
+        &mut self,
+        seconds: f64,
+        cover: (f64, f64),
+    ) -> Result<CameraStill, String> {
         self.prepare(seconds).await?;
-        self.with_frame(seconds, |frame| CameraStill::of(frame, height))
+        self.with_frame(seconds, |frame| CameraStill::of(frame, cover))
             .unwrap_or_else(|| Err("No frame at this time".into()))
     }
 
@@ -423,39 +444,52 @@ impl CameraPlayback {
     }
 }
 
-/// One frame drawn small, such as a cell of a camera's filmstrip.
+/// One frame drawn small, such as a cell of a camera's filmstrip or the still
+/// a row of episodes leads with.
 pub(super) struct CameraStill {
     /// The picture as a JPEG `data:` URL.
     url: String,
-    /// The frame's width over its height.
-    aspect: f64,
+    /// The frame's own width and height, in pixels, as it displays.
+    frame_size: (u32, u32),
 }
 
 impl CameraStill {
-    fn of(frame: &VideoFrame, height: u32) -> Result<Self, String> {
-        let aspect = f64::from(frame.width()) / f64::from(frame.height().max(1));
-        let width = (f64::from(height) * aspect).round().max(1.0);
-        let canvas = web_sys::window()
-            .and_then(|window| window.document())
+    /// `frame` drawn at its own aspect, just large enough to cover `cover`,
+    /// in CSS pixels, at the screen's density so it is sharp there. A box of
+    /// no width is covered by the still's height alone.
+    fn of(frame: &VideoFrame, (cover_width, cover_height): (f64, f64)) -> Result<Self, String> {
+        let window = web_sys::window().ok_or("No window to draw a still in")?;
+        let frame_size = (frame.width().max(1), frame.height().max(1));
+        let (frame_width, frame_height) = (f64::from(frame_size.0), f64::from(frame_size.1));
+        let scale = window.device_pixel_ratio().clamp(1.0, 3.0)
+            * (cover_width / frame_width).max(cover_height / frame_height);
+        let width = (frame_width * scale).round().max(1.0);
+        let height = (frame_height * scale).round().max(1.0);
+        let canvas = window
+            .document()
             .ok_or("No document to draw a still in")?
             .create_element("canvas")
             .map_err(DecoderSession::error)?
             .unchecked_into::<web_sys::HtmlCanvasElement>();
         canvas.set_width(width as u32);
-        canvas.set_height(height);
+        canvas.set_height(height as u32);
         CameraPlayback::context(&canvas)?
-            .draw_frame_scaled(frame, 0.0, 0.0, width, f64::from(height))
+            .draw_frame_scaled(frame, 0.0, 0.0, width, height)
             .map_err(DecoderSession::error)?;
         let url = canvas
             .to_data_url_with_type("image/jpeg")
             .map_err(DecoderSession::error)?;
-        Ok(Self { url, aspect })
+        Ok(Self { url, frame_size })
     }
     pub(super) fn url(&self) -> &str {
         &self.url
     }
+    /// The frame's width over its height.
     pub(super) fn aspect(&self) -> f64 {
-        self.aspect
+        f64::from(self.frame_size.0) / f64::from(self.frame_size.1)
+    }
+    pub(super) fn frame_size(&self) -> (u32, u32) {
+        self.frame_size
     }
 }
 
@@ -617,10 +651,19 @@ mod tests {
         let camera = EncodedCamera::from_messages(&[batch], 1000).unwrap();
         assert_eq!(camera.packets[0].bytes, bytes);
         assert_eq!(camera.packets[0].microseconds, 0);
+        assert_eq!(camera.last_frame_seconds(), Some(0.0));
+        // A read that lists no packet is an empty camera, not a failure.
+        assert_eq!(
+            EncodedCamera::from_messages(&[], 1000)
+                .unwrap()
+                .last_frame_seconds(),
+            None
+        );
     }
 
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    async fn independent_keyframe_decode_matches_continuous_decode() {
+    /// The fixture's eight 32×32 access units, a frame every 33 ms, seekable
+    /// at every `keyframe_every`th one.
+    fn seek_fixture(keyframe_every: usize) -> EncodedCamera {
         let bytes = include_bytes!("fixtures/seek.h264");
         let mut offsets = bytes
             .windows(5)
@@ -629,23 +672,23 @@ mod tests {
             .collect::<Vec<_>>();
         offsets.push(bytes.len());
         assert_eq!(offsets.len(), 9);
-        // The same eight access units, seekable at every fourth one or only
-        // from the first, which decodes them in one run.
-        let camera = |keyframe_every: usize| {
-            let packets = offsets
-                .windows(2)
-                .enumerate()
-                .map(|(index, range)| CameraPacket {
-                    microseconds: index as i64 * 33_333,
-                    bytes: bytes[range[0]..range[1]].to_vec(),
-                    keyframe: index % keyframe_every == 0,
-                })
-                .collect();
-            Rc::new(EncodedCamera {
-                codec: "avc1.42c00a".into(),
-                packets,
+        let packets = offsets
+            .windows(2)
+            .enumerate()
+            .map(|(index, range)| CameraPacket {
+                microseconds: index as i64 * 33_333,
+                bytes: bytes[range[0]..range[1]].to_vec(),
+                keyframe: index % keyframe_every == 0,
             })
-        };
+            .collect();
+        EncodedCamera {
+            codec: "avc1.42c00a".into(),
+            packets,
+        }
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn independent_keyframe_decode_matches_continuous_decode() {
         let canvas = web_sys::window()
             .unwrap()
             .document()
@@ -654,8 +697,10 @@ mod tests {
             .unwrap()
             .unchecked_into::<web_sys::HtmlCanvasElement>();
         let mut pixels = Vec::new();
+        // The same eight access units, seekable at every fourth one or only
+        // from the first, which decodes them in one run.
         for keyframe_every in [8, 4] {
-            let mut playback = CameraPlayback::new(camera(keyframe_every));
+            let mut playback = CameraPlayback::new(Rc::new(seek_fixture(keyframe_every)));
             playback.prepare(0.2).await.unwrap();
             assert!(playback.draw(&canvas, 0.2).unwrap());
             pixels.push(
@@ -669,6 +714,30 @@ mod tests {
         assert_eq!(pixels[0], pixels[1]);
         assert!(pixels[1].iter().any(|value| *value > 0));
         assert_eq!(canvas.width(), 32);
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn a_still_decodes_from_the_keyframe_before_its_frame_alone() {
+        // A still's read: its frame and the packets back to the keyframe
+        // before it, which draw what the whole recording draws there.
+        let mut group = seek_fixture(4);
+        group.packets.drain(..4);
+        group.packets.truncate(3);
+        let shown = group.last_frame_seconds().unwrap();
+        assert_eq!(shown, 0.199998);
+        let slot = (96.0, 54.0);
+        let alone = CameraPlayback::new(Rc::new(group))
+            .still(shown, slot)
+            .await
+            .unwrap();
+        let whole = CameraPlayback::new(Rc::new(seek_fixture(8)))
+            .still(shown, slot)
+            .await
+            .unwrap();
+        assert_eq!(alone.frame_size(), (32, 32));
+        assert_eq!(alone.aspect(), 1.0);
+        assert!(alone.url().starts_with("data:image/jpeg;base64,"));
+        assert_eq!(alone.url(), whole.url());
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

@@ -1,8 +1,8 @@
 //! A Select's two readings keep the same rows: what the browser keeps over
 //! the preview's reads is what Spiral's engine answered for the compiled
-//! statement over the same answers (`spql.list.collect` folding `kept`,
-//! `RANK` and `COUNT` windows ranking), run with literal stand-ins for the
-//! listing and the answers table.
+//! statement over the same answers (`array_agg` folding `kept`,
+//! `PERCENT_RANK` ranking), run with literal stand-ins for the listing and
+//! the answer columns.
 use crate::activities::curation::annotate::{CategoryPlacement, JudgmentValue, SubtaskRow};
 use crate::activities::curation::document::{
     Comparison, CurationGraph, CurationNodeKind, DATASET_NODE_ID, EpisodeCondition, EpisodeNumber,
@@ -32,7 +32,7 @@ fn sample() -> EpisodeSample {
 
 fn graph() -> CurationGraph {
     CurationGraph::new(Some(
-        crate::activities::episode::EpisodeListing::mcap_fixture("dataset_bottles"),
+        crate::activities::episode::EpisodeListing::mcap_fixture("bottles"),
     ))
 }
 

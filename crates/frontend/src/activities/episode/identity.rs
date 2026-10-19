@@ -1,11 +1,11 @@
 //! Which recording an episode is, what is known about it, and what every
 //! surface calls it.
 //!
-//! Each native member is one recording — an MCAP file, or one episode of a
-//! LeRobot dataset — identified by the id Spiral gave it when it joined the
-//! dataset. That id is also its name — "Episode …2635e3d1" is the same
+//! Each episode is one recording — an MCAP file, or one episode of a LeRobot
+//! dataset — identified by the number Studio gave it when it wrote it into
+//! the dataset. That number is also its name — "Episode 12" is the same
 //! recording in Data's rail and a Curation index, and stays that recording
-//! however many are imported around it. A list labels each episode by the
+//! however many are imported after it. A list labels each episode by the
 //! part of its source path that differs from its neighbours, or a LeRobot
 //! episode by its index, so an operator recognizes their own recordings at a
 //! glance.
@@ -18,10 +18,9 @@ use crate::format::{
 };
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId, EpisodeSelection};
-use spiral_robotics_common::sql::SqlLiteral;
 
-/// The statistics Spiral lists for every episode of a dataset: the span
-/// and message count every producer records, and what its producer records
+/// The statistics a dataset's `episodes` table lists for every episode: the
+/// span and message count every format records, and what its format records
 /// beside them.
 #[derive(Clone, Debug, serde::Deserialize, PartialEq)]
 pub(in crate::activities) struct EpisodeFacts {
@@ -38,7 +37,7 @@ pub(in crate::activities) struct EpisodeFacts {
     source_episode: SourceEpisode,
 }
 
-/// What an MCAP member records of the file it is: where it is, how big,
+/// What an MCAP episode records of the file it is: where it is, how big,
 /// and how many channels it holds.
 #[derive(Clone, Debug, Default, serde::Deserialize, PartialEq)]
 struct RecordedFile {
@@ -50,7 +49,7 @@ struct RecordedFile {
     channel_count: Option<u64>,
 }
 
-/// What a LeRobot member records of the episode it is: its index in the
+/// What a LeRobot episode records of the episode it is: its index in the
 /// dataset, and the tasks it was recorded doing.
 #[derive(Clone, Debug, Default, serde::Deserialize, PartialEq)]
 struct SourceEpisode {
@@ -93,13 +92,6 @@ impl EpisodeFacts {
     pub(in crate::activities) fn duration_seconds(&self) -> Option<f64> {
         self.duration_ns.map(|nanos| nanos as f64 / 1e9)
     }
-    /// The file name at the end of the source path, when there is one.
-    fn file_name(&self) -> &str {
-        self.source_uri()
-            .and_then(|uri| uri.rsplit('/').next())
-            .filter(|name| !name.is_empty())
-            .unwrap_or(self.id.as_str())
-    }
 }
 
 /// One episode of a dataset, as every surface opens and names it.
@@ -137,12 +129,9 @@ impl Episode {
         Self { listing, facts }
     }
 
-    /// How many episodes `dataset` holds, whichever producer made it.
+    /// How many episodes `dataset` holds, whatever its format.
     pub(in crate::activities) async fn count(dataset: &DatasetSelection) -> Result<u64, String> {
-        let sql = format!(
-            "SELECT count(*) AS episodes FROM spql.mcap.episodes({})",
-            SqlLiteral::text(&dataset.sql_name())
-        );
+        let sql = format!("SELECT count(*) AS episodes FROM {}", dataset.episodes());
         DatasetClient::current()
             .run_spiral_query(sql, 1)
             .await
@@ -190,12 +179,18 @@ impl Episode {
     /// What every heading calls the episode with `id`, for a surface that
     /// holds the id before it has the episode.
     pub(in crate::activities) fn name_of(id: &EpisodeId) -> String {
-        format!("Episode …{}", id.short())
+        format!("Episode {id}")
     }
-    /// What a list of episodes calls one: its id alone, since the list
+    /// What a list of episodes calls one: its number alone, since the list
     /// already says what its rows are.
     pub(in crate::activities) fn listed_name_of(id: &EpisodeId) -> String {
-        format!("…{}", id.short())
+        format!("#{id}")
+    }
+    /// Whether a search term is the number of the episode with `id`, bare or
+    /// as a list names it.
+    pub(in crate::activities) fn is_numbered(id: &EpisodeId, needle: &str) -> bool {
+        let number = needle.strip_prefix('#').unwrap_or(needle);
+        number.parse::<EpisodeId>().is_ok_and(|named| &named == id)
     }
     /// The recorded span, from the first message to the last.
     pub(in crate::activities) fn range(&self) -> Option<EpisodeTimeRange> {
@@ -203,14 +198,14 @@ impl Episode {
         let end = start.checked_add(self.facts.duration_ns()?)?;
         Some(EpisodeTimeRange::new(start, end))
     }
-    /// Whether a search term appears in its id, its source path, or the
-    /// task it was recorded doing, whatever its case, or is its index — the
-    /// one test every list of episodes filters by.
+    /// Whether a search term appears in its source path or the task it was
+    /// recorded doing, whatever its case, or is its number or its index —
+    /// the one test every list of episodes filters by.
     pub(in crate::activities) fn matches(&self, needle: &str) -> bool {
         let needle = needle.trim().to_lowercase();
         let holds = |text: &str| text.to_lowercase().contains(&needle);
         needle.is_empty()
-            || self.id().as_str().contains(&needle)
+            || Self::is_numbered(self.id(), &needle)
             || self.facts.source_uri().is_some_and(holds)
             || self.facts.tasks().iter().any(|task| holds(task))
             || self
@@ -308,7 +303,7 @@ impl EpisodeLabels {
         }
     }
     /// The source path below the directory every listed episode shares; a
-    /// LeRobot episode, whose source is a frame table it shares with others,
+    /// LeRobot episode, whose source is the repository it shares with others,
     /// goes by its index in the dataset.
     pub(in crate::activities) fn label(&self, facts: &EpisodeFacts) -> SourceLabel {
         if let Some(index) = facts.episode_index() {
@@ -319,15 +314,14 @@ impl EpisodeLabels {
         let relative = facts
             .source_uri()
             .and_then(|uri| uri.get(self.shared_prefix..))
-            .filter(|relative| !relative.is_empty())
-            .unwrap_or_else(|| facts.file_name());
+            .filter(|relative| !relative.is_empty());
         SourceLabel::of(relative, facts)
     }
 }
 
 /// The distinguishing directory, in words that begin as a sentence does, so
 /// a tab and a row read it alike. A recording whose path says nothing an
-/// operator would recognize has no label at all, and is known by its id
+/// operator would recognize has no label at all, and is known by its number
 /// alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::activities) struct SourceLabel {
@@ -335,25 +329,28 @@ pub(in crate::activities) struct SourceLabel {
 }
 
 impl SourceLabel {
-    /// An identifier-shaped head tells an operator nothing, so the recording
-    /// time takes its place when there is one. The full source path stays in
-    /// the tooltip.
-    fn of(relative: &str, facts: &EpisodeFacts) -> Self {
-        let head = match relative.split_once('/') {
-            Some((head, tail)) if !head.is_empty() && !tail.is_empty() => head,
-            _ => relative,
-        };
-        let head = if Self::is_identifier(head) {
-            facts
+    /// An identifier-shaped head, or no source path at all, tells an
+    /// operator nothing, so the recording time takes its place when there is
+    /// one. The full source path stays in the tooltip.
+    fn of(relative: Option<&str>, facts: &EpisodeFacts) -> Self {
+        let head = relative
+            .map(|relative| match relative.split_once('/') {
+                Some((head, tail)) if !head.is_empty() && !tail.is_empty() => head,
+                _ => relative,
+            })
+            .filter(|head| !Self::is_identifier(head));
+        let head = match head {
+            Some(head) => {
+                let words = head.replace('_', " ");
+                let mut letters = words.chars();
+                letters
+                    .next()
+                    .map(|first| first.to_uppercase().chain(letters).collect())
+            }
+            None => facts
                 .message_start_time()
                 .filter(|start| start.has_wall_clock())
-                .map(|start| format!("Recorded {}", start.utc_time_label()))
-        } else {
-            let words = head.replace('_', " ");
-            let mut letters = words.chars();
-            letters
-                .next()
-                .map(|first| first.to_uppercase().chain(letters).collect())
+                .map(|start| format!("Recorded {}", start.utc_time_label())),
         };
         Self { head }
     }
@@ -403,11 +400,12 @@ mod tests {
     }
 
     #[test]
-    fn an_episode_is_named_by_its_id_alone() {
-        let id = EpisodeId::try_from("01a0989fb6557788a2dd36342635e3d1").unwrap();
+    fn an_episode_is_named_by_its_number_alone() {
+        let id = EpisodeId::new(12);
         let episode = Episode::fixture(&id, 1);
-        assert_eq!(episode.name(), "Episode …2635e3d1");
+        assert_eq!(episode.name(), "Episode 12");
         assert_eq!(Episode::name_of(&id), episode.name());
+        assert_eq!(Episode::listed_name_of(&id), "#12");
         assert_eq!(episode.selection().episode_id(), &id);
     }
 
@@ -440,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn identifier_named_files_read_as_recording_times_or_go_by_their_id() {
+    fn identifier_named_files_read_as_recording_times_or_go_by_their_number() {
         let listed = episodes(&[
             (
                 "spfsu://p/attempts/01a07ed2-1ed5-7542-bbf3-15a78c389242/blobs/01a07ed2-1fdd-77a2-a9ae-5c3bbca09151.bin",
@@ -462,6 +460,11 @@ mod tests {
                 .facts_label()
                 .starts_with("Recorded without a wall clock · ")
         );
+        let unsourced = serde_json::json!({"id": EpisodeId::fixture(3)});
+        let unsourced = EpisodeListing::mcap_fixture("recordings")
+            .episode(unsourced.as_object().unwrap().clone())
+            .unwrap();
+        assert_eq!(labels(&[unsourced])[0].head(), None);
     }
 
     #[test]
@@ -475,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn a_search_term_matches_the_source_path_or_id_regardless_of_case() {
+    fn a_search_term_matches_the_source_path_regardless_of_case_or_the_number() {
         let listed = episodes(&[
             ("hf://d/x@1/data/Fold_Skirts/episode_aa/episode.fo.mcap", 1),
             ("hf://d/x@1/data/place_fruit/episode_bb/episode.fo.mcap", 2),
@@ -485,8 +488,13 @@ mod tests {
         };
         assert!(skirts.matches("fold"));
         assert!(!fruit.matches("fold"));
-        assert!(fruit.matches(fruit.id().short()));
-        assert!(!skirts.matches(fruit.id().short()));
+        let number = fruit.id().to_string();
+        assert!(fruit.matches(&number) && !skirts.matches(&number));
+        assert!(fruit.matches(&Episode::listed_name_of(fruit.id())));
+        assert!(
+            !fruit.matches(&format!("{number}0")),
+            "a number names one episode"
+        );
         assert!(fruit.matches(""));
     }
 
@@ -495,8 +503,8 @@ mod tests {
     #[test]
     fn a_lerobot_episode_is_labelled_by_its_index() {
         let listing = EpisodeListing::new(
-            DatasetSelection::new(vec!["so101".into()]).unwrap(),
-            spiral_robotics_common::datasets::DatasetProducer::LeRobot,
+            DatasetSelection::new("so101").unwrap(),
+            spiral_robotics_common::datasets::DatasetFormat::LeRobot,
         );
         let row = serde_json::json!({"id": EpisodeId::fixture(1), "episode_index": 12, "tasks": ["fold"]});
         let episode = listing.episode(row.as_object().unwrap().clone()).unwrap();

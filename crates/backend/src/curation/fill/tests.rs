@@ -1,11 +1,14 @@
 use super::*;
 use crate::curation::video_service::tests::MockService;
-use spiral_robotics_common::curation::{AnswerColumn, PublishedView};
-use spiral_robotics_common::datasets::DatasetSelection;
+use spiral_robotics_common::curation::{
+    AnswerColumn, CategoryDefinition, PublishedView, SampleInterval, SubtaskBreakdown,
+    SubtaskClassification, SubtaskSimilarity,
+};
+use spiral_robotics_common::datasets::{DatasetSelection, DatasetStreams};
 use spiral_robotics_storage::{ProjectStore, StudioStore};
 use std::collections::HashMap;
 
-/// The token, and the address of each Modal service `urls` sets, by its
+/// The token, and each Modal service address or key `urls` sets, by its
 /// variable.
 fn keys(urls: &[(&str, &str)]) -> Arc<ProviderKeys> {
     let urls = urls
@@ -25,7 +28,7 @@ fn storage() -> Arc<StorageManager> {
 }
 
 fn dataset(name: &str) -> DatasetSelection {
-    DatasetSelection::new(vec![name.to_owned()]).unwrap()
+    DatasetSelection::new(name).unwrap()
 }
 
 fn column(node: &str, episodes: FillEpisodes, source: AnswerSource) -> ColumnFill {
@@ -57,7 +60,7 @@ async fn a_run_is_admitted_only_with_read_only_statements_and_the_services_it_ne
     let score = column("Score progress", listed(), scoring("/top"));
     assert!(refused(
         &unset,
-        FillRequest::new(dataset("dataset_folding"), vec![score.clone()])
+        FillRequest::new(dataset("folding"), vec![score.clone()])
     ));
     let fills = FillRuns::new(
         storage,
@@ -65,48 +68,44 @@ async fn a_run_is_admitted_only_with_read_only_statements_and_the_services_it_ne
     );
     assert!(
         fills
-            .admit(FillRequest::new(
-                dataset("dataset_folding"),
-                vec![score.clone()]
-            ))
+            .admit(FillRequest::new(dataset("folding"), vec![score]))
             .is_ok()
     );
-    // Only a dataset Studio imported keeps answers.
     assert!(refused(
         &fills,
-        FillRequest::new(dataset("folding"), vec![score])
+        FillRequest::new(dataset("folding"), Vec::new())
     ));
-    assert!(refused(
-        &fills,
-        FillRequest::new(dataset("dataset_folding"), Vec::new())
-    ));
-    // A run that only publishes stores nothing, so any dataset will do.
+    // A run may only publish.
     let selected = FillRequest::new(dataset("folding"), Vec::new())
         .publishing(vec![PublishedView::new("long", "SELECT 1")]);
     assert!(fills.admit(selected).is_ok());
+    let deleting = format!(
+        "DELETE FROM {}",
+        dataset("folding").answers(&AnswerColumn::of("probe", &["x"]).unwrap())
+    );
     let writing = column(
-        "Break down subtasks",
-        FillEpisodes::Reaching("DELETE FROM dataset_answers_folding".into()),
-        AnswerSource::Statement {
-            statement: "SELECT $1 AS episode_id, 1 AS answer".into(),
+        "Health check",
+        FillEpisodes::Reaching(deleting.clone()),
+        AnswerSource::DatasetStatement {
+            statement: "SELECT 1 AS episode_id, 1 AS answer".into(),
         },
     );
     assert!(refused(
         &fills,
-        FillRequest::new(dataset("dataset_folding"), vec![writing])
+        FillRequest::new(dataset("folding"), vec![writing])
     ));
     let writing_at_once = column(
         "Health check",
         FillEpisodes::Listed(Vec::new()),
         AnswerSource::DatasetStatement {
-            statement: "DELETE FROM dataset_answers_folding".into(),
+            statement: deleting,
         },
     );
     assert!(refused(
         &fills,
-        FillRequest::new(dataset("dataset_folding"), vec![writing_at_once])
+        FillRequest::new(dataset("folding"), vec![writing_at_once])
     ));
-    let published = FillRequest::new(dataset("dataset_folding"), Vec::new())
+    let published = FillRequest::new(dataset("folding"), Vec::new())
         .publishing(vec![PublishedView::new("folds", "SELECT 1; SELECT 2")]);
     assert!(refused(&fills, published));
 }
@@ -126,7 +125,7 @@ async fn object_tracking_is_admitted_only_with_its_own_service() {
             FillEpisodes::Listed(Vec::new()),
             tracking.clone(),
         );
-        FillRequest::new(dataset("dataset_folding"), vec![track])
+        FillRequest::new(dataset("folding"), vec![track])
     };
     let progress_only = FillRuns::new(
         storage(),
@@ -138,6 +137,80 @@ async fn object_tracking_is_admitted_only_with_its_own_service() {
         keys(&[("OBJECT_TRACKING_URL", "https://tracks.modal.run")]),
     );
     assert!(fills.admit(request()).is_ok());
+}
+
+#[tokio::test]
+async fn model_calls_are_admitted_only_with_openrouter_and_questions_jev_takes() {
+    let subtasks = AnswerColumn::of("break_down", &["m"]).unwrap();
+    let interval = SampleInterval::from_seconds(0.5).unwrap();
+    let calls = [
+        (
+            "Break down subtasks",
+            AnswerSource::BreakDown(SubtaskBreakdown::new("/top", interval, "gemini", None)),
+        ),
+        (
+            "Find similar subtasks",
+            AnswerSource::Similarity(SubtaskSimilarity::new(subtasks.clone(), "fold", "jev")),
+        ),
+        (
+            "Group similar subtasks",
+            AnswerSource::Classify(SubtaskClassification::new(
+                subtasks.clone(),
+                vec![CategoryDefinition::new("fold", "Folding the cloth.")],
+                "jev",
+            )),
+        ),
+    ];
+    let request = |(node, source): &(&str, AnswerSource)| {
+        let call = column(node, FillEpisodes::Listed(Vec::new()), source.clone());
+        FillRequest::new(dataset("folding"), vec![call])
+    };
+    let without = FillRuns::new(storage(), keys(&[]));
+    let with = FillRuns::new(storage(), keys(&[("OPENROUTER_API_KEY", "sk-or-test")]));
+    for call in &calls {
+        let Err(OperationError::InvalidInput(reason)) = without.admit(request(call)) else {
+            panic!("{} needs OpenRouter", call.0)
+        };
+        assert!(reason.starts_with(call.0) && reason.contains("OPENROUTER_API_KEY"));
+        assert!(with.admit(request(call)).is_ok());
+    }
+    let blank = AnswerSource::Similarity(SubtaskSimilarity::new(subtasks.clone(), "  ", "jev"));
+    assert!(refused(&with, request(&("Find similar subtasks", blank))));
+    let twice = AnswerSource::Classify(SubtaskClassification::new(
+        subtasks,
+        vec![
+            CategoryDefinition::new("fold", "Folding."),
+            CategoryDefinition::new("fold", "Folding again."),
+        ],
+        "jev",
+    ));
+    assert!(refused(&with, request(&("Group similar subtasks", twice))));
+}
+
+#[test]
+fn answers_go_to_the_writer_each_time_they_fill_one_write_and_the_rest_at_the_end() {
+    let (writer, mut sets) = mpsc::unbounded_channel();
+    let mut held = HeldAnswers::new(writer);
+    // One episode's scores of 1 MiB: four fill a write.
+    let scores = || {
+        EpisodeAnswer::listing(Arc::new(arrow_array::Float32Array::from(vec![
+            0.5;
+            256 * 1024
+        ])))
+    };
+    for ordinal in 0..5u32 {
+        held.hold(EpisodeId::new(u64::from(ordinal)), scores())
+            .unwrap();
+    }
+    assert!(sets.try_recv().is_ok(), "four answers fill the first write");
+    assert!(sets.try_recv().is_err(), "the fifth waits for more");
+    assert_eq!(held.answered(), 5);
+    held.finish();
+    assert!(sets.try_recv().is_ok(), "the rest is written at the end");
+    assert!(matches!(
+        sets.try_recv(),
+        Err(mpsc::error::TryRecvError::Disconnected)
+    ));
 }
 
 /// Poll run `id` until it settles.
@@ -158,8 +231,8 @@ fn hosted_storage() -> (
     Arc<StorageManager>,
 ) {
     use spiral_robotics_storage::{
-        AdbcDatabase, ServiceEndpoint, SpiralAccessPublisher, SpiralConnection,
-        SpiralConnectionSettings,
+        ServiceEndpoint, SpiralAccessPublisher, SpiralConnection, SpiralConnectionSettings,
+        SpiralSdkDatabase,
     };
     let settings = SpiralConnectionSettings::new(
         ServiceEndpoint::environment_spiral().into_string(),
@@ -172,14 +245,18 @@ fn hosted_storage() -> (
     publisher.publish(Some(std::env::var("SPIRAL_ACCESS_TOKEN").unwrap()));
     let connection = SpiralConnection::new(settings, access);
     let store = Arc::new(
-        ProjectStore::new(connection.clone(), Arc::new(AdbcDatabase::new(connection))).unwrap(),
+        ProjectStore::new(
+            connection.clone(),
+            Arc::new(SpiralSdkDatabase::new(connection)),
+        )
+        .unwrap(),
     );
     let studio = StudioStore::in_memory().project(&store.connection_settings());
     (publisher, Arc::new(StorageManager::new(store, studio)))
 }
 
 #[tokio::test]
-#[ignore = "requires SPIRAL_MCAP_TEST_PROJECT and SPIRAL_ACCESS_TOKEN (endpoints from SPIRAL__SERVER__URL and SPIRAL__SPFS__URL); creates and drops a probe dataset, its answers table, and a view"]
+#[ignore = "requires SPIRAL_MCAP_TEST_PROJECT and SPIRAL_ACCESS_TOKEN (endpoints from SPIRAL__SERVER__URL and SPIRAL__SPFS__URL); creates and drops a probe dataset, its answer columns, and a view"]
 async fn a_run_fills_each_column_once_and_then_publishes_its_view() {
     let (_publisher, storage) = hosted_storage();
     let name = format!("probe_fill_{}", uuid_suffix());
@@ -187,57 +264,63 @@ async fn a_run_fills_each_column_once_and_then_publishes_its_view() {
     let mock = MockService::scoring();
     let base = mock.clone().serve().await;
     let fills = FillRuns::new(storage.clone(), keys(&[("WARP_PROGRESS_URL", &base)]));
-    let dataset = dataset(&format!("dataset_{name}"));
-    let answers = AnswerTable::of(&dataset).unwrap();
-    let episodes = format!("SELECT id AS episode_id FROM spql.mcap.episodes('dataset_{name}')");
-    let scores = column(
-        "Score progress",
-        FillEpisodes::Reaching(episodes),
-        scoring("/camera/top/video"),
-    );
-    let score_column = scores.column().clone();
-    // A later column reads the one before it: each episode's velocities.
-    let velocities = column(
-        "Find similar subtasks",
-        FillEpisodes::Reaching(format!(
-            "SELECT episode_id FROM {} WHERE {score_column} IS NOT NULL",
-            answers.quoted()
-        )),
-        AnswerSource::Statement {
-            statement: format!(
-                "WITH stored AS (SELECT a.episode_id, a.{score_column}.value AS scores FROM {} a WHERE a.episode_id = $1), \
-                 listed AS (SELECT s.episode_id, g._ AS position, spql.list.get(s.scores, g._) AS score \
-                 FROM stored s CROSS JOIN LATERAL spql.range(CAST(spql.list.len(s.scores) AS BIGINT)) g) \
-                 SELECT l.episode_id, l.position, CAST(l.score.velocity AS DOUBLE) AS answer FROM listed l",
-                answers.quoted()
-            ),
-        },
-    );
-    // A dataset statement answers every episode in one read.
-    let frames = column(
-        "Health check",
-        FillEpisodes::Reaching(format!(
-            "SELECT id AS episode_id FROM spql.mcap.episodes('dataset_{name}')"
-        )),
-        AnswerSource::DatasetStatement {
-            statement: format!(
-                "SELECT id AS episode_id, count(*) AS answer \
-                 FROM spql.mcap.read_topic('dataset_{name}', '/camera/top/video') GROUP BY id"
-            ),
-        },
-    );
-    let frames_column = frames.column().clone();
-    let statement = format!(
-        "SELECT a.episode_id, p.frame_index, p.velocity FROM {} a CROSS JOIN LATERAL UNNEST(a.{score_column}.value) p",
-        answers.quoted()
-    );
-    let request = FillRequest::new(dataset.clone(), vec![scores, velocities, frames])
-        .publishing(vec![PublishedView::new(view.clone(), statement)]);
+    let dataset = dataset(&name);
+    let episodes = format!("SELECT id AS episode_id FROM {}", dataset.episodes());
     // An assertion that fails still lets the probe be dropped.
     let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
         for episode in ["one", "two", "three"] {
             storage.record_probe_episode(&name, episode).await?;
         }
+        let scores = column(
+            "Score progress",
+            FillEpisodes::Reaching(episodes.clone()),
+            scoring("/camera/top/video"),
+        );
+        let scored = dataset.answers(scores.column());
+        // A later column reads the one before it: how many pictures each
+        // episode's scores hold.
+        let velocities = column(
+            "Find similar subtasks",
+            FillEpisodes::Reaching(format!("SELECT episode_id FROM {scored}")),
+            AnswerSource::DatasetStatement {
+                statement: format!(
+                    "SELECT a.episode_id, CAST(cardinality(a.value) AS BIGINT) AS answer FROM {scored} a"
+                ),
+            },
+        );
+        // A column no episode reaches still gets its table, which the view
+        // reads.
+        let unreached = column(
+            "Group similar subtasks",
+            FillEpisodes::Listed(Vec::new()),
+            AnswerSource::DatasetStatement {
+                statement: format!(
+                    "SELECT a.episode_id, 1 AS answer FROM {scored} a"
+                ),
+            },
+        );
+        let unreached_table = dataset.answers(unreached.column());
+        // A dataset statement answers every episode in one read.
+        let inspection = storage.inspect_dataset(dataset.clone()).await?;
+        let camera = DatasetStreams::new(inspection.topics()).camera("/camera/top/video")?;
+        let frames = column(
+            "Health check",
+            FillEpisodes::Reaching(episodes.clone()),
+            AnswerSource::DatasetStatement {
+                statement: format!(
+                    "SELECT id AS episode_id, count(*) AS answer FROM {} GROUP BY id",
+                    dataset.messages(camera.revision())
+                ),
+            },
+        );
+        let frames_column = frames.column().clone();
+        let statement = format!(
+            "SELECT s.episode_id, s.p.frame_index AS frame_index, s.p.velocity AS velocity \
+             FROM (SELECT a.episode_id, unnest(a.value) AS p FROM {scored} a) s \
+             LEFT JOIN {unreached_table} u ON u.episode_id = s.episode_id"
+        );
+        let request = FillRequest::new(dataset.clone(), vec![scores, velocities, unreached, frames])
+            .publishing(vec![PublishedView::new(view.clone(), statement)]);
         let started = fills.start(fills.admit(request.clone()).map_err(|e| e.to_string())?);
         assert_eq!(started.views(), std::slice::from_ref(&view));
         let status = settled(&fills, started.id()).await;
@@ -245,16 +328,32 @@ async fn a_run_fills_each_column_once_and_then_publishes_its_view() {
         assert!(status.failures().is_empty());
         assert_eq!(mock.requests(), 3, "one scoring per episode");
         assert_eq!(fills.publications().len(), 1);
+        // A published view is its statement, which a reader inlines.
+        let published = storage.curated_views().list().await?;
+        let published = published
+            .iter()
+            .find(|published| published.name() == view)
+            .ok_or("the view is published")?;
         let read = storage
             .queries()
-            .query(&format!("SELECT COUNT(*) AS frames FROM {view}"), 1)
+            .query(
+                &format!(
+                    "SELECT COUNT(*) AS frames FROM ({}) {view}",
+                    published.statement()
+                ),
+                1,
+            )
             .await?;
         assert_eq!(read.rows()[0]["frames"].as_u64(), Some(24));
         let counted = storage
-            .dataset_answers(answers.clone())
-            .filled(&frames_column)
+            .stored_answers(&dataset, &frames_column)
+            .filled()
             .await?;
-        assert_eq!(counted.len(), 3, "every episode answered by one read");
+        assert_eq!(
+            counted.map(|counted| counted.len()),
+            Some(3),
+            "every episode answered by one read"
+        );
         // Publishing again asks nothing again, and replaces the first run.
         let again = fills.start(fills.admit(request).map_err(|e| e.to_string())?);
         let status = settled(&fills, again.id()).await;
@@ -269,7 +368,7 @@ async fn a_run_fills_each_column_once_and_then_publishes_its_view() {
         .drop(&ViewName::try_from(view.as_str()).unwrap())
         .await
         .unwrap();
-    storage.drop_probe_dataset(&name).await.unwrap();
+    storage.delete_dataset(&dataset).await.unwrap();
     match outcome {
         Ok(outcome) => outcome.expect("fill run"),
         Err(panic) => std::panic::resume_unwind(panic),

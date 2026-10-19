@@ -9,9 +9,7 @@
 use std::collections::HashMap;
 
 use dioxus::prelude::*;
-use spiral_robotics_common::datasets::DatasetSelection;
-use spiral_robotics_common::relations::EpisodeQueryRequest;
-use spiral_robotics_common::sql::SqlLiteral;
+use spiral_robotics_common::datasets::{DatasetSelection, DatasetStreams};
 use spiral_robotics_common::training::{ImageSize, TrainingObservation};
 use spiral_robotics_ui::{
     ActionPurpose, Fact, FactList, Field, FieldLayout, ModeButton, ModeGroup, Select, TextInput,
@@ -21,13 +19,8 @@ use spiral_robotics_ui::{
 use super::source::DatasetCameras;
 use super::state::TrainingController;
 use crate::activities::data::DatasetClient;
-use crate::activities::episode::{EpisodeListing, StreamCatalog};
+use crate::activities::episode::{EpisodeListing, StillMoment, StreamCatalog};
 use crate::components::scoped_task::ScopedTask;
-
-/// How long after its episode's first message a camera's first frame may be
-/// logged. Bounding the read is what lets Spiral seek rather than decode the
-/// whole episode; see `StillMoment`.
-const FIRST_FRAME_NANOS: u64 = 1_000_000_000;
 
 /// The size frames are resized to, as a fraction of the size the camera
 /// records at.
@@ -88,59 +81,32 @@ struct DatasetCamera {
 
 impl DatasetCamera {
     /// What its size is filed under.
-    fn key(&self) -> (String, String) {
-        (self.dataset.sql_name(), self.camera.clone())
+    fn key(&self) -> (DatasetSelection, String) {
+        (self.dataset.clone(), self.camera.clone())
     }
 
     /// The size of the first frame the camera logged in the dataset's first
-    /// episode.
+    /// episode: no packet says what size it decodes to, so the frame is
+    /// decoded, as an episode's still is.
     async fn recorded_size(&self) -> Result<ImageSize, String> {
-        let episode = EpisodeListing::read(&self.dataset)
-            .await?
+        let datasets = DatasetClient::current();
+        let inspection = datasets
+            .inspect_dataset(self.dataset.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        let stream = DatasetStreams::new(inspection.topics())
+            .camera(&self.camera)?
+            .revision()
+            .clone();
+        let episode = EpisodeListing::of(inspection.dataset())
             .page(0, 1)
             .await?
             .into_episodes()
             .into_iter()
             .next()
             .ok_or("The dataset has no episodes.")?;
-        let start = episode
-            .facts()
-            .message_start_time()
-            .ok_or("Its first episode records no start.")?;
-        let request = EpisodeQueryRequest::new(episode.selection(), self.statement(start), 1);
-        let frame = DatasetClient::current()
-            .run_episode_query(&request)
-            .await
-            .map_err(|error| error.to_string())?
-            .into_rows()
-            .into_iter()
-            .next()
-            .ok_or("The camera logged no frame in the first second of the first episode.")?;
-        let side = |name: &str| {
-            frame
-                .get(name)
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|pixels| u32::try_from(pixels).ok())
-                .filter(|pixels| *pixels > 0)
-        };
-        match (side("width"), side("height")) {
-            (Some(width), Some(height)) => Ok(ImageSize::new(width, height)),
-            _ => Err("The decoded frame has no size.".to_owned()),
-        }
-    }
-
-    /// The first frame the camera logged from `start` on, decoded for its
-    /// size. `read_video` seeks only on a literal log-time bound.
-    fn statement(&self, start: u64) -> String {
-        format!(
-            "SELECT v.value.display_width AS width, v.value.display_height AS height \
-             FROM spql.mcap.read_video({}, {}) v \
-             WHERE v.id = $1 AND v.log_time >= {start} AND v.log_time < {} \
-             ORDER BY v.log_time LIMIT 1",
-            SqlLiteral::text(&self.dataset.sql_name()),
-            SqlLiteral::text(&self.camera),
-            start.saturating_add(FIRST_FRAME_NANOS),
-        )
+        let (width, height) = StillMoment::opening(&episode).frame_size(&stream).await?;
+        Ok(ImageSize::new(width, height))
     }
 }
 
@@ -148,7 +114,7 @@ impl DatasetCamera {
 /// kept while Training is open.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct SourceSizes {
-    read: Signal<HashMap<(String, String), SourceSize>>,
+    read: Signal<HashMap<(DatasetSelection, String), SourceSize>>,
 }
 
 impl SourceSizes {
@@ -325,29 +291,5 @@ mod tests {
         let labels = ImageScale::ALL.map(|scale| scale.of(recorded).size_label());
         assert_eq!(labels, ["848 × 480", "424 × 240", "212 × 120"]);
         assert_eq!(ImageScale::default(), ImageScale::Half);
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn a_cameras_size_is_read_from_its_first_frame_within_a_second() {
-        let camera = DatasetCamera {
-            dataset: DatasetSelection::new(vec!["dataset_abc130k_sample".to_owned()]).unwrap(),
-            camera: "/top-camera".to_owned(),
-        };
-        let statement = camera.statement(5_000_000_000);
-        assert!(
-            statement
-                .contains("FROM spql.mcap.read_video('dataset_abc130k_sample', '/top-camera') v")
-        );
-        assert!(statement.contains(
-            "WHERE v.id = $1 AND v.log_time >= 5000000000 AND v.log_time < 6000000000 \
-             ORDER BY v.log_time LIMIT 1"
-        ));
-        assert_eq!(
-            camera.key(),
-            (
-                "dataset_abc130k_sample".to_owned(),
-                "/top-camera".to_owned()
-            )
-        );
     }
 }

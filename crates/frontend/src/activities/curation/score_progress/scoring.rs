@@ -3,7 +3,7 @@
 //!
 //! The scorer runs on the Modal service, which scores the scorer's camera of
 //! each episode with a velocity for every frame; a fill stores those scores
-//! in the dataset's answers table, and every reading of the node, a preview
+//! in the node's answer column, and every reading of the node, a preview
 //! included, reads them from there. Its entries are the scores unnested, one
 //! per frame, at the frame's log time with the progress rate it made, and its
 //! column folds them into the episode's timeline. The scorer reads whole
@@ -13,7 +13,7 @@ use crate::activities::curation::path::{
     ColumnMeaning, EpisodeRow, ModelEntries, ModelNode, ModelStep, PathError, TableColumn,
 };
 use spiral_robotics_common::curation::{AnswerColumn, AnswerSource};
-use spiral_robotics_common::datasets::DatasetSelection;
+use spiral_robotics_common::sql::{ListItems, SqlStruct};
 use spiral_robotics_common::training::PublishedModel;
 
 /// The progress model a node scores with. Its velocity is progress per unit
@@ -110,11 +110,7 @@ impl ModelNode for ProgressScoring {
         .map_err(PathError::new)
     }
 
-    fn answer_source(
-        &self,
-        _dataset: &DatasetSelection,
-        _step: &ModelStep<'_>,
-    ) -> Result<AnswerSource, PathError> {
+    fn answer_source(&self, _step: &ModelStep<'_>) -> Result<AnswerSource, PathError> {
         let scorer = ProgressScorer::from(self);
         Ok(AnswerSource::ProgressService {
             camera: scorer.camera().to_owned(),
@@ -126,25 +122,24 @@ impl ModelNode for ProgressScoring {
     /// Every scored frame of the episode, at its log time, with its progress
     /// rate; a frame the scorer had no support for has none.
     fn entries(&self, step: &ModelStep<'_>) -> Result<ModelEntries, PathError> {
+        let scores = ListItems::of(EpisodeRow::EPISODES, step.column().as_str(), "p")
+            .beside(["episode_id", EpisodeRow::ORIGIN]);
         let entry = format!(
-            "{} AS (SELECT r.episode_id, r.{} + CAST(p.timestamp_ns AS BIGINT) AS timestamp_ns, \
-             CASE WHEN p.support > 0 AND NOT isnan(p.velocity) THEN p.velocity END AS progress_rate \
-             FROM {} r CROSS JOIN LATERAL UNNEST(r.{}) p)",
+            "{} AS (SELECT u.episode_id, u.{} + CAST(u.p.timestamp_ns AS BIGINT) AS timestamp_ns, \
+             CASE WHEN u.p.support > 0 AND NOT isnan(u.p.velocity) THEN u.p.velocity END AS progress_rate \
+             FROM {scores} u)",
             step.entries(),
             EpisodeRow::ORIGIN,
-            EpisodeRow::EPISODES,
-            step.column()
         );
         Ok(ModelEntries::new(
             vec![entry],
             "timestamp_ns",
-            "timestamp_ns, progress_rate AS value".to_owned(),
+            "episode_id, timestamp_ns, progress_rate AS value".to_owned(),
         )
         .folding(
             TableColumn::of_node(step.node(), &step.name(), ColumnMeaning::ProgressRates),
             (
-                "STRUCT_PACK(timestamp_ns := timestamp_ns, progress_rate := progress_rate)"
-                    .to_owned(),
+                SqlStruct::of_columns(["timestamp_ns", "progress_rate"]),
                 None,
             ),
         ))
@@ -172,7 +167,7 @@ mod tests {
     /// Score progress node.
     fn scored(scoring: ProgressScoring) -> (CurationGraph, String) {
         let mut graph = CurationGraph::new(Some(
-            crate::activities::episode::EpisodeListing::mcap_fixture("dataset_bottles"),
+            crate::activities::episode::EpisodeListing::mcap_fixture("bottles"),
         ));
         let node = graph
             .add_child(DATASET_NODE_ID, CurationNodeKind::ScoreProgress(scoring))

@@ -62,6 +62,14 @@ impl MigratorTrait for Migrator {
                 "m20261012_000001_drop_dataset_check_reports",
                 include_str!("m20261012_000001_drop_dataset_check_reports.sql"),
             )),
+            Box::new(SqlMigration::new(
+                "m20261014_000001_studio_datasets",
+                include_str!("m20261014_000001_studio_datasets.sql"),
+            )),
+            Box::new(SqlMigration::new(
+                "m20261015_000001_episode_numbers",
+                include_str!("m20261015_000001_episode_numbers.sql"),
+            )),
         ]
     }
 }

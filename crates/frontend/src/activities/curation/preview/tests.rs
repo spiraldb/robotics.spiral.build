@@ -21,7 +21,7 @@ fn sample() -> EpisodeSample {
 
 fn graph() -> CurationGraph {
     CurationGraph::new(Some(
-        crate::activities::episode::EpisodeListing::mcap_fixture("dataset_folding"),
+        crate::activities::episode::EpisodeListing::mcap_fixture("folding"),
     ))
 }
 
@@ -150,11 +150,11 @@ fn every_model_node_previews_what_it_has_the_backend_answer_and_store_first() {
         let plan = PreviewPlan::of(&reader, node, &episodes).unwrap();
         let fill = plan.fill();
         assert_eq!(fill.episodes(), &FillEpisodes::Listed(episodes.to_vec()));
-        // Each episode's preview then reads what was stored, and asks nothing.
+        // One read then reads what was stored of both, and asks nothing.
         let statement = plan.statement();
-        assert!(statement.contains(&format!("a.{}.value", fill.column())));
-        assert!(statement.contains("WHERE e.id = $1)"));
-        assert!(!statement.contains("spql.ai."), "{statement}");
+        let stored = graph.listing().unwrap().dataset().answers(fill.column());
+        assert!(statement.contains(&format!("LEFT JOIN {stored} ")));
+        assert!(statement.contains("WHERE e.id IN ($1, $2))"));
         match fill.source() {
             AnswerSource::ProgressService { .. } => assert_eq!(node, &score),
             AnswerSource::ObjectTracking {
@@ -169,15 +169,16 @@ fn every_model_node_previews_what_it_has_the_backend_answer_and_store_first() {
                     ("/top-camera", "bottle", 5)
                 );
             }
-            AnswerSource::Statement { statement } if node == &group => {
-                assert!(
-                    statement.contains("spql.ai.classify(s.listed.description"),
-                    "{statement}"
-                )
+            AnswerSource::BreakDown(call) => {
+                assert_eq!(node, &annotate);
+                assert_eq!(call.camera(), "/top-camera");
             }
-            AnswerSource::Statement { statement } => {
-                assert!(statement.contains("spql.ai.breakdown_task("), "{statement}")
+            AnswerSource::Classify(call) => {
+                assert_eq!(node, &group);
+                assert_eq!(call.subtasks(), &column(&graph, &annotate));
+                assert_eq!(call.categories()[0].name(), "fold");
             }
+            AnswerSource::Similarity(_) => panic!("No node here finds similar subtasks"),
             AnswerSource::DatasetStatement { .. } => {
                 panic!("A preview asks about its listed episodes, one at a time")
             }

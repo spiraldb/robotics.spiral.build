@@ -2,49 +2,53 @@
 //! joint moving faster than 0.05 rad/s. One arm waiting while the other
 //! works is how two arms share a task, so only stillness of all of them
 //! counts. Arms are compared at the instants they were logged together.
-//! Each episode's cell keeps its own pauses; the longest across episodes is
-//! found when the report is read.
-use super::check_columns::{CheckCells, CheckColumn, CheckKind, PartsStatement};
+//! Each episode's cell keeps its own pauses; the report judges them in
+//! Spiral: the share of time still, the longest pause, and the long ones.
+use super::check_columns::{CheckColumn, CheckKind, CheckTable, PartsStatement};
 use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, Verdict};
-use super::stream_reads::{CheckedStreams, CheckedValueColumns as _, Greatest};
+use super::stream_reads::{CheckedStreams, CheckedValueColumns as _};
 use dioxus::prelude::*;
 use serde::Deserialize;
 use spiral_robotics_common::datasets::ValueColumns;
 use spiral_robotics_common::datasets::{ArmRoles, EpisodeId};
+use spiral_robotics_common::sql::SqlStruct;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Pauses {
     /// How many arms are measured.
     arms: usize,
-    episodes: Vec<EpisodePauses>,
+    /// Of the time every arm was logged together, the share every arm was
+    /// still.
+    still_share: f64,
+    /// The longest pause of any episode.
+    longest: Option<EpisodePause>,
+    /// How many pauses were longer than the flagged length.
+    long: u64,
+    /// The episodes with a pause longer than the flagged length, longest
+    /// first.
+    lengthy: Vec<EpisodePause>,
     /// Episodes whose arms were not logged at the same instants.
     apart: Vec<EpisodeId>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct EpisodePauses {
+/// An episode's longest pause, and where it starts.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+struct EpisodePause {
+    #[serde(rename = "episode_id")]
     episode: EpisodeId,
-    measured_s: f64,
-    still_s: f64,
-    longest_s: Option<f64>,
-    /// Seconds into the episode where its longest pause starts.
+    longest_s: f64,
+    /// Seconds into the episode where the pause starts.
     longest_at: Option<f64>,
-    /// Pauses longer than the flagged length.
-    long: u64,
 }
 
-/// Every arm's stillness in one episode, as its cell keeps it: how long the
-/// episode is, how much of it the arms were logged together over, how much
-/// of that every arm was still, its longest pause and where that starts,
-/// and how many pauses were long.
-#[derive(Deserialize)]
-pub(super) struct PausesPart {
-    episode_ns: Option<u64>,
-    measured_s: Option<f64>,
-    still_s: Option<f64>,
-    longest_s: Option<f64>,
-    longest_at: Option<f64>,
+/// Every episode's pauses as the judgment answers them, in one row.
+#[derive(Default, Deserialize)]
+struct JudgedPauses {
+    still_share: Option<f64>,
     long_pauses: Option<u64>,
+    longest: Option<EpisodePause>,
+    lengthy: Option<Vec<EpisodePause>>,
+    apart: Option<Vec<EpisodeId>>,
 }
 
 impl Pauses {
@@ -74,21 +78,60 @@ impl Pauses {
         CheckColumn::of(CheckKind::Pauses, parts)
     }
 
-    /// The pauses of every episode `cells` measured whose arms were logged
-    /// together, and the episodes whose were not.
-    pub(super) fn read(arms: &[ArmRoles], cells: &CheckCells<PausesPart>) -> Self {
-        let mut episodes = Vec::new();
-        let mut apart = Vec::new();
-        for (episode, part) in cells.parts() {
-            match part.measured(episode) {
-                Some(measured) => episodes.push(measured),
-                None => apart.push(episode.clone()),
-            }
-        }
+    /// The pauses of every episode whose arms were logged together, and
+    /// the episodes whose were not, judged in Spiral over the column among
+    /// `columns` that `table` holds.
+    pub(super) async fn judge(
+        table: &CheckTable,
+        columns: &[CheckColumn],
+        arms: &[ArmRoles],
+    ) -> Result<Self, String> {
+        let judged = match table.parts(columns, CheckKind::Pauses) {
+            Some(parts) => table.rows(Self::judgment(&parts)).await?,
+            None => Vec::new(),
+        };
+        Ok(Self::of(arms, judged))
+    }
+
+    /// The judgment over `parts`, every episode's pauses. An episode whose
+    /// arms were logged together over nearly all of it is measured; the
+    /// others are apart. Over the measured ones: the share of time every arm
+    /// was still, the longest pause, how many pauses were long, and the
+    /// episodes with one.
+    fn judgment(parts: &str) -> String {
+        format!(
+            "WITH episodes AS (SELECT episode_id, measured_s, still_s, longest_s, longest_at, long_pauses, \
+               COALESCE(measured_s >= 0.9 * CAST(episode_ns AS DOUBLE) / 1e9, false) AS together FROM {parts} p), \
+             measured AS (SELECT episode_id, measured_s, COALESCE(still_s, 0) AS still_s, longest_s, longest_at, COALESCE(long_pauses, 0) AS long_pauses \
+               FROM episodes WHERE together), \
+             total AS (SELECT CASE WHEN sum(measured_s) > 0 THEN sum(still_s) / sum(measured_s) END AS still_share, sum(long_pauses) AS long_pauses FROM measured), \
+             ranked AS (SELECT episode_id, longest_s, longest_at, ROW_NUMBER() OVER (ORDER BY longest_s DESC, episode_id) AS rank FROM measured WHERE longest_s IS NOT NULL), \
+             lengthy AS (SELECT {lengthy} AS lengthy FROM measured WHERE long_pauses > 0), \
+             apart AS (SELECT array_agg(episode_id) AS apart FROM episodes WHERE NOT together) \
+             SELECT total.still_share AS still_share, total.long_pauses AS long_pauses, \
+               CASE WHEN ranked.episode_id IS NOT NULL THEN {longest} END AS longest, \
+               lengthy.lengthy AS lengthy, apart.apart AS apart \
+             FROM total CROSS JOIN lengthy CROSS JOIN apart LEFT JOIN ranked ON ranked.rank = 1",
+            lengthy = SqlStruct::of_columns(["episode_id", "longest_s", "longest_at"]).collected(),
+            longest = SqlStruct::new()
+                .field("episode_id", "ranked.episode_id")
+                .field("longest_s", "ranked.longest_s")
+                .field("longest_at", "ranked.longest_at"),
+        )
+    }
+
+    /// Every arm's pauses, as `judged`, its one row, says they were.
+    fn of(arms: &[ArmRoles], judged: Vec<JudgedPauses>) -> Self {
+        let judged = judged.into_iter().next().unwrap_or_default();
+        let mut lengthy = judged.lengthy.unwrap_or_default();
+        lengthy.sort_by(|left, right| right.longest_s.total_cmp(&left.longest_s));
         Self {
             arms: arms.len(),
-            episodes,
-            apart,
+            still_share: judged.still_share.unwrap_or_default(),
+            longest: judged.longest,
+            long: judged.long_pauses.unwrap_or_default(),
+            lengthy,
+            apart: judged.apart.unwrap_or_default(),
         }
     }
 
@@ -98,11 +141,9 @@ impl Pauses {
         for (position, arm) in arms.iter().enumerate() {
             let name = format!("arm{position}");
             let columns = ValueColumns::new(arm.state(), "q");
-            ctes.extend(columns.ctes(&name, &streams.read_values(arm.state())?));
+            ctes.push(columns.cte(&name, &streams.read_values(arm.state())?));
             ctes.push(columns.motion_cte(&name));
-            speeds.extend(
-                (0..columns.count()).map(|joint| format!("spql.math.abs({name}_motion.v{joint})")),
-            );
+            speeds.extend((0..columns.count()).map(|joint| format!("abs({name}_motion.v{joint})")));
         }
         let joined = (1..arms.len())
             .map(|position| {
@@ -113,8 +154,8 @@ impl Pauses {
             .collect::<String>();
         let still = Self::STILL;
         ctes.push(format!(
-            "j AS (SELECT arm0_motion.id AS id, arm0_motion.log_time AS t, arm0_motion.dt AS dt, {} AS speed FROM arm0_motion{joined} WHERE arm0_motion.dt IS NOT NULL)",
-            Greatest::of(&speeds)
+            "j AS (SELECT arm0_motion.id AS id, arm0_motion.log_time AS t, arm0_motion.dt AS dt, greatest({}) AS speed FROM arm0_motion{joined} WHERE arm0_motion.dt IS NOT NULL)",
+            speeds.join(", ")
         ));
         ctes.push(format!(
             "k AS (SELECT id, t, dt, CASE WHEN speed < {still} THEN 1 ELSE 0 END AS still, \
@@ -138,78 +179,41 @@ impl Pauses {
     }
 
     pub(super) fn row(&self) -> CheckRow {
-        let measured = self
-            .episodes
-            .iter()
-            .map(|episode| episode.measured_s)
-            .sum::<f64>();
-        let still = self
-            .episodes
-            .iter()
-            .map(|episode| episode.still_s)
-            .sum::<f64>();
-        let longest = self
-            .episodes
-            .iter()
-            .filter(|episode| episode.longest_s.is_some())
-            .max_by(|left, right| {
-                left.longest_s
-                    .unwrap_or_default()
-                    .total_cmp(&right.longest_s.unwrap_or_default())
-            });
-        let long = self
-            .episodes
-            .iter()
-            .map(|episode| episode.long)
-            .sum::<u64>();
         let who = match self.arms {
             1 => "the arm",
             2 => "both arms",
             _ => "every arm",
         };
-        let share = if measured > 0.0 {
-            still / measured
-        } else {
-            0.0
-        };
         let finding = Finding::of(
-            format!("{:.0}%", share * 100.0),
+            format!("{:.0}%", self.still_share * 100.0),
             &format!("of the time {who} still,"),
         )
         .and(
             format!(
                 "{:.1} s",
-                longest
-                    .and_then(|episode| episode.longest_s)
+                self.longest
+                    .as_ref()
+                    .map(|pause| pause.longest_s)
                     .unwrap_or_default()
             ),
             "longest pause,",
         )
-        .and_count(long as usize, "pause", "over")
+        .and_count(self.long as usize, "pause", "over")
         .and(format!("{:.0} s", Self::LONG), "");
-        let verdict = if long > 0 {
+        let verdict = if self.long > 0 {
             Verdict::Flagged
         } else {
             Verdict::Clean
         };
-        let mut long_episodes = self
-            .episodes
+        let long_evidence = self
+            .lengthy
             .iter()
-            .filter(|episode| episode.long > 0)
+            .map(EpisodePause::evidence)
             .collect::<Vec<_>>();
-        long_episodes.sort_by(|left, right| {
-            right
-                .longest_s
-                .unwrap_or_default()
-                .total_cmp(&left.longest_s.unwrap_or_default())
-        });
-        let long_evidence = long_episodes
-            .into_iter()
-            .map(|episode| episode.longest())
-            .collect::<Vec<_>>();
-        let longest_evidence = longest
-            .map(EpisodePauses::longest)
-            .into_iter()
+        let longest_evidence = self
+            .longest
+            .iter()
+            .map(EpisodePause::evidence)
             .collect::<Vec<_>>();
         let apart = self
             .apart
@@ -231,31 +235,12 @@ impl Pauses {
     }
 }
 
-impl PausesPart {
-    /// `episode`'s pauses, when its arms were logged together over nearly
-    /// all of it.
-    fn measured(&self, episode: &EpisodeId) -> Option<EpisodePauses> {
-        let measured = self.measured_s?;
-        if measured < 0.9 * self.episode_ns? as f64 / 1e9 {
-            return None;
-        }
-        Some(EpisodePauses {
-            episode: episode.clone(),
-            measured_s: measured,
-            still_s: self.still_s.unwrap_or_default(),
-            longest_s: self.longest_s,
-            longest_at: self.longest_at,
-            long: self.long_pauses.unwrap_or_default(),
-        })
-    }
-}
-
-impl EpisodePauses {
-    fn longest(&self) -> Evidence {
+impl EpisodePause {
+    fn evidence(&self) -> Evidence {
         Evidence::at(
             self.episode.clone(),
             self.longest_at,
-            format!("{:.1} s", self.longest_s.unwrap_or_default()),
+            format!("{:.1} s", self.longest_s),
         )
     }
 }
@@ -264,10 +249,6 @@ impl EpisodePauses {
 mod tests {
     use super::super::stream_reads::TwoArmDataset;
     use super::*;
-
-    fn episode(ordinal: u32) -> EpisodeId {
-        EpisodeId::try_from(format!("{ordinal:032x}")).unwrap()
-    }
 
     #[test]
     fn every_arm_is_read_at_the_instants_they_were_logged_together() {
@@ -285,28 +266,38 @@ mod tests {
     }
 
     #[test]
-    fn an_episode_whose_arms_were_logged_apart_is_not_measured() {
+    fn the_judgment_measures_only_episodes_whose_arms_were_logged_together() {
+        let sql = Pauses::judgment("(parts)");
+        assert!(sql.contains(
+            "COALESCE(measured_s >= 0.9 * CAST(episode_ns AS DOUBLE) / 1e9, false) AS together FROM (parts) p"
+        ));
+        assert!(sql.contains("sum(still_s) / sum(measured_s) END AS still_share"));
+        assert!(sql.contains("ORDER BY longest_s DESC, episode_id) AS rank"));
+        assert!(sql.contains("FROM episodes WHERE NOT together"));
         let dataset = TwoArmDataset::new();
-        let part = |measured_s: Option<f64>, longest_s: f64, long_pauses| PausesPart {
-            episode_ns: Some(10_000_000_000),
-            measured_s,
-            still_s: Some(longest_s),
-            longest_s: Some(longest_s),
-            longest_at: Some(1.5),
-            long_pauses: Some(long_pauses),
-        };
-        let cells = CheckCells::fixture(vec![
-            (episode(1), vec![part(Some(9.9), 3.0, 1)]),
-            (episode(2), vec![part(Some(9.9), 0.5, 0)]),
-            (episode(3), vec![part(Some(2.0), 0.0, 0)]),
-            (episode(4), vec![part(None, 0.0, 0)]),
-            (episode(5), Vec::new()),
-        ]);
-        let pauses = Pauses::read(dataset.arms(), &cells);
+        let judged: Vec<JudgedPauses> = serde_json::from_value(serde_json::json!([{
+            "still_share": 0.0349, "long_pauses": 2,
+            "longest": {"episode_id": EpisodeId::fixture(1), "longest_s": 3.0, "longest_at": 1.5},
+            "lengthy": [
+                {"episode_id": EpisodeId::fixture(2), "longest_s": 2.5, "longest_at": 4.0},
+                {"episode_id": EpisodeId::fixture(1), "longest_s": 3.0, "longest_at": 1.5},
+            ],
+            "apart": [EpisodeId::fixture(3)],
+        }]))
+        .unwrap();
+        let pauses = Pauses::of(dataset.arms(), judged);
         assert_eq!(pauses.arms, 2);
-        assert_eq!(pauses.episodes.len(), 2);
-        assert_eq!(pauses.episodes[0].long, 1);
-        assert_eq!(pauses.episodes[0].longest().measure(), "3.0 s");
-        assert_eq!(pauses.apart, [episode(3), episode(4)]);
+        assert_eq!(pauses.long, 2);
+        assert_eq!(
+            pauses.longest.as_ref().unwrap().evidence().measure(),
+            "3.0 s"
+        );
+        // The episodes with a long pause lead with the longest.
+        assert_eq!(pauses.lengthy[0].episode, EpisodeId::fixture(1));
+        assert_eq!(pauses.apart, [EpisodeId::fixture(3)]);
+        // No episode measured is no pause.
+        let quiet = Pauses::of(dataset.arms(), Vec::new());
+        assert_eq!(quiet.still_share, 0.0);
+        assert!(quiet.longest.is_none() && quiet.lengthy.is_empty());
     }
 }

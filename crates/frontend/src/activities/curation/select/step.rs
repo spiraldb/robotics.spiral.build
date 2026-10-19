@@ -16,7 +16,7 @@ use crate::activities::curation::document::{
 };
 use crate::activities::curation::graph::DatasetStep;
 use crate::activities::curation::path::PathError;
-use spiral_robotics_common::sql::SqlLiteral;
+use spiral_robotics_common::sql::{ListItems, SqlLiteral};
 
 /// Where a Select's step is written: the name its reach entry takes, the
 /// reach entry above it, and the graph naming the nodes it reads.
@@ -87,8 +87,9 @@ impl Selection {
         }
         let name = &step.name;
         let mut kept = format!("{name}_unnested");
+        let unnested = ListItems::of(&passing, "kept", "k").beside(["episode_id"]);
         entries.push(format!(
-            "{kept} AS (SELECT p.episode_id, k.start_ns, k.end_ns FROM {passing} p CROSS JOIN LATERAL UNNEST(p.kept) k)"
+            "{kept} AS (SELECT u.episode_id, u.k.start_ns AS start_ns, u.k.end_ns AS end_ns FROM {unnested} u)"
         ));
         for (index, condition) in ranges {
             let within = format!("{name}_within_{index}");
@@ -110,9 +111,10 @@ impl Selection {
              ({order} ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) THEN 0 ELSE 1 END AS opens FROM {kept}) flagged)"
         ));
         entries.push(format!(
-            "{name} AS (SELECT episode_id, spql.list.collect(STRUCT_PACK(start_ns := start_ns, end_ns := end_ns)) AS kept \
+            "{name} AS (SELECT episode_id, {} AS kept \
              FROM (SELECT episode_id, MIN(start_ns) AS start_ns, MAX(end_ns) AS end_ns FROM {name}_islands \
-             GROUP BY episode_id, island ORDER BY episode_id, start_ns) ordered GROUP BY episode_id)"
+             GROUP BY episode_id, island) merged GROUP BY episode_id)",
+            DatasetStep::kept_range().collected_by("start_ns")
         ));
         Ok(entries)
     }
@@ -136,7 +138,7 @@ impl EpisodeConditions<'_> {
         for (index, condition) in self.0 {
             let most = |joins: &mut String, node: &str| -> Result<String, PathError> {
                 joins.push_str(&format!(
-                    " LEFT JOIN (SELECT episode_id, MAX(spql.list.len(objects)) AS most FROM {} GROUP BY episode_id) m{index} \
+                    " LEFT JOIN (SELECT episode_id, MAX(cardinality(objects)) AS most FROM {} GROUP BY episode_id) m{index} \
                      ON m{index}.episode_id = r.episode_id",
                     step.entries_of(node)?
                 ));
@@ -192,18 +194,15 @@ impl EpisodeConditions<'_> {
 
     /// The percent rank of number `index` among the rows that have one:
     /// its rank from the end `comparison` keeps, from 0, over their count
-    /// less one. Spiral has no `PERCENT_RANK`, so it is spelled with `RANK`
-    /// and `COUNT`.
+    /// less one.
     fn rank(index: usize, comparison: Comparison) -> String {
         let number = format!("number_{index}");
         let order = match comparison {
             Comparison::Highest => " DESC",
             _ => "",
         };
-        let rows = format!("PARTITION BY {number} IS NULL");
         format!(
-            "CAST(RANK() OVER ({rows} ORDER BY {number}{order}) - 1 AS DOUBLE) / \
-             CAST(GREATEST(COUNT({number}) OVER ({rows}), 2) - 1 AS DOUBLE) AS rank_{index}"
+            "PERCENT_RANK() OVER (PARTITION BY {number} IS NULL ORDER BY {number}{order}) AS rank_{index}"
         )
     }
 
@@ -243,7 +242,7 @@ impl SelectCondition {
             Self::Visible { node, fewest } => TimelineStretches {
                 within,
                 entries: &step.entries_of(node)?,
-                value: "spql.list.len(objects)",
+                value: "cardinality(objects)",
             }
             .entries(&format!("value >= {fewest}")),
             Self::Similar { node, minimum } => vec![format!(

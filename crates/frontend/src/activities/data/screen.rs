@@ -159,6 +159,18 @@ impl DataSelection {
             None => self.open_episode(opened),
         }
     }
+    /// A deleted dataset leaves the Overview, and the tabs of its episodes
+    /// and of the curated views over it close.
+    fn forget_dataset(mut self, dataset: &DatasetSelection) {
+        if self.dataset.peek().as_ref() == Some(dataset) {
+            self.dataset.set(None);
+        }
+        self.episodes
+            .write()
+            .retain(|open| open.episode().dataset() != dataset);
+        self.views.write().retain(|view| view.dataset() != dataset);
+        self.activate(PanelId::new(OVERVIEW_PANEL));
+    }
     fn start_import(mut self) {
         self.importing.set(true);
         self.activate(PanelId::new(IMPORT_PANEL));
@@ -245,12 +257,12 @@ fn DataPanels() -> Element {
         move || *available.read(),
         || async {
             DatasetClient::current()
-                .project_resources()
+                .datasets()
                 .await
                 .map_err(|error| error.to_string())
         },
     );
-    let resources = catalog.value();
+    let datasets = catalog.value();
     // Which of the catalog's views curations published, and from what; read
     // again with the catalog, and once a publication is saved. Beside each,
     // how far the run publishing it has got, read every few seconds.
@@ -300,26 +312,25 @@ fn DataPanels() -> Element {
     } else {
         inspection.read().clone().flatten()
     };
-    let mut imported_dataset = use_signal(|| None::<String>);
+    let mut imported_dataset = use_signal(|| None::<DatasetSelection>);
     use_effect(move || {
-        let Some(name) = imported_dataset() else {
+        let Some(imported) = imported_dataset() else {
             return;
         };
-        let resource = resources
+        let listed = datasets
             .read()
             .as_ref()
             .and_then(|result| result.as_ref().ok())
-            .and_then(|entries| {
+            .is_some_and(|entries| {
                 entries
                     .iter()
-                    .find(|resource| resource.selection().label() == name)
-            })
-            .cloned();
-        if let Some(resource) = resource {
+                    .any(|dataset| dataset.selection() == &imported)
+            });
+        if listed {
             imported_dataset.set(None);
             let mut selection = selection;
             selection.importing.set(false);
-            selection.select_dataset(resource.selection().clone());
+            selection.select_dataset(imported);
         }
     });
 
@@ -366,14 +377,18 @@ fn DataPanels() -> Element {
     )
     .with_view(selection.active_view());
 
-    // The overview lists the dataset's episodes as its producer records
-    // them, which its inspection says.
+    // The overview lists the dataset's episodes as its format records them,
+    // which its inspection says.
     let overview = match dataset {
         Some(_) => match &dataset_inspection {
-            Some(Ok(inspection)) => rsx! {
-                DatasetOverview { listing: EpisodeListing::of(inspection),
-                    on_open: move |checked| selection.open_episode(OpenedEpisode::checked(checked)) }
-            },
+            Some(Ok(inspection)) => {
+                let deleted = inspection.dataset().selection().clone();
+                rsx! {
+                    DatasetOverview { listing: EpisodeListing::of(inspection.dataset()),
+                        on_open: move |checked| selection.open_episode(OpenedEpisode::checked(checked)),
+                        on_deleted: move |()| selection.forget_dataset(&deleted) }
+                }
+            }
             Some(Err(error)) => {
                 rsx! { p { class: "data-overview-alert", role: "alert", "{error}" } }
             }
@@ -382,21 +397,15 @@ fn DataPanels() -> Element {
             }
         },
         None => {
-            let datasets = resources
+            let listings = datasets
                 .read()
                 .as_ref()
                 .and_then(|result| result.as_ref().ok())
-                .map(|entries| {
-                    entries
-                        .iter()
-                        .filter(|resource| resource.kind() == "dataset")
-                        .map(|resource| resource.selection().clone())
-                        .collect::<Vec<_>>()
-                })
+                .map(|entries| entries.iter().map(EpisodeListing::of).collect::<Vec<_>>())
                 .unwrap_or_default();
             rsx! {
-                DatasetsAtAGlance { datasets,
-                    on_select: move |dataset| selection.select_dataset(dataset),
+                DatasetsAtAGlance { datasets: listings,
+                    on_select: move |listing: EpisodeListing| selection.select_dataset(listing.dataset().clone()),
                     on_import: move |()| selection.start_import() }
             }
         }
@@ -407,7 +416,7 @@ fn DataPanels() -> Element {
             "Datasets",
             CATALOG_PANEL,
             rsx! {
-                CatalogRail { resources, curated: curated.into(), selection: rail_selection, actions: rail_actions }
+                CatalogRail { datasets, curated: curated.into(), selection: rail_selection, actions: rail_actions }
             },
         )
         .with_class("data-catalog-panel"),
@@ -462,7 +471,7 @@ fn DataPanels() -> Element {
         panels.push(
             Panel::new(IMPORT_PANEL, "Import", SUBJECT_TILE, rsx! {
                 super::import_dataset::ImportDataset {
-                    on_done: move |name| { imported_dataset.set(Some(name)); super::relations::CatalogRefresh::request(); },
+                    on_done: move |dataset| { imported_dataset.set(Some(dataset)); super::relations::CatalogRefresh::request(); },
                 }
             })
             .with_closable(true)
