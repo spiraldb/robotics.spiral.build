@@ -2,14 +2,16 @@
 //! leads with, in Data's rail and in every Curation index alike.
 //!
 //! A list of a hundred ids is a list you have to read; a list of a hundred
-//! pictures is one you can scan. Each still is one episode query that reads
-//! one camera's packets from the keyframe before its frame up to that frame,
-//! decoded in the browser as the camera's panel decodes them, and the same
-//! picture is asked for again and again: an episode's opening frame leads its
-//! row in Data, in the Dataset node, and in every Select below it, and a
-//! node's index is rebuilt whenever the operator comes back to it. So a still
-//! is decoded once per project, camera, episode and instant, and every row
-//! that shows it reads the same answer.
+//! pictures is one you can scan. A still is one camera's packets from the
+//! keyframe before its frame up to that frame, decoded in the browser as the
+//! camera's panel decodes them. An episode's opening still is one packet, its
+//! camera's first, so the opening stills of the rows that come into view
+//! together are read in one statement; a still at any other instant is one
+//! episode query of its own. The same picture is asked for again and again:
+//! an episode's opening frame leads its row in Data, in the Dataset node, and
+//! in every Select below it, and a node's index is rebuilt whenever the
+//! operator comes back to it. So a still is decoded once per project, camera,
+//! episode and instant, and every row that shows it reads the same answer.
 use super::decoder::{CameraPlayback, CameraStill, EncodedCamera};
 use crate::activities::data::DatasetClient;
 use crate::activities::episode::{Episode, StreamCatalog};
@@ -19,8 +21,8 @@ use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{
     DatasetSelection, DatasetStreams, EpisodeId, TopicRevision,
 };
-use spiral_robotics_common::relations::EpisodeQueryRequest;
-use std::{collections::HashMap, rc::Rc};
+use spiral_robotics_common::relations::{EpisodeQueryRequest, EpisodesQueryRequest};
+use std::{collections::HashMap, io::Cursor, rc::Rc};
 
 /// How long after its instant a still's frame may have been logged: the
 /// frame is the first the camera logged from the instant on, among those it
@@ -35,6 +37,10 @@ const STILL_PACKET_ROWS: usize = 1_000;
 /// The largest slot a still fills, in CSS pixels: a Curation index row's.
 /// Every other slot is smaller, and each crops the still to its own shape.
 const STILL_SLOT: (f64, f64) = (96.0, 54.0);
+
+/// How long an opening still waits for the rows that come into view with it,
+/// so one statement reads all of their first frames.
+const OPENING_GATHER_MS: u32 = 30;
 
 /// Which picture a still is: an instant of one episode.
 #[derive(Clone, Debug, PartialEq)]
@@ -55,6 +61,10 @@ impl StillMoment {
             episode: episode.clone(),
             at: seconds.max(0.0),
         }
+    }
+    /// Whether it is its episode's opening still.
+    fn opens(&self) -> bool {
+        self.at == 0.0
     }
     fn key(&self, camera: &str) -> StillKey {
         StillKey {
@@ -108,9 +118,7 @@ impl StillMoment {
             .await
             .map_err(|error| format!("Decoding a still: {error}"))?;
         // The read ends on the frame the still shows.
-        let shown = packets
-            .last_frame_seconds()
-            .ok_or("The camera logged no frame at this moment.")?;
+        let shown = packets.last_frame_seconds().ok_or(Self::NO_FRAME)?;
         CameraPlayback::new(Rc::new(packets))
             .still(shown, STILL_SLOT)
             .await
@@ -126,16 +134,170 @@ impl StillMoment {
     /// This instant's frame on the camera topic `camera`, as a picture a row
     /// can show.
     async fn picture(self, camera: String, datasets: DatasetClient) -> Result<String, String> {
-        let inspection = datasets
-            .inspect_dataset(self.episode.dataset().clone())
-            .await
-            .map_err(|error| format!("Decoding a still: {error}"))?;
-        let stream = DatasetStreams::new(inspection.topics())
-            .camera(&camera)?
-            .revision()
-            .clone();
+        let stream =
+            EpisodeStills::camera_stream(&datasets, self.episode.dataset(), &camera).await?;
         Ok(self.decode(&stream).await?.url().to_owned())
     }
+}
+
+/// The opening stills of episodes of one dataset on one camera, asked for
+/// together. An opening still is almost always its camera's first packet: a
+/// keyframe logged within a second of the episode's start, which decodes
+/// alone, so one statement reads every asked episode's first packet. An
+/// episode that statement does not answer is read the way a still at any
+/// other instant is: one whose first packet is not such a keyframe, as an
+/// MCAP camera logged out of order can be, or every asked episode when the
+/// statement fails, as one over the response limit does.
+struct OpeningStills {
+    camera: String,
+    asked: Vec<AskedStill>,
+}
+
+impl OpeningStills {
+    /// `asked` by dataset and camera, in the order each pair was first asked.
+    fn group(asked: Vec<AskedStill>) -> Vec<Self> {
+        let mut groups = Vec::<Self>::new();
+        for still in asked {
+            match groups.iter_mut().find(|group| {
+                group.camera == still.camera && group.dataset() == still.moment.episode.dataset()
+            }) {
+                Some(group) => group.asked.push(still),
+                None => groups.push(Self {
+                    camera: still.camera.clone(),
+                    asked: vec![still],
+                }),
+            }
+        }
+        groups
+    }
+    fn dataset(&self) -> &DatasetSelection {
+        self.asked[0].moment.episode.dataset()
+    }
+    /// Every asked episode's first packet on `camera`, `$1` through `$N`
+    /// binding the episodes in the order they were asked.
+    fn statement(&self, camera: &TopicRevision) -> String {
+        let bound = (1..=self.asked.len())
+            .map(|place| format!("${place}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "SELECT r.id AS episode_id, r.keyframe, r.log_time, r.value.format AS field_0, \
+             r.value.data AS field_1 FROM {} r WHERE r.id IN ({bound}) AND r.ordinal = 0",
+            self.dataset().messages(camera)
+        )
+    }
+    /// Read every asked still and settle each one: its picture, or why it
+    /// has none.
+    async fn settle(
+        self,
+        datasets: DatasetClient,
+        mut decoded: Signal<HashMap<StillKey, Signal<StillState>>>,
+    ) {
+        let packets = self.read(&datasets).await.unwrap_or_default();
+        for mut still in self.asked {
+            let alone = packets
+                .get(still.moment.episode.id())
+                .filter(|packet| still.moment.decodes_alone(packet));
+            let picture = match alone {
+                Some(packet) => still.moment.opening_picture(packet).await,
+                None => {
+                    let (moment, camera) = (still.moment.clone(), still.camera.clone());
+                    moment.picture(camera, datasets.clone()).await
+                }
+            };
+            match picture {
+                Ok(picture) => still.state.set(StillState::Picture(picture)),
+                Err(reason) => {
+                    decoded.write().remove(&still.key);
+                    still.state.set(StillState::Failed(reason));
+                }
+            }
+        }
+    }
+    /// Each asked episode's first packet, as a one-row batch.
+    async fn read(
+        &self,
+        datasets: &DatasetClient,
+    ) -> Result<HashMap<EpisodeId, arrow_array::RecordBatch>, String> {
+        let fail = |error: String| format!("Decoding a still: {error}");
+        let stream = EpisodeStills::camera_stream(datasets, self.dataset(), &self.camera).await?;
+        let request = EpisodesQueryRequest::new(
+            self.dataset().clone(),
+            self.asked
+                .iter()
+                .map(|still| still.moment.episode.id().clone())
+                .collect(),
+            self.statement(&stream),
+            1,
+        );
+        let response = datasets
+            .run_episodes_arrow_query(&request)
+            .await
+            .map_err(|error| fail(error.to_string()))?;
+        let reader = arrow_ipc::reader::StreamReader::try_new(Cursor::new(response), None)
+            .map_err(|error| fail(error.to_string()))?;
+        let mut packets = HashMap::new();
+        for batch in reader {
+            let batch = batch.map_err(|error| fail(error.to_string()))?;
+            let episodes = batch
+                .column_by_name("episode_id")
+                .and_then(|ids| ids.as_any().downcast_ref::<arrow_array::UInt64Array>())
+                .ok_or_else(|| fail("a packet names no episode".to_owned()))?;
+            for row in 0..batch.num_rows() {
+                packets.insert(EpisodeId::new(episodes.value(row)), batch.slice(row, 1));
+            }
+        }
+        Ok(packets)
+    }
+}
+
+impl StillMoment {
+    /// What a still says when its instant has no frame to show.
+    const NO_FRAME: &'static str = "The camera logged no frame at this moment.";
+
+    /// Whether `packet`, the episode's first on its camera, is its opening
+    /// frame and decodes alone: a keyframe logged within a second of the
+    /// episode's start. Then the frame the opening still shows is that
+    /// packet, as the statement for any instant would find it.
+    fn decodes_alone(&self, packet: &arrow_array::RecordBatch) -> bool {
+        let logged = packet
+            .column_by_name("log_time")
+            .and_then(|times| times.as_any().downcast_ref::<arrow_array::UInt64Array>())
+            .map(|times| times.value(0));
+        let keyframe = packet
+            .column_by_name("keyframe")
+            .and_then(|keyframes| {
+                keyframes
+                    .as_any()
+                    .downcast_ref::<arrow_array::BooleanArray>()
+            })
+            .is_some_and(|keyframes| keyframes.value(0));
+        match (self.start_ns(), logged) {
+            (Ok(start), Some(logged)) => {
+                keyframe && logged < start.saturating_add(FRAME_SEARCH_NANOS)
+            }
+            _ => false,
+        }
+    }
+    /// The opening picture of `packet`, a first packet that decodes alone.
+    async fn opening_picture(&self, packet: &arrow_array::RecordBatch) -> Result<String, String> {
+        let packets = EncodedCamera::from_messages(std::slice::from_ref(packet), self.start_ns()?)
+            .map_err(|error| format!("Decoding a still: {error}"))?;
+        let shown = packets.last_frame_seconds().ok_or(Self::NO_FRAME)?;
+        Ok(CameraPlayback::new(Rc::new(packets))
+            .still(shown, STILL_SLOT)
+            .await?
+            .url()
+            .to_owned())
+    }
+}
+
+/// A still a row asked for, waiting to be read with the others asked with it.
+struct AskedStill {
+    moment: StillMoment,
+    camera: String,
+    key: StillKey,
+    state: Signal<StillState>,
 }
 
 /// What one decoded still is filed under.
@@ -174,6 +336,8 @@ impl StillState {
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct EpisodeStills {
     decoded: Signal<HashMap<StillKey, Signal<StillState>>>,
+    /// Opening stills asked for since the last were read, read together.
+    openings: Signal<Vec<AskedStill>>,
     /// The project's scope: decodes run as its tasks, so one outlives the row
     /// that asked for it and stops with the project.
     owner: ScopeId,
@@ -183,8 +347,25 @@ impl EpisodeStills {
     pub(crate) fn use_provider() -> Self {
         use_context_provider(|| Self {
             decoded: Signal::new(HashMap::new()),
+            openings: Signal::new(Vec::new()),
             owner: current_scope_id(),
         })
+    }
+    /// The stream of the camera topic `camera` in `dataset`, from the
+    /// project's inspection of it.
+    async fn camera_stream(
+        datasets: &DatasetClient,
+        dataset: &DatasetSelection,
+        camera: &str,
+    ) -> Result<TopicRevision, String> {
+        let inspection = datasets
+            .inspect_dataset(dataset.clone())
+            .await
+            .map_err(|error| format!("Decoding a still: {error}"))?;
+        Ok(DatasetStreams::new(inspection.topics())
+            .camera(camera)?
+            .revision()
+            .clone())
     }
     fn current() -> Self {
         consume_context()
@@ -223,6 +404,16 @@ impl EpisodeStills {
         let mut decoded = self.decoded;
         decoded.write().insert(key.clone(), state);
         let (moment, camera) = (moment.clone(), camera.to_owned());
+        if moment.opens() {
+            let asked = AskedStill {
+                moment,
+                camera,
+                key,
+                state,
+            };
+            self.gather(asked, datasets);
+            return state;
+        }
         ScopedTask::spawn(self.owner, async move {
             match moment.picture(camera, datasets).await {
                 Ok(picture) => state.set(StillState::Picture(picture)),
@@ -233,6 +424,25 @@ impl EpisodeStills {
             }
         });
         state
+    }
+    /// Keep `asked` with the opening stills asked for in the same moment; the
+    /// first of them reads them all, by dataset and camera, once the rows
+    /// that come into view with it have asked too.
+    fn gather(self, asked: AskedStill, datasets: DatasetClient) {
+        let mut openings = self.openings;
+        let first = openings.peek().is_empty();
+        openings.write().push(asked);
+        if !first {
+            return;
+        }
+        let (owner, decoded) = (self.owner, self.decoded);
+        ScopedTask::spawn(owner, async move {
+            gloo_timers::future::TimeoutFuture::new(OPENING_GATHER_MS).await;
+            let asked = std::mem::take(&mut *openings.write());
+            for stills in OpeningStills::group(asked) {
+                ScopedTask::spawn(owner, stills.settle(datasets.clone(), decoded));
+            }
+        });
     }
 }
 
@@ -331,6 +541,38 @@ mod tests {
             .packets_statement(&top())
             .expect("the episode records its start");
         assert!(opening.contains("f.log_time >= 1000000000 AND f.log_time < 2000000000"));
+    }
+
+    /// Rows that come into view together read their opening frames in one
+    /// statement for each dataset and camera.
+    #[test]
+    fn opening_stills_asked_together_read_one_packet_each_in_one_statement() {
+        let asked = |id: u32, camera: &str| {
+            let moment =
+                StillMoment::opening(&Episode::fixture(&EpisodeId::fixture(id), 30_000_000_000));
+            AskedStill {
+                key: moment.key(camera),
+                camera: camera.to_owned(),
+                moment,
+                state: Signal::new_in_scope(StillState::Waiting, ScopeId::ROOT),
+            }
+        };
+        let mut dom = dioxus::dioxus_core::VirtualDom::new(|| rsx! {});
+        dom.rebuild_in_place();
+        dom.in_runtime(|| {
+            let groups =
+                OpeningStills::group(vec![asked(1, "/top"), asked(2, "/wrist"), asked(3, "/top")]);
+            assert_eq!(groups.len(), 2);
+            assert_eq!(groups[0].asked.len(), 2);
+            assert_eq!(
+                groups[0].statement(&top()),
+                "SELECT r.id AS episode_id, r.keyframe, r.log_time, r.value.format AS field_0, \
+                 r.value.data AS field_1 FROM \"datasets.folding.messages.top_0a1b2c3d\" r \
+                 WHERE r.id IN ($1, $2) AND r.ordinal = 0"
+            );
+        });
+        assert!(StillMoment::opening(&Episode::fixture(&EpisodeId::fixture(1), 1)).opens());
+        assert!(!StillMoment::at(&Episode::fixture(&EpisodeId::fixture(1), 1), 0.5).opens());
     }
 
     #[test]

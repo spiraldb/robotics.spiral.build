@@ -44,7 +44,12 @@ Its frame is the first the camera logged at or after its instant, within a
 second, and one episode query reads only the packets that decode it: from the
 last keyframe at or before that frame up to the frame, found by the stream's
 `keyframe` and `ordinal` columns. A still therefore reads one group of pictures
-at most, and an episode's opening still one packet. It is drawn as a JPEG just
+at most, and an episode's opening still almost always one packet: the
+camera's first (`ordinal` 0), a keyframe logged within a second of the
+episode's start. The opening stills of the rows that come into view together
+are read in one statement over those episodes; an episode whose first packet
+is not such a keyframe is read as a still at any other instant is. A still is
+drawn as a JPEG just
 large enough to cover the largest slot a row gives it, decoded once per
 project, camera, episode and instant (`EpisodeStills`). Training reads a
 camera's size from the same still at the first episode's start, as the decoded

@@ -111,7 +111,12 @@ impl EncodedCamera {
         Self::from_messages(messages.batches(), origin)
     }
 
-    fn from_messages(batches: &[arrow_array::RecordBatch], origin: u64) -> Result<Self, String> {
+    /// The packets `batches` hold, read as one episode query's rows, on a
+    /// clock that starts at `origin`.
+    pub(super) fn from_messages(
+        batches: &[arrow_array::RecordBatch],
+        origin: u64,
+    ) -> Result<Self, String> {
         use arrow_array::Array as _;
         use spiral_robotics_common::datasets::H264AccessUnit;
         let mut camera = Self {
