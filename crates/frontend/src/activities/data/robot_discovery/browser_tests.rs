@@ -32,15 +32,14 @@ export function installRobotDiscoveryFetch() {
         const recordedPath = path === '/api/proxy' ? metadata.url : path;
         robotRequests.push({path:recordedPath, transport:path, project: request.headers.get('X-Spiral-Project'), metadata, body});
         if (path === '/api/queries') return Response.json({
-            columns:[{name:'id'}],rows:[{id:7}],truncated:false
+            columns:[{name:'id'},{name:'streams'}],rows:[{id:7,streams:[{stream:'joints_0a1b2c3d',messages:3}]}],truncated:false
         });
         if (path === '/api/datasets/inspect') return Response.json({
             dataset:{selection:{id:'demo'},format:'mcap',resource_id:'demo-resource',version_id:'demo-version'},
-            members:1,topics:[]
+            members:1,topics:[
+                {name:'/joints',revision:{stream:'joints_0a1b2c3d'},schema:'sensor_msgs/JointState',encoding:'protobuf',members:1,samples:3}
+            ]
         });
-        if (path === '/api/datasets/episode-topics') return Response.json([
-            {name:'/joints',revision:{stream:'joints_0a1b2c3d'},schema:'sensor_msgs/JointState',encoding:'protobuf',members:1,samples:3}
-        ]);
         if (path === '/api/queries/episode') return Response.json({
             columns:[{name:'value'}],rows:[{value:{position:[0.25]}}],truncated:false
         });

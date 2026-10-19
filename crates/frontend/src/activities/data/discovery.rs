@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use spiral_robotics_common::{
     datasets::{
         DatasetFormat, DatasetSelection, DatasetStreams, DatasetTopic, EpisodeId, EpisodeSelection,
+        EpisodeStream,
     },
     providers::ProviderMessage,
     relations::EpisodeQueryRequest,
@@ -59,7 +60,7 @@ impl DiscoveryEpisode {
         let first = data
             .run_spiral_query(
                 format!(
-                    "SELECT id, source_uri FROM {} LIMIT 1",
+                    "SELECT id, source_uri, streams FROM {} LIMIT 1",
                     selection.episodes()
                 ),
                 1,
@@ -79,16 +80,19 @@ impl DiscoveryEpisode {
             .get("source_uri")
             .and_then(Value::as_str)
             .map(str::to_owned);
-        let format = data
+        let streams = row
+            .get("streams")
+            .cloned()
+            .map(serde_json::from_value::<Vec<EpisodeStream>>)
+            .ok_or("Episode lists no streams")?
+            .map_err(|error| format!("Reading the episode's streams: {error}"))?;
+        let inspection = data
             .inspect_dataset(selection.clone())
             .await
-            .map_err(|error| error.to_string())?
-            .format();
-        let episode = EpisodeSelection::new(selection, id);
-        let topics = data
-            .episode_topics(episode.clone())
-            .await
             .map_err(|error| error.to_string())?;
+        let format = inspection.format();
+        let topics = inspection.episode_topics(&streams)?;
+        let episode = EpisodeSelection::new(selection, id);
         Ok(Self {
             data,
             episode,

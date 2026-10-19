@@ -19,7 +19,7 @@ impl RecordedTopics {
     pub(super) fn use_topics(episode: Option<Episode>) -> Option<Self> {
         let topics = use_resource(use_reactive(&episode, move |episode| async move {
             let episode = episode?;
-            let catalog = StreamCatalog::load(episode.selection()).await.ok()?;
+            let catalog = StreamCatalog::load(episode.clone()).await.ok()?;
             Some(Self {
                 cameras: catalog
                     .videos()

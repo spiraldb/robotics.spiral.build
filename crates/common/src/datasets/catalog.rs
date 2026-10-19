@@ -370,6 +370,42 @@ impl DatasetInspection {
     pub fn topics(&self) -> &[DatasetTopic] {
         &self.topics
     }
+    /// The topics of an episode whose row lists `streams`, each counting
+    /// the messages it holds in that episode. Every stream an episode holds
+    /// is one of its dataset's, so one the inspection does not list means
+    /// the inspection is older than the row.
+    pub fn episode_topics(&self, streams: &[EpisodeStream]) -> Result<Vec<DatasetTopic>, String> {
+        streams
+            .iter()
+            .map(|held| {
+                self.topics
+                    .iter()
+                    .find(|topic| topic.revision() == &held.revision)
+                    .map(|topic| topic.clone().with_coverage(1, held.messages))
+                    .ok_or_else(|| {
+                        format!(
+                            "{} does not list stream {} yet; refresh the catalog",
+                            self.dataset.selection().label(),
+                            held.revision.stream()
+                        )
+                    })
+            })
+            .collect()
+    }
+}
+
+/// One stream an episode holds messages of, and how many: an item of its
+/// row's `streams` in the dataset's `episodes` table.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EpisodeStream {
+    #[serde(flatten)]
+    revision: TopicRevision,
+    messages: u64,
+}
+impl EpisodeStream {
+    pub fn new(revision: TopicRevision, messages: u64) -> Self {
+        Self { revision, messages }
+    }
 }
 
 /// Encoded Annex B packets.
@@ -503,5 +539,49 @@ mod tests {
         assert!(!mcap.is_recorded_as("/top", None));
         assert!(feature("parquet").is_recorded_as("observation.images.up", None));
         assert!(!feature("parquet").is_recorded_as("observation.images.up", Some("x")));
+    }
+
+    /// An episode's row names its streams; the dataset's inspection says
+    /// what each one is.
+    #[test]
+    fn an_episode_s_topics_are_its_row_s_streams_as_the_dataset_records_them() {
+        let top = TopicRevision::new("top_00000000").unwrap();
+        let joints = TopicRevision::new("joints_00000001").unwrap();
+        let inspection = DatasetInspection::new(
+            DatasetSummary::new(
+                DatasetSelection::new("demo").unwrap(),
+                DatasetFormat::Mcap,
+                ("resource".into(), "version".into()),
+            ),
+            2,
+            vec![
+                DatasetTopic::new("/top".into(), top.clone(), "protobuf".into())
+                    .with_schema(Some("foxglove.CompressedVideo".into()))
+                    .with_coverage(2, 900),
+                DatasetTopic::new("/joints".into(), joints.clone(), "protobuf".into())
+                    .with_coverage(1, 40),
+            ],
+        );
+        let streams: Vec<EpisodeStream> = serde_json::from_value(
+            serde_json::json!([{"stream": "top_00000000", "messages": 450}]),
+        )
+        .unwrap();
+        let topics = inspection.episode_topics(&streams).unwrap();
+        assert_eq!(topics.len(), 1);
+        assert_eq!(
+            (
+                topics[0].name(),
+                topics[0].schema(),
+                topics[0].members(),
+                topics[0].samples()
+            ),
+            ("/top", Some("foxglove.CompressedVideo"), 1, 450)
+        );
+        let newer = [EpisodeStream::new(
+            TopicRevision::new("wrist_00000002").unwrap(),
+            3,
+        )];
+        let error = inspection.episode_topics(&newer).unwrap_err();
+        assert!(error.contains("wrist_00000002"), "{error}");
     }
 }

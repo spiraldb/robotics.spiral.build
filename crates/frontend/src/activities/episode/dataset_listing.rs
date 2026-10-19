@@ -35,7 +35,8 @@ impl EpisodeListing {
         self.format
     }
 
-    /// The facts listed beside each episode's id.
+    /// The facts listed beside each episode's id, its streams among them,
+    /// so opening an episode needs no read of its own to know what it holds.
     fn listed_facts(&self) -> &'static [&'static str] {
         match self.format {
             DatasetFormat::Mcap => &[
@@ -45,6 +46,7 @@ impl EpisodeListing {
                 "message_start_time",
                 "duration_ns",
                 "channel_count",
+                "streams",
             ],
             DatasetFormat::LeRobot => &[
                 "episode_index",
@@ -52,6 +54,7 @@ impl EpisodeListing {
                 "message_count",
                 "message_start_time",
                 "duration_ns",
+                "streams",
             ],
         }
     }
@@ -211,7 +214,7 @@ mod tests {
         let sql = mcap.page_sql(50, 50);
         assert_eq!(
             sql,
-            "SELECT id, source_uri, source_bytes, message_count, message_start_time, duration_ns, channel_count \
+            "SELECT id, source_uri, source_bytes, message_count, message_start_time, duration_ns, channel_count, streams \
              FROM \"datasets.recordings.episodes\" \
              ORDER BY message_start_time, source_uri, id LIMIT 51 OFFSET 50"
         );
@@ -224,7 +227,7 @@ mod tests {
         let listing = lerobot();
         assert_eq!(
             listing.first_sql(100),
-            "SELECT id, episode_index, tasks, message_count, message_start_time, duration_ns \
+            "SELECT id, episode_index, tasks, message_count, message_start_time, duration_ns, streams \
              FROM \"datasets.svla_so101_pickplace.episodes\" ORDER BY episode_index, id LIMIT 100"
         );
         assert!(!listing.sql().contains("channel_count") && !listing.sql().contains("source"));

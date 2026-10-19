@@ -52,12 +52,14 @@ frame displays.
 
 ## One message transport
 
-`POST /api/datasets/episode-topics` lists the streams the selected episode
-holds messages of, from its row's `streams` beside the dataset's `topics`
-([datasets](datasets.md#catalog-layout)): each stream's topic, schema,
-encoding and the episode's message count. A topic recorded with two schemas is
-two streams, each named by its table under `messages`; the Timeline shows such
-a topic's streams side by side, told apart by the hash their names end with.
+An episode's streams are known without a read of their own: every list of
+episodes reads each row's `streams`, and the dataset's inspection, which the
+project reads once, holds its `topics` ([datasets](datasets.md#catalog-layout)).
+`DatasetInspection::episode_topics` joins them into each stream's topic,
+schema, encoding and the episode's message count, so an opened episode starts
+reading its cameras at once. A topic recorded with two schemas is two streams,
+each named by its table under `messages`; the Timeline shows such a topic's
+streams side by side, told apart by the hash their names end with.
 
 The browser reads messages with ordinary episode SQL. `MessageRead` (in
 `common`) reads one stream's `datasets.<id>.messages.<stream>` table, and

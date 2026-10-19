@@ -1,17 +1,16 @@
 //! A dataset's `topics` table, one row per recorded stream
 //! ([datasets](../../../../../docs/datasets.md#topics)), and what reading it
-//! reports: the dataset's inspection, and the topics one episode holds.
-use super::EpisodeTopicQuery;
+//! reports: the dataset's inspection. An episode's own topics are its
+//! row's `streams` as the inspection records them
+//! (`DatasetInspection::episode_topics`).
 use super::writer::DecodedEpisode;
-use crate::db::{ArrowColumns, DatabaseSession as _};
+use crate::db::ArrowColumns;
 use crate::{ProjectConnection, StorageManager};
 use arrow_array::{ArrayRef, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use futures::StreamExt as _;
 use spiral_robotics_common::datasets::{
-    DatasetInspection, DatasetSelection, DatasetTopic, EpisodeSelection, TopicRevision,
+    DatasetInspection, DatasetSelection, DatasetTopic, TopicRevision,
 };
-use spiral_robotics_common::sql::ListItems;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -220,71 +219,15 @@ impl StorageManager {
         }
         Ok(DatasetInspection::new(dataset, episodes, counts.topics()))
     }
-
-    /// The dataset's topics `episode` holds messages of, each with how
-    /// many, read from its row of `episodes` in one statement. An episode
-    /// the dataset does not hold holds none.
-    pub async fn episode_topics(
-        &self,
-        episode: EpisodeSelection,
-    ) -> Result<Vec<DatasetTopic>, String> {
-        let dataset = episode.dataset();
-        let statement = EpisodeTopicQuery::for_episode(
-            episode.episode_id(),
-            format!(
-                "SELECT t.stream, t.topic, t.schema_name, t.message_encoding, u.s.messages AS messages \
-                 FROM {} u JOIN {} t ON t.stream = u.s.stream",
-                ListItems::of(
-                    format!("(SELECT streams FROM {} WHERE id = $1)", dataset.episodes()),
-                    "streams",
-                    "s"
-                ),
-                dataset.topics()
-            ),
-        )?;
-        let mut connection = self.project_store().connect().await?;
-        let mut rows = connection
-            .query(statement.into_statement())
-            .await
-            .map_err(|error| error.to_string())?;
-        let mut topics = Vec::new();
-        while let Some(batch) = rows.next().await {
-            let batch = batch.map_err(|error| error.to_string())?;
-            let columns = ArrowColumns::new(&batch, "episode topics");
-            for row in 0..batch.num_rows() {
-                let stream = TopicRevision::new(columns.text("stream", row)?)?;
-                let messages = columns
-                    .optional_unsigned("messages", row)?
-                    .ok_or("stored episode stream has a null message count")?;
-                topics.push(
-                    DatasetTopic::new(
-                        columns.text("topic", row)?.to_owned(),
-                        stream,
-                        columns.text("message_encoding", row)?.to_owned(),
-                    )
-                    .with_schema(
-                        columns
-                            .optional_text("schema_name", row)?
-                            .map(str::to_owned),
-                    )
-                    .with_coverage(1, messages),
-                );
-            }
-        }
-        topics.sort_by(|left, right| {
-            (left.name(), left.revision()).cmp(&(right.name(), right.revision()))
-        });
-        Ok(topics)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::datasets::fixtures::RolloutFixture;
-    use crate::datasets::{DatasetImport, EpisodeIds, McapFile, TestJournal};
+    use crate::datasets::{DatasetImport, McapFile, TestJournal};
     use crate::db::MemoryDatabase;
-    use spiral_robotics_common::datasets::{DatasetFormat, EpisodeId};
+    use spiral_robotics_common::datasets::{DatasetFormat, EpisodeStream};
 
     #[tokio::test]
     async fn a_dataset_and_each_episode_list_the_streams_they_hold() {
@@ -316,35 +259,36 @@ mod tests {
             .unwrap();
         assert_eq!((camera.name(), camera.members()), ("/camera/top/video", 1));
 
-        let batches = store
+        // An episode's row lists the streams it holds; the dataset's
+        // inspection says what each one is.
+        let rows = store
             .connect()
             .await
             .unwrap()
-            .read_batches(&format!(
-                "SELECT id FROM {} WHERE key = 'filmed'",
-                dataset.episodes()
-            ))
+            .query_rows(
+                &format!("SELECT key, streams FROM {}", dataset.episodes()),
+                10,
+            )
             .await
             .unwrap();
-        let filmed = EpisodeIds::read(batches[0].column(0).as_ref()).unwrap()[0].clone();
-        let topics = storage
-            .episode_topics(EpisodeSelection::new(dataset.clone(), filmed))
-            .await
-            .unwrap();
-        assert_eq!(topics.len(), inspection.topics().len());
-        let held = topics.iter().find(|topic| topic.is_video()).unwrap();
+        let held = |key: &str| {
+            let row = rows.rows().iter().find(|row| row["key"] == key).unwrap();
+            let streams: Vec<EpisodeStream> =
+                serde_json::from_value(row["streams"].clone()).unwrap();
+            inspection.episode_topics(&streams).unwrap()
+        };
+        let filmed = held("filmed");
+        assert_eq!(filmed.len(), inspection.topics().len());
+        let held_camera = filmed.iter().find(|topic| topic.is_video()).unwrap();
         assert_eq!(
-            (held.revision(), held.members(), held.samples()),
+            (
+                held_camera.revision(),
+                held_camera.members(),
+                held_camera.samples()
+            ),
             (camera.revision(), 1, 8)
         );
-        let stranger = EpisodeId::new(u64::MAX);
-        assert!(
-            storage
-                .episode_topics(EpisodeSelection::new(dataset.clone(), stranger))
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(!held("blind").iter().any(DatasetTopic::is_video));
         let empty = DatasetSelection::new("empty").unwrap();
         assert!(
             storage.inspect_dataset(empty).await.is_err(),

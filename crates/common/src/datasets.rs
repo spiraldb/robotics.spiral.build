@@ -14,7 +14,7 @@ mod value_columns;
 pub use camera_video::CameraVideo;
 pub use catalog::{
     DatasetFormat, DatasetInspection, DatasetSelection, DatasetSummary, DatasetTable, DatasetTopic,
-    EpisodeSelection, EpisodeTopicRequest, EpisodeVideo, TopicRevision, VideoPacket,
+    EpisodeSelection, EpisodeStream, EpisodeTopicRequest, EpisodeVideo, TopicRevision, VideoPacket,
 };
 pub use dataset_import::{DatasetImportPhase, DatasetImportRequest, DatasetImportStatus};
 pub use episode_id::EpisodeId;
