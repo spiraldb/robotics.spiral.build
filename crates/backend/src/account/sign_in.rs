@@ -280,8 +280,8 @@ mod tests {
                 .unwrap()
                 .contains("Secure")
         );
-        let hosted = PublicAddress::parse("https://robotics.spiraldb.com/").unwrap();
-        assert_eq!(hosted.callback(), "https://robotics.spiraldb.com/callback");
+        let hosted = PublicAddress::parse("https://robotics.spiral.build/").unwrap();
+        assert_eq!(hosted.callback(), "https://robotics.spiral.build/callback");
         assert!(
             hosted
                 .cookies()
@@ -291,10 +291,10 @@ mod tests {
                 .ends_with("; Secure")
         );
         for invalid in [
-            "ftp://robotics.spiraldb.com",
-            "https://robotics.spiraldb.com/studio",
-            "https://robotics.spiraldb.com/?next=/",
-            "robotics.spiraldb.com",
+            "ftp://robotics.spiral.build",
+            "https://robotics.spiral.build/studio",
+            "https://robotics.spiral.build/?next=/",
+            "robotics.spiral.build",
         ] {
             assert!(PublicAddress::parse(invalid).is_err(), "{invalid}");
         }

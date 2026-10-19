@@ -206,7 +206,7 @@
                 "TZDIR=${pkgs.tzdata}/share/zoneinfo"
                 "SPIRAL_ROBOTICS_STUDIO_DB=${studioHome}/studio.sqlite3"
                 # Spiral's sign-in returns browsers to this address's /callback.
-                "SPIRAL_ROBOTICS_PUBLIC_URL=https://robotics.spiraldb.com"
+                "SPIRAL_ROBOTICS_PUBLIC_URL=https://robotics.spiral.build"
                 "SPIRAL_ROBOTICS_CLIENT_ID=client_3CMizYLaPa3h"
                 # The Modal services Score progress, Track objects, and
                 # training run on, in the spiral-dev workspace; their shared
