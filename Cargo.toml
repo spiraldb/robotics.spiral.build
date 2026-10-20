@@ -26,8 +26,8 @@ unreachable_pub = "deny"
 # Spiral's Rust SDK and its DataFusion integration, from a release of the
 # private SpiralDB repository. The SDK links that release's native ScanDAL
 # archive, which scripts/setup-spiral-sdk.sh installs.
-spiral-sdk = { git = "https://github.com/spiraldb/spiraldb.git", tag = "rust-sdk/0.1.3", default-features = false, features = ["embedded"] }
-spiral-datafusion = { git = "https://github.com/spiraldb/spiraldb.git", tag = "rust-sdk/0.1.3", features = ["sql"] }
+spiral-sdk = { git = "https://github.com/spiraldb/spiraldb.git", tag = "rust-sdk/0.1.4", default-features = false, features = ["embedded"] }
+spiral-datafusion = { git = "https://github.com/spiraldb/spiraldb.git", tag = "rust-sdk/0.1.4", features = ["sql"] }
 datafusion = { version = "55", default-features = false }
 base64 = "0.22"
 spiral-robotics-common = { path = "crates/common" }
