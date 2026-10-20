@@ -35,7 +35,7 @@ const MAX_ARROW_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const QUERY_JSON_CHUNK_ROWS: usize = 64;
 const QUERY_IMAGE_PREVIEW_MAX_EDGE: u32 = 640;
 const QUERY_IMAGE_JPEG_QUALITY: u8 = 82;
-const IMAGE_EXTENSION_NAME: &str = "spql.image.Image";
+const IMAGE_EXTENSION_NAME: &str = "spql.Image";
 const VARIABLE_TENSOR_EXTENSION_NAME: &str = "arrow.variable_shape_tensor";
 
 #[derive(Clone, Copy)]

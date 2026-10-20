@@ -25,9 +25,9 @@ publish = false
 # and mirrors the pinned archives after re-pinning.
 [workspace.metadata.scandal-runtime]
 repository = "spiraldb/spiraldb"
-source = "7f8601380c28b065c5876c6cef3ca51f5dbd0d0a"
+source = "0feca2062516d42400368e85ae2b9fb1a171d32a"
 mirror = "spiraldb/spiral-robotics"
-release = "scandal-runtime-7f860138"
+release = "scandal-runtime-0feca206"
 
 [workspace.metadata.scandal-runtime.archives.x86_64-unknown-linux-gnu]
 artifact-id = "12082476602"
@@ -49,8 +49,8 @@ unreachable_pub = "deny"
 # Spiral's SDK and its DataFusion integration, from the private SpiralDB
 # repository at one develop commit; the ScanDAL runtime the SDK links is the
 # archive `workspace.metadata.scandal-runtime` pins for the same commit.
-spiral-sdk = { git = "https://github.com/spiraldb/spiraldb.git", rev = "7f8601380c28b065c5876c6cef3ca51f5dbd0d0a", default-features = false, features = ["embedded"] }
-spiral-datafusion = { git = "https://github.com/spiraldb/spiraldb.git", rev = "7f8601380c28b065c5876c6cef3ca51f5dbd0d0a", features = ["sql"] }
+spiral-sdk = { git = "https://github.com/spiraldb/spiraldb.git", rev = "0feca2062516d42400368e85ae2b9fb1a171d32a", default-features = false, features = ["embedded"] }
+spiral-datafusion = { git = "https://github.com/spiraldb/spiraldb.git", rev = "0feca2062516d42400368e85ae2b9fb1a171d32a", features = ["sql"] }
 datafusion = { version = "55", default-features = false }
 base64 = "0.22"
 spiral-robotics-common = { path = "crates/common" }

@@ -29,7 +29,7 @@ impl QueryColumn {
     pub fn image_data_url<'a>(&self, value: Option<&'a serde_json::Value>) -> Option<&'a str> {
         matches!(
             self.semantic_type(),
-            Some("spql.image.Image" | "arrow.variable_shape_tensor")
+            Some("spql.Image" | "arrow.variable_shape_tensor")
         )
         .then(|| value?.as_str())?
         .filter(|value| {
