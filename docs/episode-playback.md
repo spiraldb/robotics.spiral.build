@@ -44,7 +44,12 @@ Its frame is the first the camera logged at or after its instant, within a
 second, and one episode query reads only the packets that decode it: from the
 last keyframe at or before that frame up to the frame, found by the stream's
 `keyframe` and `ordinal` columns. A still therefore reads one group of pictures
-at most, and an episode's opening still one packet. It is drawn as a JPEG just
+at most, and an episode's opening still almost always one packet: the
+camera's first (`ordinal` 0), a keyframe logged within a second of the
+episode's start. The opening stills of the rows that come into view together
+are read in one statement over those episodes; an episode whose first packet
+is not such a keyframe is read as a still at any other instant is. A still is
+drawn as a JPEG just
 large enough to cover the largest slot a row gives it, decoded once per
 project, camera, episode and instant (`EpisodeStills`). Training reads a
 camera's size from the same still at the first episode's start, as the decoded
@@ -52,12 +57,14 @@ frame displays.
 
 ## One message transport
 
-`POST /api/datasets/episode-topics` lists the streams the selected episode
-holds messages of, from its row's `streams` beside the dataset's `topics`
-([datasets](datasets.md#catalog-layout)): each stream's topic, schema,
-encoding and the episode's message count. A topic recorded with two schemas is
-two streams, each named by its table under `messages`; the Timeline shows such
-a topic's streams side by side, told apart by the hash their names end with.
+An episode's streams are known without a read of their own: every list of
+episodes reads each row's `streams`, and the dataset's inspection, which the
+project reads once, holds its `topics` ([datasets](datasets.md#catalog-layout)).
+`DatasetInspection::episode_topics` joins them into each stream's topic,
+schema, encoding and the episode's message count, so an opened episode starts
+reading its cameras at once. A topic recorded with two schemas is two streams,
+each named by its table under `messages`; the Timeline shows such a topic's
+streams side by side, told apart by the hash their names end with.
 
 The browser reads messages with ordinary episode SQL. `MessageRead` (in
 `common`) reads one stream's `datasets.<id>.messages.<stream>` table, and

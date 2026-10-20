@@ -17,7 +17,9 @@ use crate::format::{
     WallClockPresentation,
 };
 use dioxus::prelude::*;
-use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId, EpisodeSelection};
+use spiral_robotics_common::datasets::{
+    DatasetSelection, EpisodeId, EpisodeSelection, EpisodeStream,
+};
 
 /// The statistics a dataset's `episodes` table lists for every episode: the
 /// span and message count every format records, and what its format records
@@ -31,6 +33,9 @@ pub(in crate::activities) struct EpisodeFacts {
     message_start_time: Option<u64>,
     #[serde(default)]
     duration_ns: Option<u64>,
+    /// Each stream it holds messages of, and how many.
+    #[serde(default)]
+    streams: Option<Vec<EpisodeStream>>,
     #[serde(flatten)]
     file: RecordedFile,
     #[serde(flatten)]
@@ -91,6 +96,10 @@ impl EpisodeFacts {
     }
     pub(in crate::activities) fn duration_seconds(&self) -> Option<f64> {
         self.duration_ns.map(|nanos| nanos as f64 / 1e9)
+    }
+    /// The streams its row lists; `None` when the row was read without them.
+    pub(in crate::activities) fn streams(&self) -> Option<&[EpisodeStream]> {
+        self.streams.as_deref()
     }
 }
 

@@ -4,7 +4,7 @@ use crate::datasets::TestJournal;
 use crate::datasets::fixtures::RolloutFixture;
 use crate::db::{ArrowColumns, MemoryDatabase};
 use spiral_robotics_common::datasets::{
-    DatasetTopic, EpisodeId, EpisodeSelection, EpisodeTopicRequest, MessageCursor, MessageRead,
+    DatasetTopic, EpisodeId, EpisodeStream, EpisodeTopicRequest, MessageCursor, MessageRead,
     MessageWindow,
 };
 use std::sync::Arc;
@@ -192,15 +192,19 @@ async fn stored_recordings_read_back_by_episode_and_stream() {
         let rows = store
             .connect()
             .await?
-            .query_rows(&format!("SELECT id, key FROM {}", dataset.episodes()), 10)
+            .query_rows(
+                &format!("SELECT id, key, streams FROM {}", dataset.episodes()),
+                10,
+            )
             .await?;
         assert_eq!(rows.rows().len(), 3, "a retry stores nothing new");
+        let inspection = storage.inspect_dataset(dataset.clone()).await?;
         for row in rows.rows() {
             let member = EpisodeId::new(row["id"].as_u64().unwrap());
             let key = row["key"].as_str().unwrap();
-            let available = storage
-                .episode_topics(EpisodeSelection::new(dataset.clone(), member.clone()))
-                .await?;
+            let streams: Vec<EpisodeStream> = serde_json::from_value(row["streams"].clone())
+                .map_err(|error| error.to_string())?;
+            let available = inspection.episode_topics(&streams)?;
             let expected = match key {
                 "first.mcap" => vec!["/camera/overhead/video", "/camera/wrist/video"],
                 "second.mcap" => vec!["/camera/wrist/video"],
@@ -258,14 +262,6 @@ async fn stored_recordings_read_back_by_episode_and_stream() {
                 Some(key != "third.mcap")
             );
         }
-        // An episode the dataset does not hold holds no topics.
-        let stranger = EpisodeId::new(u64::MAX);
-        assert!(
-            storage
-                .episode_topics(EpisodeSelection::new(dataset.clone(), stranger))
-                .await?
-                .is_empty()
-        );
         // The same episode in another dataset is independent.
         let bytes = RolloutFixture::mcap("first", false);
         storage

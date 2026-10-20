@@ -456,17 +456,28 @@ pub(super) fn DatasetCheckReport(
     use_effect(use_reactive((&dataset,), move |(dataset,)| {
         checks.ensure(&dataset)
     }));
-    // The episodes a finding names open as the dataset's list labels them.
-    let listing = use_resource(use_reactive((&listing,), |(listing,)| async move {
-        let episodes = listing.page(0, 1000).await.ok()?.into_episodes();
-        let rows = EpisodeRows::of(episodes.iter());
-        Some(
-            episodes
-                .iter()
-                .map(|episode| (episode.clone(), rows.label(episode)))
-                .collect::<Vec<(Episode, SourceLabel)>>(),
-        )
-    }));
+    // The episodes a finding names open as the dataset's list labels them,
+    // read once there is a report whose findings name them.
+    let reported = matches!(
+        checks.state(&dataset),
+        Some(CheckState::Read(CheckReading::Read { .. }))
+    );
+    let listing = use_resource(use_reactive(
+        (&listing, &reported),
+        |(listing, reported)| async move {
+            if !reported {
+                return None;
+            }
+            let episodes = listing.page(0, 1000).await.ok()?.into_episodes();
+            let rows = EpisodeRows::of(episodes.iter());
+            Some(
+                episodes
+                    .iter()
+                    .map(|episode| (episode.clone(), rows.label(episode)))
+                    .collect::<Vec<(Episode, SourceLabel)>>(),
+            )
+        },
+    ));
     let listed = use_memo(move || listing.read().clone().flatten());
     EvidenceOpener::provide(listed.into(), on_open);
     let run = {

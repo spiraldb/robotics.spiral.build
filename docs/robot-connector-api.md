@@ -9,7 +9,7 @@ browser reaches it only through Studio. It never reaches Spiral. The two share
 request and response types through `crates/common`.
 
 ```console
-cargo run -p spiral-robotics-connector-os -- --studio https://robotics.spiraldb.com --token rc_…
+cargo run -p spiral-robotics-connector-os -- --studio https://robotics.spiral.build --token rc_…
 ```
 
 The flags name the Studio to link to and configure the computer's device

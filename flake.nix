@@ -81,19 +81,21 @@
           linuxBuildInputs = lib.optionals hostPlatform.isLinux [
             pkgs.v4l-utils
           ];
-          spiralRev = (lib.importTOML ./Cargo.toml).workspace.dependencies.spiral-sdk.rev;
-          # spiral-sdk links Spiral's ScanDAL runtime from a prebuilt static
-          # archive: Cargo.toml pins spiraldb's archive for each target, and
-          # scripts/setup-scandal-runtime.py installs it. Shells keep it in a
-          # cache keyed by the pinned commit; a Nix build takes the directory
+          # The Spiral Rust SDK release Cargo.lock pins.
+          spiralSdkVersion =
+            (lib.findFirst (package: package.name == "spiral-sdk") null
+              (lib.importTOML ./Cargo.lock).package
+            ).version;
+          # spiral-sdk links its release's native ScanDAL runtime, a static
+          # archive that scripts/setup-spiral-sdk.sh installs in a cache by
+          # release and target. A Nix build takes the directory
           # SPIRAL_SCANDAL_NATIVE_DIR names, so it runs with --impure.
-          scandalPins = (lib.importTOML ./Cargo.toml).workspace.metadata.scandal-runtime;
           scandalArchive =
             let
               directory = builtins.getEnv "SPIRAL_SCANDAL_NATIVE_DIR";
             in
             if directory == "" then
-              throw "Set SPIRAL_SCANDAL_NATIVE_DIR to the directory scripts/setup-scandal-runtime.py installs, and build with --impure"
+              throw "Set SPIRAL_SCANDAL_NATIVE_DIR to the directory scripts/setup-spiral-sdk.sh installs, and build with --impure"
             else
               builtins.path {
                 path = directory;
@@ -204,7 +206,7 @@
                 "TZDIR=${pkgs.tzdata}/share/zoneinfo"
                 "SPIRAL_ROBOTICS_STUDIO_DB=${studioHome}/studio.sqlite3"
                 # Spiral's sign-in returns browsers to this address's /callback.
-                "SPIRAL_ROBOTICS_PUBLIC_URL=https://robotics.spiraldb.com"
+                "SPIRAL_ROBOTICS_PUBLIC_URL=https://robotics.spiral.build"
                 "SPIRAL_ROBOTICS_CLIENT_ID=client_3CMizYLaPa3h"
                 # The Modal services Score progress, Track objects, and
                 # training run on, in the spiral-dev workspace; their shared
@@ -222,7 +224,7 @@
               StopSignal = "SIGINT";
               Labels = {
                 "org.opencontainers.image.revision" = self.rev or self.dirtyRev;
-                "com.spiraldb.sdk.rev" = spiralRev;
+                "com.spiraldb.sdk.version" = spiralSdkVersion;
               };
             };
           };
@@ -234,8 +236,8 @@
               pkgs.pkg-config
               pkgs.python312
               pkgs.ruff
-              # scripts/setup-scandal-runtime.py downloads spiraldb's archive
-              # through the GitHub CLI's login.
+              # scripts/setup-spiral-sdk.sh downloads the SDK's native runtime
+              # with the GitHub CLI's login when GH_TOKEN is unset.
               pkgs.gh
               tailwind
               pkgs.uv
@@ -245,11 +247,6 @@
             ++ browserTestInputs;
             NO_DOWNLOADS = "1";
             LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
-            # Where scripts/setup-scandal-runtime.py installs the pinned ScanDAL
-            # archive and spiral-scandal-sys links it from.
-            shellHook = ''
-              export SPIRAL_SCANDAL_CACHE_DIR="''${XDG_CACHE_HOME:-$HOME/.cache}/spiral-robotics/scandal/${scandalPins.source}"
-            '';
             GECKODRIVER = lib.getExe pkgs.geckodriver;
             # Select the pinned browser instead of a host Firefox installation.
             WASM_BINDGEN_TEST_WEBDRIVER_JSON = pkgs.writeText "studio-webdriver.json" (
@@ -286,7 +283,9 @@
             packages = sharedShell.packages ++ [ pkgs.ffmpeg ] ++ webBuildInputs;
             # Studio's provider keys for local runs come from the checkout's
             # untracked .env.local, in the variables the hosted image is given.
-            shellHook = sharedShell.shellHook + ''
+            # The first shell on a new SDK release installs its native runtime
+            # where spiral-scandal-sys links it from.
+            shellHook = ''
               if studio_env=$(git rev-parse --show-toplevel 2>/dev/null)/.env.local \
                 && [ -f "$studio_env" ]; then
                 set -a
@@ -294,6 +293,9 @@
                 set +a
               fi
               unset studio_env
+              if [ ! -f "''${SPIRAL_SCANDAL_CACHE_DIR:-''${XDG_CACHE_HOME:-$HOME/.cache}/spiral/scandal}/${spiralSdkVersion}/${hostPlatform.rust.rustcTarget}/libspiral_scandal_runtime.a" ]; then
+                "$(git rev-parse --show-toplevel)/scripts/setup-spiral-sdk.sh"
+              fi
             '';
           };
         in

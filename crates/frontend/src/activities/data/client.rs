@@ -160,15 +160,6 @@ impl DatasetClient {
             inspections: DatasetInspections::current(),
         }
     }
-    pub(in crate::activities) fn episode_topics(
-        &self,
-        request: spiral_robotics_common::datasets::EpisodeSelection,
-    ) -> impl Future<
-        Output = Result<Vec<spiral_robotics_common::datasets::DatasetTopic>, CommandError>,
-    > + use<> {
-        self.project
-            .request(HttpRequest::new("POST", "/api/datasets/episode-topics").json(&request))
-    }
 
     pub(in crate::activities) fn run_spiral_query(
         &self,

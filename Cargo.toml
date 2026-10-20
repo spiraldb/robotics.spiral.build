@@ -18,39 +18,16 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-# spiraldb's prebuilt ScanDAL archive for each target, from its
-# native-runtime workflow at the commit the SDK is pinned to, copied to a
-# pre-release of this repository that CI reads with its own token:
-# scripts/setup-scandal-runtime.py installs it where spiral-scandal-sys links it,
-# and mirrors the pinned archives after re-pinning.
-[workspace.metadata.scandal-runtime]
-repository = "spiraldb/spiraldb"
-source = "0feca2062516d42400368e85ae2b9fb1a171d32a"
-mirror = "spiraldb/spiral-robotics"
-release = "scandal-runtime-0feca206"
-
-[workspace.metadata.scandal-runtime.archives.x86_64-unknown-linux-gnu]
-artifact-id = "12082476602"
-sha256 = "f14d881b624ab302cafde51e8508d3da7be517c14615225876703fd9719ce07c"
-
-[workspace.metadata.scandal-runtime.archives.aarch64-unknown-linux-gnu]
-artifact-id = "12082212552"
-sha256 = "4dd7b3f2745b275fb87f0a0fdc37301ab0afaf03df3054cba17540728d8d75b7"
-
-[workspace.metadata.scandal-runtime.archives.aarch64-apple-darwin]
-artifact-id = "12082765324"
-sha256 = "facfb9ca6071bcebaca8e38ea8a757820c0d52bc16ff4383af0762ad3e44da65"
-
 [workspace.lints.rust]
 dead_code = "deny"
 unreachable_pub = "deny"
 
 [workspace.dependencies]
-# Spiral's SDK and its DataFusion integration, from the private SpiralDB
-# repository at one develop commit; the ScanDAL runtime the SDK links is the
-# archive `workspace.metadata.scandal-runtime` pins for the same commit.
-spiral-sdk = { git = "https://github.com/spiraldb/spiraldb.git", rev = "0feca2062516d42400368e85ae2b9fb1a171d32a", default-features = false, features = ["embedded"] }
-spiral-datafusion = { git = "https://github.com/spiraldb/spiraldb.git", rev = "0feca2062516d42400368e85ae2b9fb1a171d32a", features = ["sql"] }
+# Spiral's Rust SDK and its DataFusion integration, from a release of the
+# private SpiralDB repository. The SDK links that release's native ScanDAL
+# archive, which scripts/setup-spiral-sdk.sh installs.
+spiral-sdk = { git = "https://github.com/spiraldb/spiraldb.git", tag = "rust-sdk/0.1.3", default-features = false, features = ["embedded"] }
+spiral-datafusion = { git = "https://github.com/spiraldb/spiraldb.git", tag = "rust-sdk/0.1.3", features = ["sql"] }
 datafusion = { version = "55", default-features = false }
 base64 = "0.22"
 spiral-robotics-common = { path = "crates/common" }

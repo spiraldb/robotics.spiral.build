@@ -12,7 +12,7 @@ use axum::{
 use spiral_robotics_common::datasets::{
     DatasetImportRequest, DatasetImportStatus, DatasetInspection, DatasetJointRoles,
     DatasetJointRolesSave, DatasetRobot, DatasetRobotSave, DatasetSelection, DatasetSummary,
-    DatasetTopic, EpisodeSelection, HuggingFaceDatasetInspection, HuggingFaceDatasetSource,
+    HuggingFaceDatasetInspection, HuggingFaceDatasetSource,
 };
 use spiral_robotics_common::relations::{
     EpisodeQueryRequest, EpisodesQueryRequest, QueryRequest, SpiralQuerySnapshot,
@@ -28,7 +28,6 @@ impl DatasetQueryEndpoints {
             .route("/datasets/inspect", post(Self::inspect_dataset))
             .route("/datasets/robot", post(Self::dataset_robot))
             .route("/datasets/joint-roles", post(Self::dataset_joint_roles))
-            .route("/datasets/episode-topics", post(Self::episode_topics))
             .route("/queries", post(Self::run_spiral_query))
             .route("/queries/episode", post(Self::run_episode_query))
             .route(
@@ -137,17 +136,6 @@ impl DatasetQueryEndpoints {
             .await
             .map_err(OperationError::External)?;
         Ok(Json(inspection))
-    }
-    async fn episode_topics(
-        Project(project): Project,
-        ApiJson(request): ApiJson<EpisodeSelection>,
-    ) -> Result<Json<Vec<DatasetTopic>>, OperationError> {
-        let topics = project
-            .storage()
-            .episode_topics(request)
-            .await
-            .map_err(OperationError::External)?;
-        Ok(Json(topics))
     }
     async fn run_spiral_query(
         Project(project): Project,

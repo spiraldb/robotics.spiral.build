@@ -9,7 +9,7 @@ The backend owns two persistence boundaries:
   curation recipes and the statements of the views they publish, and a record
   of each training run Studio started (its configuration and what it was
   given).
-- **Spiral / ADBC:** datasets, their MCAP sources, and each dataset's answers
+- **Spiral (through its SDK):** datasets, their MCAP sources, and each dataset's answers
   table: model answers and the health check's columns, one cell per episode.
   Training
   runs' metrics, logs, and checkpoints live on the Modal training service
@@ -153,7 +153,7 @@ Curations and training run records load locally. Data queries,
 recording storage, training data access, and artifact reads still require
 Spiral and report their own connection errors.
 
-Run the storage and backend tests with the configured local ADBC driver:
+Run the storage and backend tests:
 
 ```sh
 nix develop --command cargo test \

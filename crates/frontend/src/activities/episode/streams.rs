@@ -4,6 +4,7 @@
 //! channel, or a LeRobot episode's feature. Its kind is decided from what was
 //! recorded — a `foxglove.CompressedVideo` schema, or a LeRobot camera's
 //! `h264` — never from topic or field names.
+use super::identity::Episode;
 use crate::activities::data::DatasetClient;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{
@@ -136,13 +137,20 @@ impl StreamCatalog {
             .collect();
         Self { streams }
     }
-    /// Every stream the episode recorded.
-    pub(in crate::activities) async fn load(episode: EpisodeSelection) -> Result<Self, String> {
+    /// Every stream the episode recorded: the streams its listed row names,
+    /// as the project's inspection of its dataset records them, which every
+    /// surface showing the dataset has usually read already.
+    pub(in crate::activities) async fn load(episode: Episode) -> Result<Self, String> {
+        let streams = episode
+            .facts()
+            .streams()
+            .ok_or("This episode was listed without its streams.")?;
         let topics = DatasetClient::current()
-            .episode_topics(episode.clone())
+            .inspect_dataset(episode.dataset().clone())
             .await
-            .map_err(|error| error.to_string())?;
-        Ok(Self::new(topics, &episode))
+            .map_err(|error| error.to_string())?
+            .episode_topics(streams)?;
+        Ok(Self::new(topics, &episode.selection()))
     }
     /// The camera topics `dataset` records, in its own topic order, from the
     /// project's inspection of it: every episode of a dataset carries the

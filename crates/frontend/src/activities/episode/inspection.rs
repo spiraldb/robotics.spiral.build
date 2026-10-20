@@ -219,8 +219,8 @@ fn InspectedEpisode(
             asked.play(focus);
         }
     }));
-    let selection = episode.selection();
-    let mut catalog = use_resource(move || StreamCatalog::load(selection.clone()));
+    let opened = episode.clone();
+    let mut catalog = use_resource(move || StreamCatalog::load(opened.clone()));
     let robot = RobotModel::use_dataset(episode.dataset());
     let choices = StreamChoices::use_choices();
     let reads = StreamReads::use_reads(transport.range());

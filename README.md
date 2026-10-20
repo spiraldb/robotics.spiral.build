@@ -10,7 +10,7 @@ trained policy on a robot is not supported yet.
 
 It runs as two programs. **Studio** (`crates/backend` and `crates/frontend`)
 serves the browser app, keeps Studio state, and reaches SpiralDB; it runs at
-`robotics.spiraldb.com` or on `localhost`. The **robot connector**
+`robotics.spiral.build` or on `localhost`. The **robot connector**
 (`robot-connector`) runs next to the arms: it owns their serial buses,
 cameras, calibration, and control loop, and records episodes.
 The connector links itself to Studio over plain HTTP, and the browser reaches
@@ -36,15 +36,17 @@ their environment variables. With direnv, `.envrc` loads the same default shell.
 nix develop .
 ```
 
-Studio links Spiral's ScanDAL runtime from the prebuilt archive `Cargo.toml`
-pins. Install it once per pin, in the shell, with your `gh` login:
+Studio builds on a Spiral Rust SDK release, which Cargo fetches from
+SpiralDB's private repository with your git credentials. The SDK links that
+release's native ScanDAL runtime, a private release asset: the default shell
+installs it on entry, once per release, with `GH_TOKEN` or your `gh` login
+(either must read spiraldb/spiraldb). Outside the shell, install it with:
 
 ```console
-python3 scripts/setup-scandal-runtime.py
+scripts/setup-spiral-sdk.sh
 ```
 
-Cargo fetches SpiralDB's private repository with your git credentials. See
-[database setup](docs/database-boundary.md) for the archive and its pins.
+See [database setup](docs/database-boundary.md) for the release and its archive.
 
 Run CI commands with `nix develop .#ci --command <command>`.
 
@@ -108,7 +110,7 @@ The Cargo profile's `debug = 0` does not disable DX's separate bundling option.
 
 ### Hosted
 
-Studio runs at `robotics.spiraldb.com` on one Compute Engine VM, defined by
+Studio runs at `robotics.spiral.build` on one Compute Engine VM, defined by
 `robotics.tf` and `config/robotics-studio/` in `spiraldb/infra`. A Cloudflare
 Tunnel carries its traffic, and Studio's own Spiral sign-in gates every API
 request. Each release, a pushed `v*` tag, publishes its Linux image, the flake's
@@ -198,7 +200,7 @@ The Nix development shell sets Dev (`client_sQWdRwk7ZTBd`); the hosted image
 sets Prod (`client_3CMizYLaPa3h`). These IDs are public, not secrets.
 `SPIRAL_ROBOTICS_PUBLIC_URL` (or `--public-url`) sets the address browsers reach
 Studio at, `http://localhost:3000` by default. Prod registers
-`https://robotics.spiraldb.com/callback`; Dev registers `http://localhost/callback`,
+`https://robotics.spiral.build/callback`; Dev registers `http://localhost/callback`,
 which matches any port. Both registrations belong to the project
 `xiangpeng-robotics-618551` and need no client secret. Each is installed in the
 Spiral organization on every project: a registered application's tokens reach only
