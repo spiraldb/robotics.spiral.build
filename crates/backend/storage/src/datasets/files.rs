@@ -1,5 +1,5 @@
 //! An MCAP dataset's `files` table, one row per episode: its file's key and
-//! an `spql.io.Blob` holding the file's bytes inline, for a file Studio
+//! an `spql.Blob` holding the file's bytes inline, for a file Studio
 //! holds, or pointing at its pinned Hugging Face URI. A project bundle
 //! carries every MCAP dataset's files as their Blobs hold them.
 use arrow_array::{
@@ -86,7 +86,7 @@ impl McapFile {
     }
 }
 
-/// An `spql.io.Blob`, as Spiral lays it out since spiraldb#7629: bytes held
+/// An `spql.Blob`, as Spiral lays it out since spiraldb#7629: bytes held
 /// inline, or a URI to read them from, and the bytes' multihash digest.
 struct McapSourceBlob;
 
@@ -110,13 +110,8 @@ impl McapSourceBlob {
     }
 
     fn field(name: &str) -> Field {
-        Field::new(name, DataType::Struct(Self::fields()), true).with_metadata(
-            [(
-                EXTENSION_TYPE_NAME_KEY.to_owned(),
-                "spql.io.Blob".to_owned(),
-            )]
-            .into(),
-        )
+        Field::new(name, DataType::Struct(Self::fields()), true)
+            .with_metadata([(EXTENSION_TYPE_NAME_KEY.to_owned(), "spql.Blob".to_owned())].into())
     }
 
     /// One Blob holding `bytes`, whose SHA-256 is `sha256`.

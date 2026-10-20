@@ -34,7 +34,7 @@ by their names.
 | `datasets.<id>.episodes` | episode | the episode's identity and facts (below) |
 | `datasets.<id>.topics` | stream | one recorded stream: a topic and the schema its messages use (below) |
 | `datasets.<id>.messages.<stream>` | message | the messages of one stream (below) |
-| `datasets.<id>.files` | MCAP episode | the episode's source MCAP file: `recording` (its key) and `source`, an `spql.io.Blob` holding its bytes inline, or pointing at its pinned Hugging Face URI. LeRobot datasets have none |
+| `datasets.<id>.files` | MCAP episode | the episode's source MCAP file: `recording` (its key) and `source`, an `spql.Blob` holding its bytes inline, or pointing at its pinned Hugging Face URI. LeRobot datasets have none |
 | `datasets.<id>.answers.<column>` | episode asked | one answer column, what one exact model call answered: `episode_id` (`UInt64`, not null, the episode's number) and `value`, the answer, NULL where the model could not answer. An episode with no row is not asked yet ([curation](curation.md#stored-answers)) |
 
 A dataset exists when its `episodes` table does, and is an MCAP dataset when
