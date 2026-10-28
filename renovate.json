@@ -1,0 +1,50 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "local>spiraldb/renovate-config"
+  ],
+  "nix": {
+    "enabled": true
+  },
+  "packageRules": [
+    {
+      "description": "Python environments and Nix toolchain updates require manual compatibility review.",
+      "matchManagers": [
+        "pep621",
+        "nix"
+      ],
+      "automerge": false
+    },
+    {
+      "description": "Keep the SDK and DataFusion integration on the same reviewed release.",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchDepNames": [
+        "spiral-sdk",
+        "spiral-datafusion"
+      ],
+      "groupName": "Spiral Rust SDK",
+      "groupSlug": "spiral-rust-sdk",
+      "automerge": false
+    },
+    {
+      "description": "Coordinate crate updates with the wasm-bindgen CLI pinned in flake.nix.",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchPackageNames": [
+        "wasm-bindgen",
+        "wasm-bindgen-*",
+        "js-sys",
+        "web-sys"
+      ],
+      "groupName": "WebAssembly bindings",
+      "groupSlug": "wasm-bindings",
+      "automerge": false
+    }
+  ],
+  "lockFileMaintenance": {
+    "automerge": false
+  }
+}
