@@ -3,8 +3,8 @@
 //! to a workspace, but writing to Spiral takes a user's access.
 
 use sea_orm::{
-    ActiveModelTrait as _, ColumnTrait as _, ConnectionTrait, EntityTrait as _, QueryFilter as _,
-    QueryOrder as _, Set, TransactionTrait as _,
+    ActiveModelTrait as _, ColumnTrait as _, ConnectionTrait, EntityTrait as _, ExprTrait as _,
+    QueryFilter as _, QueryOrder as _, Set, TransactionTrait as _,
 };
 use spiral_robotics_common::identity::DatasetId;
 use spiral_robotics_common::recording::SavedRecording;

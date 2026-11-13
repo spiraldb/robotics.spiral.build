@@ -74,8 +74,8 @@ curl https://spiral-dev--spiral-robotics-training-control.modal.run/v1/health
 
 Studio's backend reads that URL as `TRAINING_SERVICE_URL` and the token as
 `MODAL_SERVICE_TOKEN`. The ACT and control image installs the locked
-dependencies from `uv.lock`, with CUDA PyTorch from the official CUDA 12.8
-index declared in `pyproject.toml`; the progress image installs
+dependencies from `uv.lock`, including PyTorch’s CUDA dependencies from PyPI;
+the progress image installs
 `../training_progress/uv.lock`. Its path dependencies, `warp-progress` and `video-service`,
 are skipped by `uv_sync` and their sources added by path, as the deploy runs in
 ACT's environment, where they are not installed.

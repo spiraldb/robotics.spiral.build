@@ -335,7 +335,7 @@ async fn format_six_is_a_manifest_sqlite_and_one_arrow_stream_per_relation() {
     );
     let zip = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
     assert_eq!(
-        zip.file_names().collect::<Vec<_>>(),
+        zip.file_names().collect::<Result<Vec<_>, _>>().unwrap(),
         ["manifest.json", "studio.sqlite3", "dataset_source.arrows"]
     );
     let decoded = ProjectBundle::decode(&bytes).unwrap();

@@ -12,16 +12,15 @@ license = { text = "Apache-2.0" }
 dependencies = [
     "av>=19,<20",
     "fastapi>=0.116,<1",
-    "lerobot==0.6.0",
+    "lerobot==0.7.0",
     "numpy>=2.0,<2.3",
     "nvidia-ml-py>=12,<14; sys_platform == 'linux'",
     "psutil>=7,<8",
     "pyarrow>=21,<30",
     "pydantic>=2,<3",
     "safetensors>=0.4.3,<1",
-    "torch>=2.7,<2.8",
-    "torchvision>=0.22,<0.23",
-    "triton==3.3.1; sys_platform == 'linux'",
+    "torch>=2.14,<2.16",
+    "torchvision>=0.29,<0.30",
 ]
 
 [project.optional-dependencies]
@@ -46,13 +45,3 @@ extend-exclude = ["src/spiral_training_runtime/warp_rm_upstream"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
-
-[tool.uv.sources]
-torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
-torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
-triton = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
-
-[[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true

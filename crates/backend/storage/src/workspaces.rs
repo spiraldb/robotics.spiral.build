@@ -66,7 +66,7 @@ impl WorkspaceStore {
                 .do_nothing()
                 .to_owned(),
             )
-            .do_nothing()
+            .try_insert()
             .exec(self.studio.connection().await?)
             .await
             .map_err(|error| error.to_string())?;

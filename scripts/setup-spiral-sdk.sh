@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
-# Install the native ScanDAL archive of the Spiral Rust SDK release that Cargo.lock pins.
-# The archive is a private release asset: set GH_TOKEN or GITHUB_TOKEN, or sign in with `gh`,
-# with read access to spiraldb/spiraldb. Extra arguments go to the release's setup script.
+# Install the verified native libspiral archive of the SDK release Cargo.lock pins.
+# Extra arguments go to the release's setup script.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cargo fetch --locked
-sys_manifest="$(cargo metadata --locked --format-version 1 | python3 -c '
+sdk_manifest="$(cargo metadata --locked --format-version 1 | python3 -c '
 import json, sys
 packages = json.load(sys.stdin)["packages"]
-print(next(p["manifest_path"] for p in packages if p["name"] == "spiral-scandal-sys"))
+print(next(p["manifest_path"] for p in packages if p["name"] == "spiral-sdk"))
 ')"
-python3 "$(dirname "$sys_manifest")/../../../scripts/setup-native-runtime.py" "$@"
+# SDK 0.1.16's packaged installer looks one directory too high for its release
+# record. Its supported --commit mode installs the same verified native archive.
+sdk_source="$(python3 -c '
+import json, pathlib, sys
+print(json.loads(pathlib.Path(sys.argv[1]).with_name("native-runtime.json").read_text())["source_sha"])
+' "$sdk_manifest")"
+python3 "$(dirname "$sdk_manifest")/scripts/setup-native-runtime.py" --commit "$sdk_source" "$@"

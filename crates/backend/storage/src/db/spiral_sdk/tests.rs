@@ -4,7 +4,6 @@ use std::sync::Arc;
 use arrow_array::{RecordBatch, StringArray, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
 use datafusion::prelude::SessionConfig;
-use spiral::CommitOutcome;
 
 use super::{SpiralProject, SpiralSdkDatabase};
 use crate::db::database::{
@@ -48,12 +47,10 @@ async fn an_episode_read_skips_every_window_of_other_episodes() {
         })
         .collect::<Vec<_>>();
     let snapshot = project.snapshot().await.unwrap();
-    let mut transaction = snapshot.transaction().unwrap();
-    transaction.create_table(&name, batches).await.unwrap();
-    assert!(matches!(
-        transaction.commit().await.unwrap(),
-        CommitOutcome::Committed(_)
-    ));
+    let mut transaction = snapshot.commit();
+    let table = snapshot.project().write_table(batches).await.unwrap();
+    transaction.create_table(&name, &table).unwrap();
+    transaction.publish().await.unwrap();
     let explained = async {
         let snapshot = project.snapshot().await.map_err(|e| e.to_string())?;
         let context = project.catalog(&snapshot).session(SessionConfig::new());
@@ -63,11 +60,11 @@ async fn an_episode_read_skips_every_window_of_other_episodes() {
     }
     .await;
     let snapshot = project.snapshot().await.unwrap();
-    let mut cleanup = snapshot.transaction().unwrap();
+    let mut cleanup = snapshot.commit();
     cleanup
         .drop_table(&snapshot.table(&name).await.unwrap())
         .unwrap();
-    cleanup.commit().await.unwrap();
+    cleanup.publish().await.unwrap();
     let explained = explained.unwrap();
     assert!(
         explained.contains("Rows returned by scan: 1,000"),
@@ -79,12 +76,10 @@ async fn an_episode_read_skips_every_window_of_other_episodes() {
     );
 }
 
-/// A transaction reads `main` as it was when it began and publishes only if
-/// `main` has not moved since, so two writers that read the same last
-/// episode cannot both write the next one.
+/// Two transactions cannot both create the same table name from one snapshot.
 #[tokio::test]
 #[ignore = "requires hosted credentials; writes and drops a probe table"]
-async fn a_transaction_publishes_nothing_once_main_moved_past_what_it_read() {
+async fn concurrent_transactions_cannot_both_create_the_same_table() {
     let database = SpiralSdkDatabase::new(crate::datasets::HostedProject::connection());
     let name = format!("probe_conflict_{}", uuid::Uuid::new_v4().simple());
     let episode = |id: u64| {

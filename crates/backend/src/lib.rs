@@ -7,6 +7,7 @@
 //! browsers reach it through Studio.
 
 #![allow(async_fn_in_trait)]
+#![recursion_limit = "256"]
 
 mod account;
 mod clock;

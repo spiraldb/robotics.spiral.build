@@ -2,7 +2,9 @@
 
 A Modal GPU service that tracks what Studio's Track objects node names, such as "bottle", through one
 episode's camera video with SAM 3.1, pinned at `facebook/sam3.1@daa63191…` and the SAM 3 code at the
-3.1 release (`5a3143c`; later commits break SAM 3.1 video sessions).
+3.1 release (`5a3143c`; later commits break SAM 3.1 video sessions), plus
+[a resource-loading patch](https://github.com/robert3005/sam3/commit/1dfdd40d698df88b41b0731daf8a4c94edda7c17)
+that replaces `pkg_resources` with `importlib.resources` for current setuptools.
 
 - `object_tracking/video.py`: the episode's pictures, keeping the first and then one every sample
   period of presentation time, in display order: a request names how many pictures a second as
