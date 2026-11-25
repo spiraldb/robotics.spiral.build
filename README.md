@@ -1,5 +1,10 @@
 # Spiral Robotics
 
+https://github.com/user-attachments/assets/62bfac14-96e2-48a6-bd39-38ec80c7fbc2
+
+Spiral Robotics is a demo app showcasing what you can build with [Spiral](https://spiraldb.com).
+[Reach out to us](mailto:team@spiraldb.com) to get access.
+
 Spiral Robotics is a Rust-native robotics toolkit and browser studio inspired by
 [LeRobot](https://github.com/huggingface/lerobot) and
 [Rerun](https://github.com/rerun-io/rerun). It sets up, calibrates, and operates
