@@ -83,23 +83,22 @@
           ];
           # The Spiral Rust SDK release Cargo.lock pins.
           spiralSdkVersion =
-            (lib.findFirst (package: package.name == "spiral-sdk") null
-              (lib.importTOML ./Cargo.lock).package
-            ).version;
-          # spiral-sdk links its release's native ScanDAL runtime, a static
+            (lib.findFirst (package: package.name == "spiral-sdk") null (lib.importTOML ./Cargo.lock).package)
+            .version;
+          # spiral-sdk links its release's native libspiral runtime, a static
           # archive that scripts/setup-spiral-sdk.sh installs in a cache by
-          # release and target. A Nix build takes the directory
-          # SPIRAL_SCANDAL_NATIVE_DIR names, so it runs with --impure.
-          scandalArchive =
+          # source commit and target. A Nix build takes the directory
+          # SPIRAL_NATIVE_DIR names, so it runs with --impure.
+          spiralArchive =
             let
-              directory = builtins.getEnv "SPIRAL_SCANDAL_NATIVE_DIR";
+              directory = builtins.getEnv "SPIRAL_NATIVE_DIR";
             in
             if directory == "" then
-              throw "Set SPIRAL_SCANDAL_NATIVE_DIR to the directory scripts/setup-spiral-sdk.sh installs, and build with --impure"
+              throw "Set SPIRAL_NATIVE_DIR to the directory scripts/setup-spiral-sdk.sh installs, and build with --impure"
             else
               builtins.path {
                 path = directory;
-                name = "scandal-runtime";
+                name = "spiral-runtime";
               };
           workspaceVersion = (lib.importTOML ./Cargo.toml).workspace.package.version;
           workspaceSource = lib.fileset.toSource {
@@ -116,19 +115,9 @@
           # dependencies as a derivation of their own: a release that changes
           # only Studio's code takes them from the Nix cache.
           craneLib = (crane.mkLib pkgs).overrideToolchain (_: packageRustToolchain);
-          # Every crate Cargo.lock names. Git ones (Spiral's SDK, Vortex, the
-          # patched Dioxus) come through the caller's git credentials, which
-          # reach SpiralDB's private repository.
+          # Registry releases and the pinned Dioxus and SQLx fixes.
           cargoVendorDir = craneLib.vendorCargoDeps {
             src = workspaceSource;
-            # The `vortex` crate's docs include its workspace README, which
-            # vendoring a Git crate leaves behind.
-            overrideVendorGitCheckout =
-              packages: checkout:
-              if lib.any (package: package.name == "vortex") packages then
-                checkout.overrideAttrs { postPatch = "cp README.md vortex/README.md"; }
-              else
-                checkout;
           };
           serverArgs = {
             pname = "spiral-robotics-backend";
@@ -140,7 +129,7 @@
             # On Linux, Vortex's custom-labels generates its bindings with
             # libclang, which the hook points at the C library's headers.
             nativeBuildInputs = [ pkgs.rustPlatform.bindgenHook ];
-            SPIRAL_SCANDAL_NATIVE_DIR = "${scandalArchive}";
+            SPIRAL_NATIVE_DIR = "${spiralArchive}";
             doCheck = false;
           };
           studioServer = craneLib.buildPackage (
@@ -236,9 +225,6 @@
               pkgs.pkg-config
               pkgs.python312
               pkgs.ruff
-              # scripts/setup-spiral-sdk.sh downloads the SDK's native runtime
-              # with the GitHub CLI's login when GH_TOKEN is unset.
-              pkgs.gh
               tailwind
               pkgs.uv
             ]
@@ -283,8 +269,7 @@
             packages = sharedShell.packages ++ [ pkgs.ffmpeg ] ++ webBuildInputs;
             # Studio's provider keys for local runs come from the checkout's
             # untracked .env.local, in the variables the hosted image is given.
-            # The first shell on a new SDK release installs its native runtime
-            # where spiral-scandal-sys links it from.
+            # The SDK setup verifies and caches the native archive for this release.
             shellHook = ''
               if studio_env=$(git rev-parse --show-toplevel 2>/dev/null)/.env.local \
                 && [ -f "$studio_env" ]; then
@@ -293,9 +278,7 @@
                 set +a
               fi
               unset studio_env
-              if [ ! -f "''${SPIRAL_SCANDAL_CACHE_DIR:-''${XDG_CACHE_HOME:-$HOME/.cache}/spiral/scandal}/${spiralSdkVersion}/${hostPlatform.rust.rustcTarget}/libspiral_scandal_runtime.a" ]; then
-                "$(git rev-parse --show-toplevel)/scripts/setup-spiral-sdk.sh"
-              fi
+              export SPIRAL_NATIVE_DIR="$("$(git rev-parse --show-toplevel)/scripts/setup-spiral-sdk.sh")"
             '';
           };
         in

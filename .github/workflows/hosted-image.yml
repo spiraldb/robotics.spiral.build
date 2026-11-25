@@ -48,29 +48,13 @@ jobs:
           primary-key: studio-image-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.lock', '**/Cargo.toml') }}
           restore-prefixes-first-match: studio-image-${{ runner.arch }}-
 
-      # Spiral's SDK and data-plane runtime come from the private SpiralDB
-      # repository; cargo and Nix fetch it with git over this read-only key.
-      - name: Reach SpiralDB's repository
-        env:
-          SPIRALDB_DEPLOY_KEY: ${{ secrets.SPIRALDB_DEPLOY_KEY }}
-        run: |
-          mkdir -p ~/.ssh
-          ssh-keyscan github.com >> ~/.ssh/known_hosts
-          install -m 600 /dev/stdin ~/.ssh/spiraldb <<< "$SPIRALDB_DEPLOY_KEY"
-          printf 'Host github.com\n  IdentityFile ~/.ssh/spiraldb\n  IdentitiesOnly yes\n' >> ~/.ssh/config
-          git config --global url."git@github.com:spiraldb/spiraldb.git".insteadOf "https://github.com/spiraldb/spiraldb.git"
-
-      # spiral-sdk links its release's native ScanDAL runtime, a private asset
-      # of the spiraldb/spiraldb release, which this token reads. The release's
-      # setup script, from Cargo's checkout of the SDK, verifies it and exports
-      # SPIRAL_SCANDAL_NATIVE_DIR to the later steps.
+      # The published SDK verifies its public native archive and exports
+      # SPIRAL_NATIVE_DIR to later steps.
       - name: Install the Spiral SDK's native runtime
-        env:
-          GH_TOKEN: ${{ secrets.SPIRAL_SDK_TOKEN }}
         run: nix develop .#ci --command scripts/setup-spiral-sdk.sh
 
       # The result is a script that streams the image as a Docker archive.
-      # --impure lets the build read the ScanDAL archive's directory.
+      # --impure lets the build read the libspiral archive's directory.
       - name: Build the image
         run: nix build --impure .#hosted-image --out-link hosted-image
 

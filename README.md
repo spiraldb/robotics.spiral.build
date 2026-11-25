@@ -36,11 +36,9 @@ their environment variables. With direnv, `.envrc` loads the same default shell.
 nix develop .
 ```
 
-Studio builds on a Spiral Rust SDK release, which Cargo fetches from
-SpiralDB's private repository with your git credentials. The SDK links that
-release's native ScanDAL runtime, a private release asset: the default shell
-installs it on entry, once per release, with `GH_TOKEN` or your `gh` login
-(either must read spiraldb/spiraldb). Outside the shell, install it with:
+Studio builds on a published Spiral Rust SDK release. The SDK links that
+release's verified native libspiral archive, which the default shell installs
+and caches on entry. Outside the shell, install it with:
 
 ```console
 scripts/setup-spiral-sdk.sh

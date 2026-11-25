@@ -1,5 +1,8 @@
 //! SQLite Studio state and Spiral data access, ingestion, and portable transfer.
 
+// The SDK/DataFusion catalog types exceed the default trait recursion depth.
+#![recursion_limit = "256"]
+
 pub mod curations;
 mod datasets;
 mod db;

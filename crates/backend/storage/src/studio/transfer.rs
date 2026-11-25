@@ -22,7 +22,7 @@ impl StudioSnapshot {
         project
             .connection()
             .await?
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DbBackend::Sqlite,
                 "VACUUM INTO ?",
                 [format!("{destination}?mode=rwc").into()],
@@ -68,7 +68,7 @@ impl StudioSnapshot {
             .map_err(|error| error.to_string())?;
         for table in StudioProject::RECORD_TABLES {
             transaction
-                .execute(Statement::from_sql_and_values(
+                .execute_raw(Statement::from_sql_and_values(
                     DbBackend::Sqlite,
                     format!("DELETE FROM {table} WHERE project <> ?"),
                     [project.key().into()],
@@ -107,7 +107,7 @@ impl StudioSnapshot {
         }
         let check = snapshot
             .database
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 DbBackend::Sqlite,
                 "PRAGMA integrity_check",
             ))
@@ -123,7 +123,7 @@ impl StudioSnapshot {
         }
         let sessions = snapshot
             .database
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 DbBackend::Sqlite,
                 "SELECT count(*) AS count FROM sessions",
             ))
@@ -140,7 +140,7 @@ impl StudioSnapshot {
         for table in StudioProject::RECORD_TABLES {
             let row = snapshot
                 .database
-                .query_one(Statement::from_string(
+                .query_one_raw(Statement::from_string(
                     DbBackend::Sqlite,
                     format!("SELECT project FROM {table} WHERE project <> '' LIMIT 1"),
                 ))
@@ -173,7 +173,7 @@ impl StudioSnapshot {
 
     async fn schema(database: &DatabaseConnection) -> Result<Vec<(String, String)>, String> {
         database
-            .query_all(Statement::from_string(
+            .query_all_raw(Statement::from_string(
                 DbBackend::Sqlite,
                 "SELECT name, sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name",
             ))

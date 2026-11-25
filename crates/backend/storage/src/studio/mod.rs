@@ -202,7 +202,7 @@ impl StudioProject {
         use sea_orm::{ConnectionTrait as _, DbBackend, Statement};
         for table in Self::RECORD_TABLES.into_iter().chain(["curated_views"]) {
             transaction
-                .execute(Statement::from_sql_and_values(
+                .execute_raw(Statement::from_sql_and_values(
                     DbBackend::Sqlite,
                     format!("DELETE FROM {table} WHERE project = ?"),
                     [self.key().into()],

@@ -1,7 +1,6 @@
 [target.wasm32-unknown-unknown]
 runner = "wasm-bindgen-test-runner"
 
-# SpiralDB's private repository is fetched with the system's git and its
-# credentials.
+# Fetch pinned upstream patches with the system's git.
 [net]
 git-fetch-with-cli = true

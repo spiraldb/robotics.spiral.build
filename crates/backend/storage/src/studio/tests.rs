@@ -165,7 +165,7 @@ async fn local_state_survives_reopening() {
     );
     let db = reopened.connection().await.unwrap();
     let journal = db
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             DbBackend::Sqlite,
             "PRAGMA journal_mode",
         ))
@@ -177,7 +177,7 @@ async fn local_state_survives_reopening() {
         "wal"
     );
     let foreign_keys = db
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             DbBackend::Sqlite,
             "PRAGMA foreign_keys",
         ))
@@ -194,7 +194,7 @@ async fn migration_runs_once_and_failed_schema_changes_roll_back() {
     store.initialize().await.unwrap();
     let db = store.connection().await.unwrap();
     let before = db
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             DbBackend::Sqlite,
             "SELECT count(*) AS count FROM seaql_migrations",
         ))
@@ -220,7 +220,7 @@ async fn migration_runs_once_and_failed_schema_changes_roll_back() {
     let failed = StudioStore::at(path);
     assert!(failed.initialize().await.is_err());
     let result = raw
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             DbBackend::Sqlite,
             "SELECT name FROM sqlite_master WHERE name IN ('robots', 'backend_settings', 'seaql_migrations')",
         ))
@@ -350,7 +350,7 @@ async fn every_curation_before_encoding_7_is_dropped_with_every_view() {
         "SELECT project || ':' || name FROM curated_views ORDER BY project, name",
     ] {
         let rows = connection
-            .query_all(Statement::from_string(DbBackend::Sqlite, sql))
+            .query_all_raw(Statement::from_string(DbBackend::Sqlite, sql))
             .await
             .unwrap();
         left.push(
@@ -387,7 +387,7 @@ async fn episode_numbers_drop_older_curations_and_what_was_kept_per_dataset() {
         "SELECT dataset FROM dataset_joint_roles",
     ] {
         let rows = connection
-            .query_all(Statement::from_string(DbBackend::Sqlite, sql))
+            .query_all_raw(Statement::from_string(DbBackend::Sqlite, sql))
             .await
             .unwrap();
         left.push(
@@ -426,7 +426,7 @@ async fn training_runs_name_their_dataset_by_id() {
         "SELECT CAST((SELECT count(*) FROM dataset_robots) + (SELECT count(*) FROM dataset_joint_roles) AS TEXT)",
     ] {
         let rows = connection
-            .query_all(Statement::from_string(DbBackend::Sqlite, sql))
+            .query_all_raw(Statement::from_string(DbBackend::Sqlite, sql))
             .await
             .unwrap();
         read.extend(
@@ -483,7 +483,7 @@ async fn runs_recorded_before_model_families_become_act_runs() {
         .connection()
         .await
         .unwrap()
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             DbBackend::Sqlite,
             "SELECT document FROM training_runs WHERE id = 'train-1'",
         ))

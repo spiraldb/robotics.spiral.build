@@ -97,7 +97,7 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
     let snapshot = StudioSnapshot::capture(&source).await.unwrap();
     let tokens = snapshot
         .database
-        .query_one(sea_orm::Statement::from_string(
+        .query_one_raw(sea_orm::Statement::from_string(
             sea_orm::DbBackend::Sqlite,
             "SELECT count(*) AS count FROM robot_connector_tokens",
         ))

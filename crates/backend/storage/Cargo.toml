@@ -35,14 +35,14 @@ parquet = "59.2.0"
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde.workspace = true
 serde_json.workspace = true
-sea-orm = { version = "=1.1.20", default-features = false, features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros", "with-json"] }
-sea-orm-migration = { version = "=1.1.20", default-features = false, features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
+sea-orm = { version = "2", default-features = false, features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros", "with-json"] }
+sea-orm-migration = { version = "2", default-features = false, features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
 sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "process", "fs", "io-util"] }
 tracing = "0.1"
 url = "2"
 uuid = { version = "1", features = ["v4", "v7"] }
-zip = { version = "4.6.1", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 tempfile.workspace = true
 mcap = "0.25"
 prost = "0.14"

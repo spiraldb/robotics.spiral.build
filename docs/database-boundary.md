@@ -10,39 +10,26 @@ Storage features depend on `Database`, `DatabaseSession`,
 
 ## Spiral's SDK
 
-`SpiralSdkDatabase` reaches Spiral through `spiral-sdk` (library `spiral`) and
-`spiral-datafusion`, Git dependencies on a Rust SDK release of the private
-SpiralDB repository: the `rust-sdk/X.Y.Z` tag the workspace `Cargo.toml`
-names. Spiral's hosted services deploy from `develop`, so keep the release
-recent: an older SDK can lose a service endpoint, which surfaces as a catalog
-request failing with `401 Unauthorized` on every commit. Cargo fetches it with
-the system's git and its credentials (`.cargo/config.toml`); CI loads the
-read-only `SPIRALDB_DEPLOY_KEY` first.
+`SpiralSdkDatabase` reaches Spiral through the published `spiral-sdk` (library
+`spiral`) and `spiral-datafusion` releases pinned together in `Cargo.toml`.
 
-The SDK reads and writes through Spiral's ScanDAL runtime, linked into Studio
-at build time from the release's prebuilt static archive (`spiral-scandal-sys`).
-Each target's archive is an asset of the release's private GitHub
-pre-release, and the release commit records its SHA-256.
-`scripts/setup-spiral-sdk.sh` runs the release's own setup script from Cargo's
-checkout of the tag. That script downloads the host's archive (or
-`--target`'s) with `GH_TOKEN`, `GITHUB_TOKEN` or your `gh` login, any of which
-must read spiraldb/spiraldb, verifies it, and installs it under
-`~/.cache/spiral/scandal/<version>/<target>` (`SPIRAL_SCANDAL_CACHE_DIR`
-replaces `~/.cache/spiral/scandal`), where the build links it from. The default
-Nix shell runs it on entry when the locked release's archive is missing;
-otherwise run it once per release:
+The SDK reads and writes through libspiral, linked into Studio from the release's
+prebuilt static archive. `scripts/setup-spiral-sdk.sh` runs the SDK's packaged
+setup script, which downloads the public archive, verifies its SHA-256 and ABI,
+and caches it under `~/.cache/spiral/native/<source-sha>/<target>`.
+`SPIRAL_NATIVE_CACHE_DIR` overrides the cache root. The default Nix shell runs
+setup on entry; outside it, run:
 
 ```sh
 scripts/setup-spiral-sdk.sh
 ```
 
-CI runs it with the `SPIRAL_SDK_TOKEN` secret, a token with contents read
-access to spiraldb/spiraldb, and it exports `SPIRAL_SCANDAL_NATIVE_DIR`; the
-hosted image builds with `nix build --impure`, which reads the archive from
-that directory.
+CI's setup exports `SPIRAL_NATIVE_DIR`; the hosted image builds with
+`nix build --impure` to read the archive from that directory. No private
+repository credentials are required for the published SDK or runtime.
 
-To move to another release, change both dependencies' tag in `Cargo.toml`,
-update `Cargo.lock` (`cargo fetch`), and run `scripts/setup-spiral-sdk.sh`.
+To move to another release, change both dependencies' versions in `Cargo.toml`,
+update `Cargo.lock` and run `scripts/setup-spiral-sdk.sh`.
 
 Every request authenticates with the signed-in user's token as Studio holds it
 when the request is made, so long work outlives each short-lived token.
@@ -69,13 +56,14 @@ name.
   change per table in a transaction. Schema inspection in a transaction sees
   what it holds before what is committed; statements see only what is
   committed.
-- An autocommit write is made on top of `main` as it is then; a transaction's
-  commit on top of the commit it began on. When another writer has moved
-  `main` in between, nothing is published and the write fails with
-  `Conflict`, so what a transaction wrote from what it read (an episode's
-  number, a dataset's topic counts) never races another writer. Studio
-  serializes the writers of one session's project (`connect_exclusive`);
-  another session or process writing the same project at once can conflict.
+- An autocommit write pins `main` when it starts; a transaction pins it when
+  it begins. Spiral validates the original versions of the tables it writes
+  and the names it binds, publishing all changes atomically or returning
+  `Conflict`. Episode numbering and topic counts read tables they also write,
+  so competing writers cannot publish stale values. Unrelated table changes
+  may commit concurrently. Reads of other tables are not automatically checked
+  at commit. Studio serializes writers within one session's project
+  (`connect_exclusive`); other sessions and processes use Spiral's conflict checks.
 
 The SDK keeps no disk cache: every read fetches its data from SPFS. Reading one
 episode's first 30 camera packets takes about 3–5 s each time, where the ADBC

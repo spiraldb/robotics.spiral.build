@@ -3,16 +3,15 @@
 //! The SDK reads and writes through Spiral's ScanDAL runtime, linked into
 //! Studio from the native archive of the SDK release `Cargo.toml` names.
 
-use std::backtrace::Backtrace;
 use std::sync::{Arc, Mutex};
 
 use arrow_schema::Schema;
 use datafusion::catalog::TableProvider as _;
 use datafusion::prelude::SessionConfig;
 use futures::FutureExt as _;
-use spiral::auth::{CredentialError, Token};
+use spiral::auth::{CredentialError, Token, TokenSource};
 use spiral::resources::catalog_types::ProjectCommitId;
-use spiral::{Client, CommitOutcome, NativeScandal, ScandalConfig};
+use spiral::{Client, PublishError, ScandalConfig};
 use spiral_datafusion::{SpiralCatalogProvider, SpiralTableProvider};
 use tokio::sync::OnceCell;
 
@@ -88,14 +87,12 @@ impl SpiralProject {
             .ok_or_else(|| DatabaseError::invalid_input("Select a Spiral project"))?
             .to_owned();
         let access = connection.access().clone();
-        let tokens = spiral::auth::auth_token_provider_fn(move || {
+        let tokens = TokenSource::new(move || {
             let token = access.token();
             async move {
                 token
                     .map(|token| Some(Token::from(token)))
-                    .map_err(|message| {
-                        CredentialError::InvalidArgument(message.into(), Backtrace::capture())
-                    })
+                    .map_err(CredentialError::invalid)
             }
             .boxed()
         });
@@ -110,13 +107,12 @@ impl SpiralProject {
             local_files: false,
             provider_roots: false,
             refuse_custom_endpoints: false,
+            ..ScandalConfig::default()
         };
-        let scandal = NativeScandal::new(&storage)
-            .map_err(|error| DatabaseError::from_spiral(error.into()))?;
         let client = Client::builder()
             .api_url(settings.endpoint())
-            .auth_token_provider(tokens)
-            .scandal(Arc::new(scandal))
+            .token_source(tokens)
+            .embedded_scandal(storage)
             .build()
             .map_err(DatabaseError::from_spiral)?;
         Ok(Self {
@@ -180,62 +176,71 @@ impl SpiralProject {
         Ok(Some(provider.schema()))
     }
 
-    async fn snapshot(&self) -> DatabaseResult<spiral::Snapshot> {
+    async fn snapshot(&self) -> DatabaseResult<spiral::BranchHead> {
         self.project
-            .snapshot(Self::BRANCH)
+            .branch(Self::BRANCH)
             .await
             .map_err(DatabaseError::from_spiral)
     }
 
-    /// Publish `writes` in one commit on top of `snapshot`. When `main` has
-    /// moved past it, what the writes were made from may be stale, so nothing
-    /// is published.
+    /// Publish `writes` atomically from the pinned head. Spiral rejects changes
+    /// to tables or names these writes depend on, while unrelated writes may commit.
     async fn publish(
         &self,
-        snapshot: &spiral::Snapshot,
+        snapshot: &spiral::BranchHead,
         writes: StagedWrites,
     ) -> DatabaseResult<ExecutionSummary> {
         if writes.is_empty() {
             return Ok(ExecutionSummary);
         }
-        let mut transaction = snapshot.transaction().map_err(DatabaseError::from_spiral)?;
+        let mut transaction = snapshot.commit();
         // Writes that change nothing (no rows to add, a drop of a missing
         // table) stage nothing, and Spiral refuses to commit nothing.
         let mut changes = 0;
         for (relation, write) in writes.into_writes() {
             let existing = self.table(snapshot, &relation).await?;
-            let staged = match (write, existing) {
-                (StagedWrite::Append(rows), Some(_)) if rows.is_empty() => Ok(false),
-                (StagedWrite::Append(rows), Some(table)) => transaction
-                    .append(&table, rows.into_parts())
-                    .await
-                    .map(|_| true),
-                (StagedWrite::Replace(rows), Some(table)) => transaction
-                    .overwrite(&table, rows.into_parts())
-                    .await
-                    .map(|_| true),
-                (StagedWrite::Append(rows) | StagedWrite::Replace(rows), None) => transaction
-                    .create_table(relation.as_str(), rows.into_parts())
-                    .await
-                    .map(|_| true),
-                (StagedWrite::Drop, None) => Ok(false),
-                (StagedWrite::Drop, Some(table)) => transaction.drop_table(&table).map(|()| true),
-            };
-            changes += usize::from(staged.map_err(DatabaseError::from_spiral)?);
+            match (write, existing) {
+                (StagedWrite::Append(rows), Some(_)) if rows.is_empty() => continue,
+                (StagedWrite::Append(rows), Some(table)) => {
+                    let table = table
+                        .append(rows.into_parts())
+                        .await
+                        .map_err(DatabaseError::from_spiral)?;
+                    transaction.update_table(&table)
+                }
+                (StagedWrite::Replace(rows), Some(table)) => {
+                    let table = table
+                        .overwrite(rows.into_parts())
+                        .await
+                        .map_err(DatabaseError::from_spiral)?;
+                    transaction.update_table(&table)
+                }
+                (StagedWrite::Append(rows) | StagedWrite::Replace(rows), None) => {
+                    let table = self
+                        .project
+                        .write_table(rows.into_parts())
+                        .await
+                        .map_err(DatabaseError::from_spiral)?;
+                    transaction.create_table(relation.as_str(), &table)
+                }
+                (StagedWrite::Drop, None) => continue,
+                (StagedWrite::Drop, Some(table)) => transaction.drop_table(&table),
+            }
+            .map_err(DatabaseError::from_spiral)?;
+            changes += 1;
         }
         if changes == 0 {
             return Ok(ExecutionSummary);
         }
-        match transaction
-            .commit()
-            .await
-            .map_err(DatabaseError::from_spiral)?
-        {
-            CommitOutcome::Committed(_) => Ok(ExecutionSummary),
-            CommitOutcome::Conflict(_) => Err(DatabaseError::new(
-                DatabaseErrorKind::Conflict,
-                "the Spiral project changed while writing; nothing was written",
-            )),
+        match transaction.publish().await {
+            Ok(_) => Ok(ExecutionSummary),
+            Err(PublishError::BranchMoved { .. } | PublishError::Conflict(_)) => {
+                Err(DatabaseError::new(
+                    DatabaseErrorKind::Conflict,
+                    "a Spiral table or name changed while writing; nothing was published",
+                ))
+            }
+            Err(error) => Err(DatabaseError::from_spiral(error.into())),
         }
     }
 }
@@ -304,11 +309,11 @@ impl DatabaseConnection for SpiralSdkConnection {
 }
 
 /// A transaction: it reads `main` as it was when it began, holds its writes,
-/// and publishes them in one commit only if `main` has not moved since, so
-/// what it wrote from what it read cannot race another writer.
+/// and publishes them atomically if their tables and names have not changed.
+/// Reads of other tables do not become commit dependencies automatically.
 struct SpiralSdkTransaction {
     project: SpiralProject,
-    snapshot: spiral::Snapshot,
+    snapshot: spiral::BranchHead,
     writes: StagedWrites,
 }
 

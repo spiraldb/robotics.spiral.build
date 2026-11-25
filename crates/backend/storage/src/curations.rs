@@ -100,7 +100,7 @@ impl<'a> CurationPersistence<'a> {
                     .do_nothing()
                     .to_owned(),
                 )
-                .do_nothing()
+                .try_insert()
                 .exec(database)
                 .await
                 .map_err(|error| error.to_string())?;
