@@ -7395,9 +7395,9 @@ dependencies = [
 
 [[package]]
 name = "spiral-auth"
-version = "0.1.16"
+version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1375d16d9917ce2e0c9a1db9b17b9ee0c040d2177cf10af9fdbf349e7cd9fb02"
+checksum = "7cfc26190a4d369e3e32193962755974c8964ac21099b444c2032b417050614d"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -7419,9 +7419,9 @@ dependencies = [
 
 [[package]]
 name = "spiral-contract"
-version = "0.1.16"
+version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3f16ee35f304112404657a47672c437665bce3192472da8c5e5512089e4b520"
+checksum = "47455f56d63d18e8f8aa153da9e49ecc34c48be1b88dd00f17bf9c942ac45ee8"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -7445,9 +7445,9 @@ dependencies = [
 
 [[package]]
 name = "spiral-datafusion"
-version = "0.1.16"
+version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f02d454c5af404e6b018565524995dab67f447593879081ce97f0eaad496d306"
+checksum = "d8d62695ca72e0206da586a8f0dd1c2a4101771c0369c1f2d3320c535d0b62fe"
 dependencies = [
  "arrow-ipc",
  "async-trait",
@@ -7690,9 +7690,9 @@ dependencies = [
 
 [[package]]
 name = "spiral-sdk"
-version = "0.1.16"
+version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43bc2ed27fb3d5bbd62b44124ca195e18ac2b2afb50df29d7ac5fe175bcaa949"
+checksum = "b5ea5611f3517f76edf492cbf0a336273f151dfc0c31c7085b954aac7c177403"
 dependencies = [
  "arrow-array 59.3.2",
  "arrow-ipc",
@@ -7718,6 +7718,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "web-time",
 ]
 
 [[package]]
